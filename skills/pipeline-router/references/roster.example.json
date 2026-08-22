@@ -1,0 +1,47 @@
+{
+  "_comment": "EXEMPLE de roster — la politique appartient au projet consommateur, jamais au plugin. Copier vers le dépôt du projet (roster.json), déclarer le chemin dans ORCHESTRATOR_ROSTER, et adapter le casting.",
+  "agents": [
+    {
+      "name": "claude",
+      "provider": "Anthropic (Claude Code)",
+      "cost_model": "flat",
+      "specialties": ["architecture", "sécurité", "revue", "design", "intégration"],
+      "context_window": 200000,
+      "notes": "Raisonnement haut niveau : code critique, design patterns, revue finale."
+    },
+    {
+      "name": "kimi",
+      "provider": "Moonshot (abonnement)",
+      "cost_model": "flat",
+      "specialties": ["test", "parallèle", "refactor", "qa"],
+      "context_window": 262144,
+      "notes": "Parallélisation (swarm) : suites de tests, refactoring de masse."
+    },
+    {
+      "name": "deepseek",
+      "provider": "DeepSeek (crédits)",
+      "cost_model": "credits",
+      "budget_cap_usd": 34,
+      "fallback": "qwen-local",
+      "specialties": ["format", "json", "parse", "triage", "mock"],
+      "context_window": 131072,
+      "notes": "Coût ultra-faible au token : parsing, formatage, triage, mocks."
+    },
+    {
+      "name": "gemini",
+      "provider": "Google",
+      "cost_model": "credits",
+      "specialties": ["ingérer", "documentation", "multimodal", "logs"],
+      "context_window": 1048576,
+      "notes": "Fenêtre massive : ingestion de dépôts entiers, PDF et journaux volumineux."
+    },
+    {
+      "name": "qwen-local",
+      "provider": "ollama (qwen3-coder:30b)",
+      "cost_model": "local",
+      "specialties": ["code", "test"],
+      "context_window": 262144,
+      "notes": "Repli gratuit et confidentiel — qualité sous les modèles frontière, à relire systématiquement."
+    }
+  ]
+}

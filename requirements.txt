@@ -1,0 +1,2 @@
+# SDK MCP (wrapper server.py uniquement — le cœur store.py n'en dépend pas).
+mcp
