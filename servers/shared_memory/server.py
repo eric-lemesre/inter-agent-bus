@@ -4,11 +4,34 @@ Protocol: MCP over stdio (SDK >= 2.0). Every agent client spawns its own
 instance of this server; sharing happens through the common SQLite database
 (see store.py, ORCHESTRATOR_DB env var). This file holds NO state logic.
 """
-from mcp.server.mcpserver import MCPServer
+import json
+import os
+
+from mcp.server.mcpserver import Context, MCPServer
 
 import store
 
 mcp = MCPServer("SharedOrchestratorMemory")
+
+
+@mcp.tool()
+def whoami(ctx: Context) -> str:
+    """Identity hints of the connected client, so a worker can find its own roster entry: ORCHESTRATOR_AGENT_NAME env var when the launcher set one (authoritative), otherwise the MCP clientInfo sent at the handshake (to match against the roster's client_hints)."""
+    forced = os.environ.get("ORCHESTRATOR_AGENT_NAME")
+    if forced:
+        return json.dumps({"source": "env", "agent_name": forced})
+    params = ctx.session.client_params
+    if params is None or params.client_info is None:
+        return json.dumps({"source": "none"})
+    info = params.client_info
+    return json.dumps(
+        {
+            "source": "client_info",
+            "name": info.name,
+            "title": info.title,
+            "version": info.version,
+        }
+    )
 
 
 @mcp.tool()

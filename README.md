@@ -68,5 +68,12 @@ given by the operator.
 
 ## MCP tools
 
+`whoami` (identity of the connected client: `ORCHESTRATOR_AGENT_NAME` env
+var if the launcher or the MCP registration set one, otherwise the MCP
+handshake's clientInfo, to match against the roster's `client_hints`) ·
 `register_agent` · `push_task` · `claim_task` · `publish_result`
 (settles the task) · `read_result` · `get_system_state`.
+
+Identity note: baking `ORCHESTRATOR_AGENT_NAME` into each client's MCP
+registration (`env` field) is the reliable way to give every worker its
+identity — some clients announce only a generic SDK name in clientInfo.

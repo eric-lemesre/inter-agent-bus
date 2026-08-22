@@ -15,14 +15,29 @@ roster, never of the plugin.
 
 ## Identity
 
-The operator states which agent this session embodies (e.g. "you are
-`kimi`"). That name must match an entry of the project's roster (path in
-the `ORCHESTRATOR_ROSTER` env var, otherwise `roster.json` at the project
-root). If no identity was given, ask — never guess one, and never invent
-a name absent from the roster: tasks are routed by name, a mismatched
-worker starves its queue. Read your own roster entry: it carries your
-`specialties`, an optional `budget_cap_usd` and `fallback`, and `notes` that
-may constrain how you work.
+Resolve which agent this session embodies, in this order — the name must
+always match an entry of the project's roster (path in the
+`ORCHESTRATOR_ROSTER` env var, otherwise `roster.json` at the project
+root):
+
+1. **The operator said so** ("you are `kimi`") — an explicit statement
+   always wins.
+2. **Ask the bus**: call `whoami()`. A `source: env` answer is
+   authoritative — the launcher or the client's MCP registration set
+   `ORCHESTRATOR_AGENT_NAME`; use that `agent_name` as is.
+3. **Match the client**: a `source: client_info` answer gives the MCP
+   client's name — compare it (case-insensitive substrings) against the
+   `client_hints` arrays of the roster entries. Exactly one match → that
+   is you. Beware: some clients announce a generic SDK name (e.g. `mcp`),
+   which matches nothing — that is expected, fall through.
+4. **Otherwise ask the operator**, reporting what `whoami()` returned so
+   the roster's `client_hints` or the client's registration can be fixed.
+   Never guess, and never invent a name absent from the roster: tasks are
+   routed by name, a mismatched worker starves its queue.
+
+Then read your own roster entry: it carries your `specialties`, an
+optional `budget_cap_usd` and `fallback`, and `notes` that may constrain
+how you work.
 
 ## The loop
 

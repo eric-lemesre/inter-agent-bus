@@ -5,6 +5,7 @@
       "name": "claude",
       "provider": "Anthropic (Claude Code)",
       "cost_model": "flat",
+      "client_hints": ["claude"],
       "specialties": ["architecture", "security", "review", "design", "integration"],
       "context_window": 200000,
       "notes": "High-level reasoning: critical code, design patterns, final review."
@@ -13,6 +14,7 @@
       "name": "kimi",
       "provider": "Moonshot (subscription)",
       "cost_model": "flat",
+      "client_hints": ["kimi"],
       "specialties": ["test", "parallel", "refactor", "qa"],
       "context_window": 262144,
       "notes": "Parallelization (swarm): test suites, large-scale refactoring."
@@ -23,6 +25,7 @@
       "cost_model": "credits",
       "budget_cap_usd": 34,
       "fallback": "qwen-local",
+      "client_hints": ["deepseek", "codewhale"],
       "specialties": ["format", "json", "parse", "triage", "mock"],
       "context_window": 131072,
       "notes": "Ultra-low per-token cost: parsing, formatting, triage, mocks."

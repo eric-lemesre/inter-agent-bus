@@ -70,5 +70,13 @@ l'opérateur.
 
 ## Outils MCP
 
+`whoami` (identité du client connecté : variable `ORCHESTRATOR_AGENT_NAME`
+si le lanceur ou l'enregistrement MCP l'a posée, sinon le clientInfo du
+handshake MCP, à confronter aux `client_hints` du roster) ·
 `register_agent` · `push_task` · `claim_task` · `publish_result`
 (solde la tâche) · `read_result` · `get_system_state`.
+
+Note d'identité : graver `ORCHESTRATOR_AGENT_NAME` dans l'enregistrement
+MCP de chaque client (champ `env`) est le moyen fiable de donner son
+identité à chaque worker — certains clients n'annoncent qu'un nom de SDK
+générique dans le clientInfo.
