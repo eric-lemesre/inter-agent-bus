@@ -1,39 +1,57 @@
 # multi-agent-orchestrator
 
-Plugin **[Agent Plugins](https://agent-plugins.org/) v1.0.0** : bus de
-coordination entre agents IA hétérogènes (Claude Code, Kimi, DeepSeek,
-locaux…). Le plugin fournit le **mécanisme** — files de tâches avec bail
-(claim/ack), dépôt de résultats, état observable — et **jamais le casting** :
-les agents et leurs rôles sont déclarés par le projet consommateur dans son
-roster.
+🇬🇧 English · 🇫🇷 [Français](README.fr.md)
 
-## Architecture
+An **[Agent Plugins](https://agent-plugins.org/) v1.0.0** plugin: a
+coordination bus between heterogeneous AI agents (Claude Code, Kimi,
+DeepSeek, local models…). The plugin provides the **mechanism** — task
+queues with leases (claim/ack), a shared result store, an observable
+state — and **never the cast**: agents and their roles are declared by the
+consuming project in its roster.
 
-- `servers/shared_memory/` — serveur MCP stdio. **Chaque client d'agents
-  lance sa propre instance** : l'état vit dans une base **SQLite commune**
-  (`store.py`, mode WAL), pas en mémoire du processus. Chemin :
-  `ORCHESTRATOR_DB`, sinon `~/.local/share/multi-agent-orchestrator/orchestrator.db`.
-  (`PLUGIN_DATA` ne convient pas : géré *par client*, donc invisible des
-  autres agents.)
-- `skills/pipeline-router/` — skill de routage : règles universelles
-  (le volume aux forfaits, la masse au moins cher, le critique au meilleur
-  raisonneur, jamais d'auto-revue), roster en entrée.
-- Cycle d'une tâche : `queued → claimed (bail) → done`. Un bail expiré
-  re-propose la tâche : un agent qui meurt après `claim_task` ne la perd pas.
+## Transport vs shared state — two layers, one bus
 
-## Mise en place
+These are different layers, and both are true at once:
+
+- **stdio is the transport**: each agent client spawns **its own instance**
+  of the MCP server (that is how stdio servers work — one subprocess per
+  client). Nothing is shared at this layer.
+- **SQLite is the bus**: all server instances read and write the **same
+  database** (WAL mode, immediate transactions). *This* is where sharing
+  happens.
+
+The zero-daemon alternative would be a single `streamable-http` server that
+*is* the memory — but someone must start, supervise and secure that daemon.
+For a local multi-CLI setup, stdio + a SQLite bus wins.
+
+Database path: `ORCHESTRATOR_DB` env var, default
+`~/.local/share/multi-agent-orchestrator/orchestrator.db`. (`PLUGIN_DATA`
+does not fit as the bus: the spec defines it *per client*, hence invisible
+to the other agents.)
+
+## Components
+
+- `servers/shared_memory/` — the MCP server (`server.py`, thin wrapper) and
+  the storage core (`store.py`, no MCP dependency, testable standalone).
+  Task lifecycle: `queued → claimed (lease) → done`; an expired lease
+  re-offers the task, so an agent dying after `claim_task` does not lose it.
+- `skills/pipeline-router/` — routing skill: universal rules (volume to
+  flat-rate agents, bulk to the cheapest per token, critical work to the
+  strongest reasoner, never self-review), roster as input.
+
+## Setup
 
 ```bash
-pip install -r requirements.txt          # SDK MCP (le cœur s'en passe)
-python3 servers/shared_memory/store_test.py   # tests, dont le partage inter-processus
+pip install -r requirements.txt               # MCP SDK (the core does not need it)
+python3 servers/shared_memory/store_test.py   # tests, incl. cross-process sharing
 ```
 
-Côté projet consommateur : copier
-`skills/pipeline-router/references/roster.example.json` en `roster.json`,
-adapter le casting, déclarer `ORCHESTRATOR_ROSTER` (et `ORCHESTRATOR_DB` si
-le chemin par défaut ne convient pas).
+Consumer project side: copy
+`skills/pipeline-router/references/roster.example.json` to `roster.json`,
+adapt the cast, set `ORCHESTRATOR_ROSTER` (and `ORCHESTRATOR_DB` if the
+default path does not suit).
 
-## Outils MCP
+## MCP tools
 
 `register_agent` · `push_task` · `claim_task` · `publish_result`
-(solde la tâche) · `read_result` · `get_system_state`.
+(settles the task) · `read_result` · `get_system_state`.

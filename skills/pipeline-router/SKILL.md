@@ -1,62 +1,63 @@
 ---
 name: pipeline-router
-description: Décomposer une demande en sous-tâches et les router vers les agents du roster déclaré par le projet, selon des règles coût/capacité universelles — à utiliser pour orchestrer plusieurs agents IA via le bus partagé (push_task/claim_task/publish_result).
+description: Break a request down into subtasks and route them to the agents declared in the project's roster, using universal cost/capability rules — use when orchestrating several AI agents through the shared bus (push_task/claim_task/publish_result).
 ---
 
 # Pipeline Router
 
-## Rôle
+## Role
 
-Analyser une demande ou un ticket, la subdiviser en sous-tâches, et assigner
-chaque sous-tâche à l'agent **du roster du projet** le mieux placé. Cette
-skill ne connaît **aucun agent par avance** : le casting est une politique du
-projet consommateur, jamais du plugin.
+Analyze a request or an engineering ticket, split it into subtasks, and
+assign each subtask to the best-placed agent **from the project's roster**.
+This skill knows **no agent in advance**: the cast is a policy of the
+consuming project, never of the plugin.
 
-## Le roster
+## The roster
 
-Le projet déclare ses agents dans un fichier de roster (chemin dans la
-variable `ORCHESTRATOR_ROSTER`, sinon `roster.json` à la racine du projet).
-Chaque entrée décrit : `name`, `provider`, `cost_model`
-(`flat` = forfait, `credits` = au token, `local` = gratuit), `budget_cap`
-éventuel, `specialties` (mots-clés de capacités), `context_window`, `notes`.
-Un exemple complet : [`references/roster.example.json`](references/roster.example.json).
+The project declares its agents in a roster file (path in the
+`ORCHESTRATOR_ROSTER` env var, otherwise `roster.json` at the project root).
+Each entry describes: `name`, `provider`, `cost_model` (`flat` =
+subscription, `credits` = per token, `local` = free), an optional
+`budget_cap`, `specialties` (capability keywords), `context_window`,
+`notes`. Full example:
+[`references/roster.example.json`](references/roster.example.json).
 
-Avant tout routage : lire le roster, puis `register_agent(name, description)`
-pour chaque agent afin de créer les files.
+Before any routing: read the roster, then call
+`register_agent(name, description)` for each agent to create the queues.
 
-## Règles de routage universelles
+## Universal routing rules
 
-1. **Le volume va aux forfaits** (`cost_model: flat`) : leur coût marginal est
-   nul — génération de masse, refactoring large, suites de tests.
-2. **Le traitement de masse économe va au moins cher au token**
-   (`credits` à bas prix, ou `local`) : parsing, formatage, triage, mocks.
-3. **Le critique va au meilleur raisonneur** : architecture, code de
-   sécurité, revue finale — indépendamment du coût.
-4. **Jamais d'auto-revue** : l'agent qui relit une production est toujours
-   différent de celui qui l'a écrite.
-5. **Respecter les plafonds** : un agent à `budget_cap` proche de l'épuisement
-   bascule ses tâches vers l'agent de repli déclaré (`fallback` du roster).
-6. **Les très longs contextes vont aux grandes fenêtres** (`context_window`) :
-   ingestion de dépôts entiers, journaux volumineux, spécifications longues.
+1. **Volume goes to flat-rate agents** (`cost_model: flat`): their marginal
+   cost is zero — bulk generation, large refactoring, test suites.
+2. **Cheap bulk goes to the lowest per-token cost** (`credits` at low price,
+   or `local`): parsing, formatting, triage, mocks.
+3. **Critical work goes to the strongest reasoner**: architecture, security
+   code, final review — regardless of cost.
+4. **Never self-review**: the agent reviewing a piece of work is always
+   different from the one that produced it.
+5. **Respect budget caps**: an agent close to exhausting its `budget_cap`
+   hands its tasks over to its declared `fallback` agent.
+6. **Very long contexts go to large windows** (`context_window`): ingesting
+   whole repositories, bulky logs, long specifications.
 
-## Workflow d'exécution
+## Execution workflow
 
-1. Lire le roster ; `register_agent(...)` pour chaque agent.
-2. Décomposer la demande en sous-tâches à **contrat fermé** (entrées, sorties,
-   critères d'acceptation).
-3. Pour chaque sous-tâche : choisir l'agent par les règles ci-dessus, puis
-   `push_task(target_agent=..., task_id=..., payload=<contrat>, priority=...)`.
-4. Chaque agent travaille en boucle : `claim_task(agent_name=...)` →
-   exécution → `publish_result(...)` (le résultat solde la tâche ; un bail
-   expiré la re-propose automatiquement).
-5. Les dépendances se résolvent par `read_result(task_id)` — une sous-tâche
-   aval référence dans son payload les `task_id` amont dont elle a besoin.
-6. Superviser avec `get_system_state()` ; router les revues croisées en
-   appliquant la règle 4.
+1. Read the roster; `register_agent(...)` for each agent.
+2. Split the request into **closed-contract** subtasks (inputs, outputs,
+   acceptance criteria).
+3. For each subtask: pick the agent using the rules above, then
+   `push_task(target_agent=..., task_id=..., payload=<contract>, priority=...)`.
+4. Each agent loops: `claim_task(agent_name=...)` → execution →
+   `publish_result(...)` (publishing settles the task; an expired lease
+   re-offers it automatically).
+5. Dependencies resolve through `read_result(task_id)` — a downstream
+   subtask references in its payload the upstream `task_id`s it needs.
+6. Supervise with `get_system_state()`; route cross-reviews by applying
+   rule 4.
 
-## Aide au routage hors session
+## Routing helper outside a session
 
-[`scripts/router.py`](scripts/router.py) propose un routage heuristique à
-partir du roster : `python3 scripts/router.py <roster.json> "<description>"`.
-C'est un dépannage pour scripts et hooks — en session, c'est l'agent
-orchestrateur qui route, avec les règles ci-dessus.
+[`scripts/router.py`](scripts/router.py) offers heuristic routing from the
+roster: `python3 scripts/router.py <roster.json> "<description>"`. It is a
+fallback for scripts and hooks — in session, the orchestrating agent routes
+by itself, using the rules above.
