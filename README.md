@@ -47,9 +47,13 @@ to the other agents.)
 ## Setup
 
 ```bash
-pip install -r requirements.txt               # MCP SDK (the core does not need it)
-python3 servers/shared_memory/store_test.py   # tests, incl. cross-process sharing
+python3 -m venv .venv                              # system pythons are often externally managed
+.venv/bin/pip install -r requirements.txt          # MCP SDK >= 2.0 (the core does not need it)
+.venv/bin/python servers/shared_memory/store_test.py   # tests, incl. cross-process sharing
 ```
+
+Point the clients' `command` to `.venv/bin/python` (absolute path): the
+server must run under an interpreter that has the MCP SDK.
 
 Consumer project side: copy
 `skills/pipeline-router/references/roster.example.json` to `roster.json`,

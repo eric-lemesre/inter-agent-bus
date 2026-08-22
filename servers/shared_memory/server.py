@@ -1,14 +1,14 @@
 """MCP server of the inter-agent bus — thin wrapper over store.py.
 
-Protocol: FastMCP / stdio. Every agent client spawns its own instance of
-this server; sharing happens through the common SQLite database (see
-store.py, ORCHESTRATOR_DB env var). This file holds NO state logic.
+Protocol: MCP over stdio (SDK >= 2.0). Every agent client spawns its own
+instance of this server; sharing happens through the common SQLite database
+(see store.py, ORCHESTRATOR_DB env var). This file holds NO state logic.
 """
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 import store
 
-mcp = FastMCP("SharedOrchestratorMemory")
+mcp = MCPServer("SharedOrchestratorMemory")
 
 
 @mcp.tool()

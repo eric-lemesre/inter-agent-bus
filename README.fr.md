@@ -48,9 +48,13 @@ autres agents.)
 ## Mise en place
 
 ```bash
-pip install -r requirements.txt               # SDK MCP (le cœur s'en passe)
-python3 servers/shared_memory/store_test.py   # tests, dont le partage inter-processus
+python3 -m venv .venv                              # les pythons système sont souvent gérés en externe
+.venv/bin/pip install -r requirements.txt          # SDK MCP >= 2.0 (le cœur s'en passe)
+.venv/bin/python servers/shared_memory/store_test.py   # tests, dont le partage inter-processus
 ```
+
+Pointer le `command` des clients vers `.venv/bin/python` (chemin absolu) :
+le serveur doit tourner sous un interpréteur qui a le SDK MCP.
 
 Côté projet consommateur : copier
 `skills/pipeline-router/references/roster.example.json` en `roster.json`,
