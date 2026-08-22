@@ -18,7 +18,7 @@ The project declares its agents in a roster file (path in the
 `ORCHESTRATOR_ROSTER` env var, otherwise `roster.json` at the project root).
 Each entry describes: `name`, `provider`, `cost_model` (`flat` =
 subscription, `credits` = per token, `local` = free), an optional
-`budget_cap`, `specialties` (capability keywords), `context_window`,
+`budget_cap_usd`, `specialties` (capability keywords), `context_window`,
 `notes`. Full example:
 [`references/roster.example.json`](references/roster.example.json).
 
@@ -35,8 +35,8 @@ Before any routing: read the roster, then call
    code, final review — regardless of cost.
 4. **Never self-review**: the agent reviewing a piece of work is always
    different from the one that produced it.
-5. **Respect budget caps**: an agent close to exhausting its `budget_cap`
-   hands its tasks over to its declared `fallback` agent.
+5. **Respect budget caps**: an agent close to exhausting its
+   `budget_cap_usd` hands its tasks over to its declared `fallback` agent.
 6. **Very long contexts go to large windows** (`context_window`): ingesting
    whole repositories, bulky logs, long specifications.
 

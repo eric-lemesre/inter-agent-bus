@@ -35,9 +35,15 @@ autres agents.)
   cœur de stockage (`store.py`, sans dépendance MCP, testable seul). Cycle
   d'une tâche : `queued → claimed (bail) → done` ; un bail expiré re-propose
   la tâche — un agent qui meurt après `claim_task` ne la perd pas.
-- `skills/pipeline-router/` — skill de routage : règles universelles (le
-  volume aux forfaits, la masse au moins cher au token, le critique au
-  meilleur raisonneur, jamais d'auto-revue), roster en entrée.
+- `skills/pipeline-router/` — skill de routage (côté orchestrateur) :
+  règles universelles (le volume aux forfaits, la masse au moins cher au
+  token, le critique au meilleur raisonneur, jamais d'auto-revue), roster
+  en entrée.
+- `skills/worker-loop/` — skill worker (côté consommateur) :
+  enregistrement sous l'identité donnée par l'opérateur, puis boucle
+  `claim_task` → exécution → `publish_result` ; discipline d'échec
+  (résultats `ERROR:` plutôt que baux expirés en silence, refus
+  d'auto-revue, passage de main à l'épuisement du budget).
 
 ## Mise en place
 
@@ -50,6 +56,13 @@ Côté projet consommateur : copier
 `skills/pipeline-router/references/roster.example.json` en `roster.json`,
 adapter le casting, déclarer `ORCHESTRATOR_ROSTER` (et `ORCHESTRATOR_DB` si
 le chemin par défaut ne convient pas).
+
+Chaque client d'agent enregistre le serveur MCP (avec un client MCP
+générique, utiliser des **chemins absolus** — la convention `cwd` = racine
+du plugin n'engage que les clients qui implémentent la spec Agent
+Plugins). La session qui orchestre utilise `pipeline-router` ; chaque
+session worker utilise `worker-loop` avec une identité donnée par
+l'opérateur.
 
 ## Outils MCP
 

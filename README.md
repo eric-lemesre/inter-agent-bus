@@ -35,9 +35,14 @@ to the other agents.)
   the storage core (`store.py`, no MCP dependency, testable standalone).
   Task lifecycle: `queued → claimed (lease) → done`; an expired lease
   re-offers the task, so an agent dying after `claim_task` does not lose it.
-- `skills/pipeline-router/` — routing skill: universal rules (volume to
-  flat-rate agents, bulk to the cheapest per token, critical work to the
-  strongest reasoner, never self-review), roster as input.
+- `skills/pipeline-router/` — routing skill (orchestrator side): universal
+  rules (volume to flat-rate agents, bulk to the cheapest per token,
+  critical work to the strongest reasoner, never self-review), roster as
+  input.
+- `skills/worker-loop/` — worker skill (consumer side): register under the
+  operator-given identity, then loop `claim_task` → execute →
+  `publish_result`; failure discipline (`ERROR:` results instead of
+  silently expiring leases, self-review refusal, budget-cap handback).
 
 ## Setup
 
@@ -50,6 +55,12 @@ Consumer project side: copy
 `skills/pipeline-router/references/roster.example.json` to `roster.json`,
 adapt the cast, set `ORCHESTRATOR_ROSTER` (and `ORCHESTRATOR_DB` if the
 default path does not suit).
+
+Each agent client registers the MCP server (with generic MCP clients, use
+**absolute paths** — the `cwd` = plugin-root convention only binds clients
+implementing the Agent Plugins spec). The orchestrating session uses
+`pipeline-router`; each worker session uses `worker-loop` with an identity
+given by the operator.
 
 ## MCP tools
 
