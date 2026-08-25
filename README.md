@@ -29,6 +29,9 @@ Database path: `ORCHESTRATOR_DB` env var, default
 does not fit as the bus: the spec defines it *per client*, hence invisible
 to the other agents.)
 
+Planned evolutions and their invariants: [`ROADMAP.md`](ROADMAP.md).
+Contributor rules (human or agent): [`AGENTS.md`](AGENTS.md).
+
 ## Components
 
 - `servers/shared_memory/` — the MCP server (`server.py`, thin wrapper) and

@@ -29,6 +29,9 @@ Chemin de la base : variable `ORCHESTRATOR_DB`, défaut
 convient pas comme bus : la spec le définit *par client*, donc invisible des
 autres agents.)
 
+Évolutions prévues et leurs invariants : [`ROADMAP.fr.md`](ROADMAP.fr.md).
+Règles de contribution (humain ou agent) : [`AGENTS.md`](AGENTS.md).
+
 ## Composants
 
 - `servers/shared_memory/` — le serveur MCP (`server.py`, wrapper fin) et le
