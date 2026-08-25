@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "inter-agent-bus"
-version = "0.9.0"
+version = "0.10.0"
 description = "Coordination bus between heterogeneous AI agents: task queues with claim/ack leases, shared result store (SQLite), roster-driven routing — the mechanism, never the cast."
 readme = "README.md"
 license = { text = "MIT" }
@@ -19,6 +19,7 @@ Repository = "https://github.com/eric-lemesre/inter-agent-bus"
 
 [project.scripts]
 iab = "iab.cli:main"
+iab-server = "iab.server:main"
 
 [tool.setuptools]
 packages = ["iab"]

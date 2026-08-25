@@ -9,7 +9,10 @@ import os
 
 from mcp.server.mcpserver import Context, MCPServer
 
-import store
+try:  # installed package: `iab` maps to this directory (pyproject.toml)
+    from . import store
+except ImportError:  # bare script: python servers/shared_memory/server.py
+    import store
 
 mcp = MCPServer("InterAgentBus")
 
@@ -100,5 +103,11 @@ def get_events(task_id: str = "", agent: str = "", limit: int = 100) -> str:
     return store.get_events(task_id or None, agent or None, limit)
 
 
-if __name__ == "__main__":
+def main() -> None:
+    """Entry point of the `iab-server` console script (pyproject.toml):
+    lets an installed runtime register without any repository path."""
     mcp.run()
+
+
+if __name__ == "__main__":
+    main()

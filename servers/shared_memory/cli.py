@@ -52,8 +52,22 @@ def _whoami() -> str:
 
 
 def _server_config(agent_name: str) -> dict:
-    """MCP registration for this very interpreter and checkout: absolute
-    paths, identity in env — the reliable way to name a worker."""
+    """MCP registration for this very install: the `iab-server` console
+    script next to the interpreter when it exists (an installed runtime —
+    no repository path involved), else the interpreter plus the absolute
+    path of server.py. Identity in env — the reliable way to name a
+    worker."""
+    # No resolve() here: a venv's python is a symlink to the system one,
+    # and resolving it would look for iab-server next to /usr/bin/python.
+    exe = Path(sys.executable).parent / (
+        "iab-server.exe" if os.name == "nt" else "iab-server"
+    )
+    if exe.exists():
+        return {
+            "type": "stdio",
+            "command": str(exe),
+            "env": {"IAB_AGENT_NAME": agent_name},
+        }
     server = Path(__file__).resolve().parent / "server.py"
     return {
         "type": "stdio",

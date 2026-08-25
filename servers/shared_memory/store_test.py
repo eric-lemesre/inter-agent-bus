@@ -125,7 +125,7 @@ with tempfile.TemporaryDirectory() as tmp:
     check("cli install --print emits an absolute stdio registration",
           cfg["type"] == "stdio"
           and Path(cfg["command"]).is_absolute()
-          and Path(cfg["args"][0]).is_absolute()
+          and all(Path(a).is_absolute() for a in cfg.get("args", []))
           and cfg["env"]["IAB_AGENT_NAME"] == "kimi",
           out.stdout + out.stderr)
 
