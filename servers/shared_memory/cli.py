@@ -12,9 +12,13 @@ argument is `-` or omitted: never build shell command lines around them
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import os
+import shutil
+import subprocess
 import sys
+from pathlib import Path
 
 try:  # installed package: `iab` maps to this directory (pyproject.toml)
     from . import store
@@ -40,7 +44,56 @@ def _content(arg: str | None) -> str:
 def _whoami() -> str:
     name = os.environ.get("IAB_AGENT_NAME") or os.environ.get("ORCHESTRATOR_AGENT_NAME")
     return json.dumps(
-        {"source": "env" if name else "none", "agent_name": name, "db": str(store.db_path())}
+        {"source": "env" if name else "none", "agent_name": name,
+         **json.loads(store.db_info())}
+    )
+
+
+def _server_config(agent_name: str) -> dict:
+    """MCP registration for this very interpreter and checkout: absolute
+    paths, identity in env — the reliable way to name a worker."""
+    server = Path(__file__).resolve().parent / "server.py"
+    return {
+        "type": "stdio",
+        "command": sys.executable,
+        "args": [str(server)],
+        "env": {"IAB_AGENT_NAME": agent_name},
+    }
+
+
+def _install(scope: str, agent_name: str, print_only: bool) -> str:
+    config = _server_config(agent_name)
+    blob = json.dumps(config, indent=2)
+    if print_only:
+        return blob
+    if importlib.util.find_spec("mcp") is None:
+        return (
+            "ERROR: this interpreter has no MCP SDK — the registered server "
+            "would not start. Install with: pip install -e '.[server]' "
+            "(or -r requirements.txt), then rerun iab install."
+        )
+    claude = shutil.which("claude")
+    if claude is None:
+        return (
+            "ERROR: `claude` CLI not found. Register the server manually in "
+            f"your client at scope {scope}, under the name 'inter-agent-bus':\n{blob}"
+        )
+    done = subprocess.run(
+        [claude, "mcp", "add-json", "inter-agent-bus", json.dumps(config),
+         "--scope", scope],
+        capture_output=True, text=True,
+    )
+    if done.returncode != 0:
+        return f"ERROR: claude mcp add-json failed:\n{done.stderr or done.stdout}"
+    return (
+        f"OK: MCP server 'inter-agent-bus' registered at {scope} scope "
+        f"(identity: {agent_name}).\n"
+        "A newly added server only loads in the NEXT session — reopen, then "
+        "verify with the whoami() tool (it also shows the resolved bus "
+        "database).\n"
+        "Caveat of a user-scope install: every session of this client shares "
+        "that identity, and each project gets its own bus database unless "
+        "IAB_DB says otherwise."
     )
 
 
@@ -84,6 +137,16 @@ def main(argv: list[str] | None = None) -> int:
 
     sub.add_parser("whoami", help="identity from the environment and the resolved bus database")
 
+    p = sub.add_parser(
+        "install",
+        help="register the MCP server in the client (Claude Code: claude mcp add-json)",
+    )
+    p.add_argument("--scope", choices=["user", "project", "local"], default="user")
+    p.add_argument("--agent-name", default="claude",
+                   help="identity baked into the registration env (default: claude)")
+    p.add_argument("--print", action="store_true", dest="print_only",
+                   help="print the JSON registration instead of applying it")
+
     args = parser.parse_args(argv)
     out = {
         "register": lambda: store.register_agent(args.name, args.description),
@@ -96,6 +159,7 @@ def main(argv: list[str] | None = None) -> int:
         "state": lambda: store.get_system_state(),
         "log": lambda: store.get_events(args.task_id, args.agent, args.limit),
         "whoami": _whoami,
+        "install": lambda: _install(args.scope, args.agent_name, args.print_only),
     }[args.command]()
     print(out)
     return 1 if out.startswith("ERROR") else 0

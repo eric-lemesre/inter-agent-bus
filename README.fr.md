@@ -24,14 +24,18 @@ L'alternative sans base serait un unique serveur `streamable-http` qui
 *serait* la mémoire — mais il faudrait démarrer, superviser et sécuriser ce
 démon. Pour un poste local multi-CLI, stdio + bus SQLite l'emporte.
 
-Chemin de la base : variable `IAB_DB` (l'héritée `ORCHESTRATOR_DB` reste
-honorée), défaut `~/.local/share/inter-agent-bus/bus.db` — une base
-antérieure au renommage (`~/.local/share/multi-agent-orchestrator/`)
-continue d'être utilisée tant que le nouveau défaut n'existe pas.
-`whoami()` renvoie le chemin résolu : un désaccord de rendez-vous entre
-clients se diagnostique en un appel. (`PLUGIN_DATA` ne convient pas
-comme bus : la spec le définit *par client*, donc invisible des autres
-agents.)
+Chemin de la base — ordre de résolution : (1) la variable `IAB_DB`,
+qui fait autorité — la poser par projet au moindre doute (l'héritée
+`ORCHESTRATOR_DB` reste honorée) ; (2) une base globale ou antérieure
+au renommage existante est conservée (migration) ; (3) sinon **une
+base par projet**, dérivée du répertoire de lancement (normalisé par
+realpath) sous le répertoire de données de la plateforme — une
+installation scope user ne doit pas fusionner tous les projets dans un
+seul bus. Tous les participants d'un projet doivent résoudre le même
+chemin : `whoami()` renvoie le chemin résolu, sa source et la clé de
+projet — un désaccord de rendez-vous se diagnostique en un appel.
+(`PLUGIN_DATA` ne convient pas comme bus : la spec le définit *par
+client*, donc invisible des autres agents.)
 
 Évolutions prévues et leurs invariants : [`ROADMAP.fr.md`](ROADMAP.fr.md).
 Règles de contribution (humain ou agent) : [`AGENTS.md`](AGENTS.md).
@@ -67,6 +71,17 @@ omis) est lu sur stdin — ne jamais construire une ligne de commande
 shell autour d'un payload. `iab log [task_id]` restitue le journal des
 transitions (push/claim/expire/publish) ; `iab whoami` affiche
 l'identité issue de l'environnement et le chemin de base résolu.
+
+`iab install --scope user` déclare le serveur MCP au niveau
+utilisateur de Claude Code (via `claude mcp add-json`), avec
+l'interpréteur du venv et le chemin du serveur en absolu et
+`IAB_AGENT_NAME=claude` gravé dans `env` (`--agent-name` pour changer,
+`--print` pour inspecter le JSON sans l'appliquer, `--scope
+project|local` pour des portées plus étroites). Un serveur ajouté ne se
+charge qu'à la *prochaine* session — rouvrir, puis vérifier avec
+`whoami()`. Réserve d'une installation scope user : toutes les
+sessions de ce client partagent l'identité gravée, et chaque projet
+reçoit sa propre base de bus sauf si `IAB_DB` en décide autrement.
 
 Pointer le `command` des clients vers `.venv/bin/python` (chemin absolu) :
 le serveur doit tourner sous un interpréteur qui a le SDK MCP.

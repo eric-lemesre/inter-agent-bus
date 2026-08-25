@@ -118,6 +118,15 @@ with tempfile.TemporaryDirectory() as tmp:
     out = subprocess.run(cli + ["result", "t-missing"], env=os.environ.copy(),
                          capture_output=True, text=True)
     check("cli exits non-zero on ERROR output", out.returncode == 1, str(out.returncode))
+    out = subprocess.run(cli + ["install", "--print", "--agent-name", "kimi"],
+                         env=os.environ.copy(), capture_output=True, text=True)
+    cfg = json.loads(out.stdout)
+    check("cli install --print emits an absolute stdio registration",
+          cfg["type"] == "stdio"
+          and Path(cfg["command"]).is_absolute()
+          and Path(cfg["args"][0]).is_absolute()
+          and cfg["env"]["IAB_AGENT_NAME"] == "kimi",
+          out.stdout + out.stderr)
 
     # Naming migration: legacy ORCHESTRATOR_DB honored, IAB_DB wins over it.
     os.environ["ORCHESTRATOR_DB"] = str(Path(tmp) / "legacy.db")
@@ -126,6 +135,56 @@ with tempfile.TemporaryDirectory() as tmp:
     check("legacy ORCHESTRATOR_DB honored when IAB_DB is unset",
           store.db_path().name == "legacy.db")
     del os.environ["ORCHESTRATOR_DB"]
+
+    # MULTI-PROJECT ISOLATION (no env var): a per-project database is
+    # derived from the working directory. The migration fallbacks are
+    # monkeypatched to absent files so the operator's real bus is never
+    # touched — everything below is path computation only.
+    store.GLOBAL_DB = Path(tmp) / "absent-global.db"
+    store.LEGACY_DB = Path(tmp) / "absent-legacy.db"
+    proj_a = Path(tmp) / "project-a"
+    proj_b = Path(tmp) / "project-b"
+    proj_a.mkdir()
+    proj_b.mkdir()
+    pa, pb = store.db_path(proj_a), store.db_path(proj_b)
+    check("two projects resolve two different databases", pa != pb, f"{pa} == {pb}")
+    check("per-project databases land under projects/", pa.parent.name == "projects")
+    check("the project key is stable across calls",
+          store.project_key(proj_a) == store.project_key(proj_a))
+    if os.name == "posix":
+        link = Path(tmp) / "link-to-a"
+        link.symlink_to(proj_a)
+        check("a symlinked path resolves to the same project",
+              store.project_key(link) == store.project_key(proj_a))
+
+    # Acceptance: two sessions launched from two projects, no env var —
+    # each one resolves its own bus (cwd-based, in child processes).
+    env2 = os.environ.copy()
+    env2["PYTHONPATH"] = str(HERE)
+    probe = (
+        "import store; from pathlib import Path; "
+        f"store.GLOBAL_DB = Path({str(Path(tmp) / 'absent-global.db')!r}); "
+        f"store.LEGACY_DB = Path({str(Path(tmp) / 'absent-legacy.db')!r}); "
+        "print(store.db_path())"
+    )
+    outs = [
+        subprocess.run([sys.executable, "-c", probe], cwd=d, env=env2,
+                       capture_output=True, text=True).stdout.strip()
+        for d in (proj_a, proj_b)
+    ]
+    check("two sessions in two projects resolve distinct buses",
+          outs[0] != outs[1] and all(outs), str(outs))
+
+    # Migration fallbacks: an existing legacy bus is kept, an existing
+    # global bus wins over it, and IAB_DB overrides everything.
+    store.LEGACY_DB.touch()
+    check("an existing pre-rename bus is kept", store.db_path() == store.LEGACY_DB)
+    store.GLOBAL_DB.touch()
+    check("an existing global bus wins over the legacy one",
+          store.db_path() == store.GLOBAL_DB)
+    os.environ["IAB_DB"] = str(Path(tmp) / "explicit.db")
+    check("IAB_DB overrides every fallback", store.db_path().name == "explicit.db")
+    del os.environ["IAB_DB"]
 
 if fail:
     print("store_test: FAIL.")

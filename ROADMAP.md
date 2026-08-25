@@ -65,7 +65,7 @@ event journal that the later phases need to be debuggable.
 Acceptance: `pip install -e .` then `iab --help` works on the three
 platforms; `store_test.py` passes standalone.
 
-## Phase 2 — Control paths (CLI and user-scope install)
+## Phase 2 — Control paths (CLI and user-scope install) — **shipped**
 
 Closes P1 and P0 of the field report.
 
@@ -92,8 +92,7 @@ Closes P1 and P0 of the field report.
   launch `cwd` is only the default, normalized through `realpath`
   (symlinks, relative paths, case-insensitive filesystems on
   macOS/Windows). `whoami()` exposes the resolved database path so a
-  partition is diagnosable in one call (already shipped with the
-  rename).
+  partition is diagnosable in one call (path, source and project key).
 - **Identity honesty**: document that a stdio server inherits the
   *client's* environment, not the project's `.env` — which is why the
   server resolves the project itself — and that every Claude Code

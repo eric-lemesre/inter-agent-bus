@@ -16,14 +16,14 @@ mcp = MCPServer("InterAgentBus")
 
 @mcp.tool()
 def whoami(ctx: Context) -> str:
-    """Identity hints of the connected client, so a worker can find its own roster entry: IAB_AGENT_NAME env var when the launcher set one (authoritative; legacy ORCHESTRATOR_AGENT_NAME honored), otherwise the MCP clientInfo sent at the handshake (to match against the roster's client_hints). Also returns the resolved bus database path, so a rendezvous mismatch between clients is diagnosable in one call."""
-    db = str(store.db_path())
+    """Identity hints of the connected client, so a worker can find its own roster entry: IAB_AGENT_NAME env var when the launcher set one (authoritative; legacy ORCHESTRATOR_AGENT_NAME honored), otherwise the MCP clientInfo sent at the handshake (to match against the roster's client_hints). Also returns the resolved bus database (path, how it was chosen, project key), so a rendezvous mismatch between clients is diagnosable in one call."""
+    bus = json.loads(store.db_info())
     forced = os.environ.get("IAB_AGENT_NAME") or os.environ.get("ORCHESTRATOR_AGENT_NAME")
     if forced:
-        return json.dumps({"source": "env", "agent_name": forced, "db": db})
+        return json.dumps({"source": "env", "agent_name": forced, **bus})
     params = ctx.session.client_params
     if params is None or params.client_info is None:
-        return json.dumps({"source": "none", "db": db})
+        return json.dumps({"source": "none", **bus})
     info = params.client_info
     return json.dumps(
         {
@@ -31,7 +31,7 @@ def whoami(ctx: Context) -> str:
             "name": info.name,
             "title": info.title,
             "version": info.version,
-            "db": db,
+            **bus,
         }
     )
 

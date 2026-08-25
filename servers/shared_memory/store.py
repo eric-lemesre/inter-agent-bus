@@ -6,12 +6,19 @@ Kept separate from the MCP wrapper (server.py) for two reasons:
      (WAL mode, immediate transactions);
   2. the core is testable without the MCP SDK installed (store_test.py).
 
-Database path: IAB_DB env var (legacy ORCHESTRATOR_DB still honored),
-otherwise the platform data directory (XDG on Linux, Application Support
-on macOS, %LOCALAPPDATA% on Windows) — falling back to the pre-rename
-default if that one exists. This path is the cross-client rendezvous
-point — PLUGIN_DATA does not fit: it is managed PER CLIENT, hence
-invisible to the other agents.
+Database path — the cross-client rendezvous point. Resolution order
+(see db_info() for the diagnosis):
+  1. IAB_DB env var (the authority — set it per project);
+  2. legacy ORCHESTRATOR_DB env var;
+  3. an existing pre-isolation global bus (bus.db in the platform data
+     directory), then an existing pre-rename database — migrations;
+  4. otherwise a PER-PROJECT database derived from the process working
+     directory (realpath-normalized): a user-scope install must not
+     merge every project into one bus (task_id collisions, mixed
+     state). All participants of one project must resolve the same
+     path — whoami/db_info make a mismatch diagnosable in one call.
+(PLUGIN_DATA does not fit: it is managed PER CLIENT, hence invisible
+to the other agents.)
 
 Task lifecycle: queued → claimed (lease) → done. An expired lease requeues
 the task (attempts + 1): an agent dying after claim no longer loses the
@@ -20,15 +27,17 @@ transition is journaled in the append-only `events` table (get_events).
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import re
 import sqlite3
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 
-def _default_db() -> Path:
+def _data_dir() -> Path:
     """Platform data directory, resolved like platformdirs would (rule:
     no new dependency while three branches suffice)."""
     if sys.platform == "win32":
@@ -37,10 +46,11 @@ def _default_db() -> Path:
         base = Path.home() / "Library/Application Support"
     else:
         base = Path(os.environ.get("XDG_DATA_HOME", str(Path.home() / ".local/share")))
-    return base / "inter-agent-bus" / "bus.db"
+    return base / "inter-agent-bus"
 
 
-DEFAULT_DB = _default_db()
+DATA_DIR = _data_dir()
+GLOBAL_DB = DATA_DIR / "bus.db"
 LEGACY_DB = Path.home() / ".local/share/multi-agent-orchestrator/orchestrator.db"
 
 
@@ -48,16 +58,41 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def db_path() -> Path:
-    """IAB_DB, else legacy ORCHESTRATOR_DB, else the default — reusing a
-    pre-rename database when it exists and the new default does not."""
+def project_key(cwd: str | os.PathLike | None = None) -> str:
+    """Stable per-project key from the working directory: realpath (so
+    symlinks and relative paths converge), case-folded on the platforms
+    whose filesystems are case-insensitive, then slug + short hash."""
+    real = os.path.realpath(cwd if cwd is not None else os.getcwd())
+    normalized = real.lower() if sys.platform in ("win32", "darwin") else real
+    digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:12]
+    slug = re.sub(r"[^A-Za-z0-9_-]+", "-", Path(real).name)[:40] or "root"
+    return f"{slug}-{digest}"
+
+
+def _resolve_db(cwd: str | os.PathLike | None = None) -> tuple[Path, str]:
     for var in ("IAB_DB", "ORCHESTRATOR_DB"):
         value = os.environ.get(var)
         if value:
-            return Path(value)
-    if not DEFAULT_DB.exists() and LEGACY_DB.exists():
-        return LEGACY_DB
-    return DEFAULT_DB
+            return Path(value), f"env:{var}"
+    if GLOBAL_DB.exists():
+        return GLOBAL_DB, "global (pre-isolation bus kept — set IAB_DB to opt out)"
+    if LEGACY_DB.exists():
+        return LEGACY_DB, "legacy (pre-rename bus kept — set IAB_DB to opt out)"
+    return DATA_DIR / "projects" / f"{project_key(cwd)}.db", "project"
+
+
+def db_path(cwd: str | os.PathLike | None = None) -> Path:
+    return _resolve_db(cwd)[0]
+
+
+def db_info() -> str:
+    """Resolved bus database and how it was chosen — the rendezvous
+    diagnosis: participants of one project must all see the same path."""
+    path, source = _resolve_db()
+    return json.dumps(
+        {"db": str(path), "db_source": source, "project_key": project_key()},
+        ensure_ascii=False,
+    )
 
 
 def connect() -> sqlite3.Connection:

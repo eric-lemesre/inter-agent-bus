@@ -24,13 +24,17 @@ The zero-daemon alternative would be a single `streamable-http` server that
 *is* the memory — but someone must start, supervise and secure that daemon.
 For a local multi-CLI setup, stdio + a SQLite bus wins.
 
-Database path: `IAB_DB` env var (legacy `ORCHESTRATOR_DB` still
-honored), default `~/.local/share/inter-agent-bus/bus.db` — an existing
-pre-rename database (`~/.local/share/multi-agent-orchestrator/`) keeps
-being used as long as the new default does not exist. `whoami()` returns
-the resolved path, so a rendezvous mismatch between clients is
-diagnosable in one call. (`PLUGIN_DATA` does not fit as the bus: the
-spec defines it *per client*, hence invisible to the other agents.)
+Database path — resolution order: (1) the `IAB_DB` env var, the
+authority — set it per project when in doubt (legacy `ORCHESTRATOR_DB`
+honored); (2) an existing global or pre-rename database is kept
+(migration); (3) otherwise **one database per project**, derived from
+the launch working directory (realpath-normalized) under the platform
+data directory — a user-scope install must not merge every project
+into one bus. All participants of one project must resolve the same
+path: `whoami()` returns the resolved path, its source and the project
+key, so a rendezvous mismatch is diagnosable in one call.
+(`PLUGIN_DATA` does not fit as the bus: the spec defines it *per
+client*, hence invisible to the other agents.)
 
 Planned evolutions and their invariants: [`ROADMAP.md`](ROADMAP.md).
 Contributor rules (human or agent): [`AGENTS.md`](AGENTS.md).
@@ -65,6 +69,17 @@ omitted) is read from stdin — never build a shell command line around a
 payload. `iab log [task_id]` renders the transition journal
 (push/claim/expire/publish); `iab whoami` prints the identity from the
 environment and the resolved database path.
+
+`iab install --scope user` registers the MCP server at the user level
+of Claude Code (through `claude mcp add-json`), with this venv's
+interpreter and the server's path as absolute paths and
+`IAB_AGENT_NAME=claude` baked into `env` (`--agent-name` to change,
+`--print` to inspect the JSON without applying, `--scope
+project|local` for narrower scopes). A newly added server only loads
+in the *next* session — reopen, then verify with `whoami()`. Caveat of
+a user-scope install: every session of that client shares the baked
+identity, and each project gets its own bus database unless `IAB_DB`
+says otherwise.
 
 Point the clients' `command` to `.venv/bin/python` (absolute path): the
 server must run under an interpreter that has the MCP SDK.

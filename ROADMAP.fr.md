@@ -72,7 +72,7 @@ déboguables.
 Acceptation : `pip install -e .` puis `iab --help` fonctionnent sur les
 trois plateformes ; `store_test.py` passe seul.
 
-## Phase 2 — Voies de pilotage (CLI et installation scope user)
+## Phase 2 — Voies de pilotage (CLI et installation scope user) — **livrée**
 
 Clôt P1 et P0 du retour de terrain.
 
@@ -101,7 +101,7 @@ Clôt P1 et P0 du retour de terrain.
   normalisé par `realpath` (symlinks, chemins relatifs, systèmes de
   fichiers insensibles à la casse sous macOS/Windows). `whoami()`
   expose le chemin de base résolu, pour qu'une partition se diagnostique
-  en un appel (déjà livré avec le renommage).
+  en un appel (chemin, source et clé de projet).
 - **Honnêteté sur l'identité** : documenter qu'un serveur stdio hérite
   de l'environnement du *client*, pas du `.env` du projet — d'où la
   résolution du projet par le serveur lui-même — et que toutes les
