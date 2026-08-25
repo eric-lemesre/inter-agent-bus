@@ -1,4 +1,4 @@
-# multi-agent-orchestrator
+# inter-agent-bus
 
 🇬🇧 English · 🇫🇷 [Français](README.fr.md)
 
@@ -24,10 +24,13 @@ The zero-daemon alternative would be a single `streamable-http` server that
 *is* the memory — but someone must start, supervise and secure that daemon.
 For a local multi-CLI setup, stdio + a SQLite bus wins.
 
-Database path: `ORCHESTRATOR_DB` env var, default
-`~/.local/share/multi-agent-orchestrator/orchestrator.db`. (`PLUGIN_DATA`
-does not fit as the bus: the spec defines it *per client*, hence invisible
-to the other agents.)
+Database path: `IAB_DB` env var (legacy `ORCHESTRATOR_DB` still
+honored), default `~/.local/share/inter-agent-bus/bus.db` — an existing
+pre-rename database (`~/.local/share/multi-agent-orchestrator/`) keeps
+being used as long as the new default does not exist. `whoami()` returns
+the resolved path, so a rendezvous mismatch between clients is
+diagnosable in one call. (`PLUGIN_DATA` does not fit as the bus: the
+spec defines it *per client*, hence invisible to the other agents.)
 
 Planned evolutions and their invariants: [`ROADMAP.md`](ROADMAP.md).
 Contributor rules (human or agent): [`AGENTS.md`](AGENTS.md).
@@ -60,8 +63,8 @@ server must run under an interpreter that has the MCP SDK.
 
 Consumer project side: copy
 `skills/pipeline-router/references/roster.example.json` to `roster.json`,
-adapt the cast, set `ORCHESTRATOR_ROSTER` (and `ORCHESTRATOR_DB` if the
-default path does not suit).
+adapt the cast, set `IAB_ROSTER` (and `IAB_DB` if the default path does
+not suit). The legacy `ORCHESTRATOR_*` variable names remain honored.
 
 Each agent client registers the MCP server (with generic MCP clients, use
 **absolute paths** — the `cwd` = plugin-root convention only binds clients
@@ -71,12 +74,13 @@ given by the operator.
 
 ## MCP tools
 
-`whoami` (identity of the connected client: `ORCHESTRATOR_AGENT_NAME` env
-var if the launcher or the MCP registration set one, otherwise the MCP
-handshake's clientInfo, to match against the roster's `client_hints`) ·
+`whoami` (identity of the connected client — `IAB_AGENT_NAME` env var if
+the launcher or the MCP registration set one, otherwise the MCP
+handshake's clientInfo, to match against the roster's `client_hints` —
+plus the resolved bus database path) ·
 `register_agent` · `push_task` · `claim_task` · `publish_result`
 (settles the task) · `read_result` · `get_system_state`.
 
-Identity note: baking `ORCHESTRATOR_AGENT_NAME` into each client's MCP
+Identity note: baking `IAB_AGENT_NAME` into each client's MCP
 registration (`env` field) is the reliable way to give every worker its
 identity — some clients announce only a generic SDK name in clientInfo.

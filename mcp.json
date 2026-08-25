@@ -1,7 +1,7 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
   "mcpServers": {
-    "shared-orchestrator-memory": {
+    "inter-agent-bus": {
       "type": "stdio",
       "command": "python3",
       "args": ["servers/shared_memory/server.py"]

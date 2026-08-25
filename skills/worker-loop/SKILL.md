@@ -17,14 +17,15 @@ roster, never of the plugin.
 
 Resolve which agent this session embodies, in this order — the name must
 always match an entry of the project's roster (path in the
-`ORCHESTRATOR_ROSTER` env var, otherwise `roster.json` at the project
-root):
+`IAB_ROSTER` env var — legacy `ORCHESTRATOR_ROSTER` still honored —
+otherwise `roster.json` at the project root):
 
 1. **The operator said so** ("you are `kimi`") — an explicit statement
    always wins.
 2. **Ask the bus**: call `whoami()`. A `source: env` answer is
    authoritative — the launcher or the client's MCP registration set
-   `ORCHESTRATOR_AGENT_NAME`; use that `agent_name` as is.
+   `IAB_AGENT_NAME` (or the legacy `ORCHESTRATOR_AGENT_NAME`); use that
+   `agent_name` as is.
 3. **Match the client**: a `source: client_info` answer gives the MCP
    client's name — compare it (case-insensitive substrings) against the
    `client_hints` arrays of the roster entries. Exactly one match → that

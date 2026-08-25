@@ -45,14 +45,14 @@ change that violates an invariant is wrong even if it closes a request.
 Prerequisite of everything else: packaging, platform paths, and the
 event journal that the later phases need to be debuggable.
 
-- **Packaging**: add `pyproject.toml` (PEP 621) with a `mao` console
+- **Packaging**: add `pyproject.toml` (PEP 621) with a `iab` console
   script (`console_scripts` gives Windows `.exe` shims for free).
   `pip install -e .` becomes the supported dev setup; `requirements.txt`
   stays as a lockfile-ish convenience.
 - **Platform default DB path**: resolve the default through platform
   conventions (XDG on Linux — the current default, `Application
-  Support` on macOS, `%LOCALAPPDATA%` on Windows). `ORCHESTRATOR_DB`
-  still overrides everything. Migration rule: if the legacy
+  Support` on macOS, `%LOCALAPPDATA%` on Windows). `IAB_DB` (or the
+  legacy `ORCHESTRATOR_DB`) still overrides everything. Migration rule: if the legacy
   `~/.local/share/...` database exists, keep using it.
 - **Event journal**: append-only `events` table in `store.py`
   (`task_id, agent, event, at, detail`), written on every transition —
@@ -62,21 +62,21 @@ event journal that the later phases need to be debuggable.
 - **Tests**: multi-process claim under contention; events written for
   each transition; suite still runs without the MCP SDK.
 
-Acceptance: `pip install -e .` then `mao --help` works on the three
+Acceptance: `pip install -e .` then `iab --help` works on the three
 platforms; `store_test.py` passes standalone.
 
 ## Phase 2 — Control paths (CLI and user-scope install)
 
 Closes P1 and P0 of the field report.
 
-- **CLI `mao`**: `register`, `push`, `claim`, `publish`, `result`,
+- **CLI `iab`**: `register`, `push`, `claim`, `publish`, `result`,
   `state`, `log`, `whoami` — argparse over `store.py`, `--json` output
   for scripting. No more fragile `python -c` piloting.
-- **User-scope install**: `mao install --scope user` registers the MCP
+- **User-scope install**: `iab install --scope user` registers the MCP
   server at the user level of the client, going through the client's
   official mechanism (for Claude Code: `claude mcp add-json -s user`),
   with the venv python as absolute `command` and
-  `ORCHESTRATOR_AGENT_NAME` in `env`. It prints the caveat that a newly
+  `IAB_AGENT_NAME` in `env`. It prints the caveat that a newly
   added server only loads in the *next* session, and suggests the
   `whoami()` check. Pure Python — an `install.sh` would break invariant 4.
 - **Multi-project isolation** (raised by the review, absent from the
@@ -87,11 +87,12 @@ Closes P1 and P0 of the field report.
 - **Rendezvous rule**: every participant of a project must resolve the
   *same* database, or the bus partitions silently — two clients on
   different DBs see empty queues, which is worse than a collision.
-  Therefore: `ORCHESTRATOR_DB` set explicitly per project is the
-  authority; the launch `cwd` is only the default, normalized through
-  `realpath` (symlinks, relative paths, case-insensitive filesystems
-  on macOS/Windows). `whoami()` exposes the resolved database path so
-  a partition is diagnosable in one call.
+  Therefore: `IAB_DB` set explicitly per project is the authority; the
+  launch `cwd` is only the default, normalized through `realpath`
+  (symlinks, relative paths, case-insensitive filesystems on
+  macOS/Windows). `whoami()` exposes the resolved database path so a
+  partition is diagnosable in one call (already shipped with the
+  rename).
 - **Identity honesty**: document that a stdio server inherits the
   *client's* environment, not the project's `.env` — which is why the
   server resolves the project itself — and that every Claude Code
@@ -127,7 +128,7 @@ expiry — not worked around.
 - **Targeted claim** `claim_task(agent, task_id=…)`: provided, but as a
   logged escape hatch — the root fixes above are what actually prevent
   the incident.
-- **`mao log [task_id]`** renders the phase-1 journal per task and per
+- **`iab log [task_id]`** renders the phase-1 journal per task and per
   agent (the P5 request), ready to paste into review sheets and
   milestone reports.
 
@@ -136,7 +137,7 @@ expiry — not worked around.
 Closes P2. The most valuable phase and the most dangerous as originally
 specified; three corrections from the review are binding.
 
-- **`mao worker --agent <name> --cmd '<cli>'`**: loop `claim` → run the
+- **`iab worker --agent <name> --cmd '<cli>'`**: loop `claim` → run the
   CLI with the payload **on stdin** (never `{payload}` shell
   interpolation — command injection, and inline diffs exceed argv
   limits) → `publish_result` with the output. Non-zero exit *or* empty
@@ -160,7 +161,7 @@ Closes P4, with the guard recalibrated. Field facts: DeepSeek's
 no file access and hallucinates content it was asked to quote; only
 embedding the full diff in the prompt is reliable.
 
-- **`mao review --agent <name> --staged|--diff <file>`**: generate the
+- **`iab review --agent <name> --staged|--diff <file>`**: generate the
   diff, inline it in the prompt with the review template (severities,
   verdict), publish on the bus.
 - **Structured-output guard** instead of free-text quote checking (a
@@ -189,9 +190,9 @@ Closes P6 and makes the acceptance criterion executable.
 ## Global acceptance criterion
 
 From a fresh Claude Code session, with no project configuration: push a
-task to a worker, see it executed by a headless `mao worker`, read the
+task to a worker, see it executed by a headless `iab worker`, read the
 result, and run a reliable driver review on a diff — without a single
-`python -c`, with a consultable history (`mao log`).
+`python -c`, with a consultable history (`iab log`).
 
 ## Traceability
 

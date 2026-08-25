@@ -15,7 +15,8 @@ consuming project, never of the plugin.
 ## The roster
 
 The project declares its agents in a roster file (path in the
-`ORCHESTRATOR_ROSTER` env var, otherwise `roster.json` at the project root).
+`IAB_ROSTER` env var — legacy `ORCHESTRATOR_ROSTER` still honored —
+otherwise `roster.json` at the project root).
 Each entry describes: `name`, `provider`, `cost_model` (`flat` =
 subscription, `credits` = per token, `local` = free), an optional
 `budget_cap_usd`, `specialties` (capability keywords), `context_window`,

@@ -28,7 +28,7 @@ def check(label: str, ok: bool, detail: str = "") -> None:
 
 
 with tempfile.TemporaryDirectory() as tmp:
-    os.environ["ORCHESTRATOR_DB"] = str(Path(tmp) / "orchestrator.db")
+    os.environ["IAB_DB"] = str(Path(tmp) / "bus.db")
     import store
 
     # Unknown agent refused (typo detection).
@@ -76,6 +76,14 @@ with tempfile.TemporaryDirectory() as tmp:
     check("a second process writes into the same bus", "OK" in out.stdout, out.stderr)
     t3 = json.loads(store.claim_task("gamma"))
     check("this process sees the task pushed by the other", t3["task_id"] == "t-ipc")
+
+    # Naming migration: legacy ORCHESTRATOR_DB honored, IAB_DB wins over it.
+    os.environ["ORCHESTRATOR_DB"] = str(Path(tmp) / "legacy.db")
+    check("IAB_DB wins over the legacy variable", store.db_path().name == "bus.db")
+    del os.environ["IAB_DB"]
+    check("legacy ORCHESTRATOR_DB honored when IAB_DB is unset",
+          store.db_path().name == "legacy.db")
+    del os.environ["ORCHESTRATOR_DB"]
 
 if fail:
     print("store_test: FAIL.")

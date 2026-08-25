@@ -1,5 +1,5 @@
 {
-  "_comment": "EXAMPLE roster — the policy belongs to the consuming project, never to the plugin. Copy into the project repository (roster.json), point ORCHESTRATOR_ROSTER at it, and adapt the cast.",
+  "_comment": "EXAMPLE roster — the policy belongs to the consuming project, never to the plugin. Copy into the project repository (roster.json), point IAB_ROSTER at it, and adapt the cast.",
   "agents": [
     {
       "name": "claude",

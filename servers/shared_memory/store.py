@@ -6,10 +6,11 @@ Kept separate from the MCP wrapper (server.py) for two reasons:
      (WAL mode, immediate transactions);
   2. the core is testable without the MCP SDK installed (store_test.py).
 
-Database path: ORCHESTRATOR_DB env var, otherwise
-~/.local/share/multi-agent-orchestrator/orchestrator.db. This path is the
-cross-client rendezvous point — PLUGIN_DATA does not fit: it is managed PER
-CLIENT, hence invisible to the other agents.
+Database path: IAB_DB env var (legacy ORCHESTRATOR_DB still honored),
+otherwise ~/.local/share/inter-agent-bus/bus.db — falling back to the
+pre-rename default if that one exists. This path is the cross-client
+rendezvous point — PLUGIN_DATA does not fit: it is managed PER CLIENT,
+hence invisible to the other agents.
 
 Task lifecycle: queued → claimed (lease) → done. An expired lease requeues
 the task (attempts + 1): an agent dying after claim no longer loses the
@@ -23,7 +24,8 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-DEFAULT_DB = Path.home() / ".local/share/multi-agent-orchestrator/orchestrator.db"
+DEFAULT_DB = Path.home() / ".local/share/inter-agent-bus/bus.db"
+LEGACY_DB = Path.home() / ".local/share/multi-agent-orchestrator/orchestrator.db"
 
 
 def _now() -> str:
@@ -31,7 +33,15 @@ def _now() -> str:
 
 
 def db_path() -> Path:
-    return Path(os.environ.get("ORCHESTRATOR_DB", str(DEFAULT_DB)))
+    """IAB_DB, else legacy ORCHESTRATOR_DB, else the default — reusing a
+    pre-rename database when it exists and the new default does not."""
+    for var in ("IAB_DB", "ORCHESTRATOR_DB"):
+        value = os.environ.get(var)
+        if value:
+            return Path(value)
+    if not DEFAULT_DB.exists() and LEGACY_DB.exists():
+        return LEGACY_DB
+    return DEFAULT_DB
 
 
 def connect() -> sqlite3.Connection:

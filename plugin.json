@@ -1,8 +1,8 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
-  "name": "multi-agent-orchestrator",
-  "version": "0.2.0",
+  "name": "inter-agent-bus",
+  "version": "0.3.0",
   "description": "Inter-agent coordination bus: task queues with claim/ack leases, shared result store (SQLite), routing driven by a project-declared roster — the plugin provides the mechanism, never the cast.",
   "license": "MIT",
-  "keywords": ["multi-agent", "orchestration", "mcp", "task-queue"]
+  "keywords": ["multi-agent", "coordination-bus", "mcp", "task-queue"]
 }

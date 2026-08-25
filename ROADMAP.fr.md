@@ -51,13 +51,14 @@ journal d'événements dont les phases suivantes ont besoin pour être
 déboguables.
 
 - **Packaging** : ajouter `pyproject.toml` (PEP 621) avec un point
-  d'entrée console `mao` (`console_scripts` donne gratuitement les
+  d'entrée console `iab` (`console_scripts` donne gratuitement les
   shims `.exe` Windows). `pip install -e .` devient l'installation de
   dev supportée ; `requirements.txt` reste par commodité.
 - **Chemin de base par plateforme** : résoudre le défaut selon les
   conventions de la plateforme (XDG sous Linux — le défaut actuel,
   `Application Support` sous macOS, `%LOCALAPPDATA%` sous Windows).
-  `ORCHESTRATOR_DB` prime toujours. Règle de migration : si la base
+  `IAB_DB` (ou l'héritée `ORCHESTRATOR_DB`) prime toujours. Règle de
+  migration : si la base
   héritée `~/.local/share/...` existe, continuer de l'utiliser.
 - **Journal d'événements** : table `events` en append-only dans
   `store.py` (`task_id, agent, event, at, detail`), écrite à chaque
@@ -68,22 +69,22 @@ déboguables.
 - **Tests** : claim multi-processus sous contention ; événements écrits
   pour chaque transition ; la suite tourne toujours sans le SDK MCP.
 
-Acceptation : `pip install -e .` puis `mao --help` fonctionnent sur les
+Acceptation : `pip install -e .` puis `iab --help` fonctionnent sur les
 trois plateformes ; `store_test.py` passe seul.
 
 ## Phase 2 — Voies de pilotage (CLI et installation scope user)
 
 Clôt P1 et P0 du retour de terrain.
 
-- **CLI `mao`** : `register`, `push`, `claim`, `publish`, `result`,
+- **CLI `iab`** : `register`, `push`, `claim`, `publish`, `result`,
   `state`, `log`, `whoami` — argparse au-dessus de `store.py`, sortie
   `--json` pour la scriptabilité. Fin des pilotages en `python -c`
   fragiles.
-- **Installation scope user** : `mao install --scope user` déclare le
+- **Installation scope user** : `iab install --scope user` déclare le
   serveur MCP au niveau utilisateur du client, en passant par le
   mécanisme officiel du client (pour Claude Code :
   `claude mcp add-json -s user`), avec le python du venv en `command`
-  absolu et `ORCHESTRATOR_AGENT_NAME` dans `env`. La commande rappelle
+  absolu et `IAB_AGENT_NAME` dans `env`. La commande rappelle
   qu'un serveur ajouté ne se charge qu'à la *prochaine* session et
   suggère la vérification `whoami()`. Pur Python — un `install.sh`
   violerait l'invariant 4.
@@ -95,12 +96,12 @@ Clôt P1 et P0 du retour de terrain.
 - **Règle de rendez-vous** : tous les participants d'un projet doivent
   résoudre la *même* base, sinon le bus se partitionne en silence —
   deux clients sur des bases différentes voient des files vides, ce
-  qui est pire qu'une collision. Donc : `ORCHESTRATOR_DB` posée
-  explicitement par projet fait autorité ; le `cwd` de lancement n'est
-  que le défaut, normalisé par `realpath` (symlinks, chemins relatifs,
-  systèmes de fichiers insensibles à la casse sous macOS/Windows).
-  `whoami()` expose le chemin de base résolu, pour qu'une partition se
-  diagnostique en un appel.
+  qui est pire qu'une collision. Donc : `IAB_DB` posée explicitement
+  par projet fait autorité ; le `cwd` de lancement n'est que le défaut,
+  normalisé par `realpath` (symlinks, chemins relatifs, systèmes de
+  fichiers insensibles à la casse sous macOS/Windows). `whoami()`
+  expose le chemin de base résolu, pour qu'une partition se diagnostique
+  en un appel (déjà livré avec le renommage).
 - **Honnêteté sur l'identité** : documenter qu'un serveur stdio hérite
   de l'environnement du *client*, pas du `.env` du projet — d'où la
   résolution du projet par le serveur lui-même — et que toutes les
@@ -138,7 +139,7 @@ silencieuse et illimitée — pas contourné.
 - **Claim ciblé** `claim_task(agent, task_id=…)` : fourni, mais comme
   issue de secours journalisée — ce sont les correctifs de racine
   ci-dessus qui empêchent réellement l'incident.
-- **`mao log [task_id]`** restitue le journal de la phase 1 par tâche
+- **`iab log [task_id]`** restitue le journal de la phase 1 par tâche
   et par agent (la demande P5), prêt à coller dans les fiches de revue
   et les rapports de jalon.
 
@@ -147,7 +148,7 @@ silencieuse et illimitée — pas contourné.
 Clôt P2. La phase la plus utile et la plus dangereuse telle que
 spécifiée à l'origine ; trois corrections de la revue sont impératives.
 
-- **`mao worker --agent <nom> --cmd '<cli>'`** : boucle `claim` →
+- **`iab worker --agent <nom> --cmd '<cli>'`** : boucle `claim` →
   exécution du CLI avec le payload **sur stdin** (jamais d'interpolation
   shell `{payload}` — injection de commande, et les diffs inline
   dépassent les limites d'argv) → `publish_result` avec la sortie. Code
@@ -172,7 +173,7 @@ Clôt P4, avec la garde recalibrée. Faits de terrain : le
 lui demande de citer ; seul l'embarquement du diff intégral dans le
 prompt est fiable.
 
-- **`mao review --agent <nom> --staged|--diff <fichier>`** : générer le
+- **`iab review --agent <nom> --staged|--diff <fichier>`** : générer le
   diff, l'inline dans le prompt avec le gabarit de revue (sévérités,
   verdict), publier sur le bus.
 - **Garde par sortie structurée** plutôt que vérification de citations
@@ -203,10 +204,10 @@ Clôt P6 et rend le critère d'acceptation exécutable.
 ## Critère d'acceptation global
 
 Depuis une session Claude Code fraîche, sans configuration projet :
-pousser une tâche à un worker, la voir exécutée par un `mao worker`
+pousser une tâche à un worker, la voir exécutée par un `iab worker`
 headless, lire le résultat, et lancer une revue driver fiable sur un
 diff — sans un seul `python -c`, avec un historique consultable
-(`mao log`).
+(`iab log`).
 
 ## Traçabilité
 

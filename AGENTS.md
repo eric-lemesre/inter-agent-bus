@@ -1,4 +1,4 @@
-# Agent instructions — multi-agent-orchestrator
+# Agent instructions — inter-agent-bus
 
 Instructions for any AI agent (Claude Code, Kimi, DeepSeek, …) working
 *on this repository*. For agents *using* the bus at runtime, see the
@@ -31,7 +31,7 @@ every change and are summarized below.
 
 1. **Mechanism, never the cast.** Never hardcode an agent name, role,
    model or provider in the plugin. The cast comes from the consuming
-   project's roster (`ORCHESTRATOR_ROSTER`, default `roster.json` at
+   project's roster (`IAB_ROSTER`, default `roster.json` at
    the project root).
 2. **Core first.** New behavior goes into `store.py` with tests in
    `store_test.py`, then gets a thin wrapper in `server.py` (and in the
@@ -40,7 +40,7 @@ every change and are summarized below.
 3. **Cross-platform.** Linux, macOS and Windows. Concretely:
    - paths via `pathlib`, no string concatenation, no POSIX literals;
    - platform defaults via `platformdirs`-style resolution, with
-     `ORCHESTRATOR_DB` always overriding;
+     `IAB_DB` always overriding;
    - tooling and scripts in pure Python — no `install.sh`-only or
      bash-only path; entry points via `console_scripts`;
    - never interpolate a payload into a shell command line (quoting
@@ -55,7 +55,10 @@ every change and are summarized below.
 5. **Schema changes need a migration path.** The SQLite database is a
    long-lived rendezvous shared by several clients; a schema change
    must keep existing databases working (additive `CREATE TABLE IF NOT
-   EXISTS` / `ALTER TABLE` guarded by inspection).
+   EXISTS` / `ALTER TABLE` guarded by inspection). Same spirit for
+   names: the current env vars are `IAB_*`, and the legacy
+   `ORCHESTRATOR_*` names (plus the pre-rename default DB path) must
+   remain honored — do not remove the fallbacks.
 6. **No new dependencies lightly.** The core currently needs only the
    standard library; the server needs only the MCP SDK. Keep it that
    way unless a dependency removes real complexity (e.g.
@@ -83,8 +86,8 @@ python3 -m venv .venv                        # py -m venv .venv on Windows
 
 The test suite must pass standalone (no MCP SDK needed) before and
 after any change to `store.py`. Tests that touch the database must use
-a temporary `ORCHESTRATOR_DB`, never the operator's real bus at the
-platform default path.
+a temporary `IAB_DB`, never the operator's real bus at the platform
+default path.
 
 ## Security notes
 
