@@ -129,6 +129,71 @@ with tempfile.TemporaryDirectory() as tmp:
           and cfg["env"]["IAB_AGENT_NAME"] == "kimi",
           out.stdout + out.stderr)
 
+    # HEADLESS WORKER (iab worker): claim → command with the payload on
+    # stdin → publish stdout with the attempt token.
+    store.register_agent("zeta", "worker tests")
+    store.push_task("zeta", "t-w1", "please do X")
+    out = subprocess.run(
+        cli + ["worker", "--agent", "zeta", "--once", "--",
+               sys.executable, "-c",
+               "import sys; print('did: ' + sys.stdin.read().strip())"],
+        env=os.environ.copy(), capture_output=True, text=True)
+    check("worker --once settles the task", out.returncode == 0, out.stderr)
+    check("worker publishes the command's stdout",
+          json.loads(store.read_result("t-w1"))["content"].strip()
+          == "did: please do X")
+
+    # Failure discipline: non-zero exit and empty output become ERROR:
+    # results (settled, not abandoned to lease expiry).
+    store.push_task("zeta", "t-w2", "x")
+    out = subprocess.run(
+        cli + ["worker", "--agent", "zeta", "--once", "--",
+               sys.executable, "-c",
+               "import sys; sys.stderr.write('boom'); sys.exit(3)"],
+        env=os.environ.copy(), capture_output=True, text=True)
+    r = json.loads(store.read_result("t-w2"))["content"]
+    check("worker turns a non-zero exit into an ERROR result",
+          r.startswith("ERROR") and "exit 3" in r and "boom" in r, r)
+    check("worker --once exits non-zero on an ERROR result",
+          out.returncode == 1, str(out.returncode))
+    store.push_task("zeta", "t-w3", "x")
+    subprocess.run(cli + ["worker", "--agent", "zeta", "--once", "--",
+                          sys.executable, "-c", "pass"],
+                   env=os.environ.copy(), capture_output=True, text=True)
+    r = json.loads(store.read_result("t-w3"))["content"]
+    check("worker turns empty output into an ERROR result",
+          r.startswith("ERROR") and "no output" in r, r)
+
+    # Heartbeat: a command running longer than the lease is not
+    # re-offered — the worker extends the lease while it runs.
+    store.push_task("zeta", "t-w4", "x")
+    out = subprocess.run(
+        cli + ["worker", "--agent", "zeta", "--once", "--lease", "2", "--",
+               sys.executable, "-c",
+               "import sys, time; sys.stdin.read(); time.sleep(3); print('slow done')"],
+        env=os.environ.copy(), capture_output=True, text=True)
+    check("a long command still settles (heartbeat)",
+          json.loads(store.read_result("t-w4"))["content"].strip() == "slow done",
+          out.stderr)
+    kinds = [e["event"] for e in json.loads(store.get_events(task_id="t-w4"))]
+    check("the heartbeat extends the lease", "extend" in kinds, str(kinds))
+
+    # Task timeout: a hung command is killed and reported, instead of
+    # holding its task forever behind the heartbeat.
+    store.push_task("zeta", "t-w5", "x")
+    subprocess.run(
+        cli + ["worker", "--agent", "zeta", "--once", "--lease", "2",
+               "--task-timeout", "3", "--",
+               sys.executable, "-c", "import sys, time; sys.stdin.read(); time.sleep(60)"],
+        env=os.environ.copy(), capture_output=True, text=True)
+    r = json.loads(store.read_result("t-w5"))["content"]
+    check("a hung command is killed after --task-timeout",
+          r.startswith("ERROR") and "timeout" in r, r)
+
+    if os.name == "posix":
+        check("the bus database is owner-only (0600)",
+              (Path(os.environ["IAB_DB"]).stat().st_mode & 0o777) == 0o600)
+
     # LIFECYCLE — dead-letter: after max_attempts expired leases the task
     # is dead-lettered instead of being re-offered forever.
     store.register_agent("eps", "lifecycle")

@@ -21,9 +21,10 @@ import sys
 from pathlib import Path
 
 try:  # installed package: `iab` maps to this directory (pyproject.toml)
-    from . import store
+    from . import store, worker
 except ImportError:  # bare script: python servers/shared_memory/cli.py
     import store
+    import worker
 
 
 def _version() -> str:
@@ -155,6 +156,23 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("whoami", help="identity from the environment and the resolved bus database")
 
     p = sub.add_parser(
+        "worker",
+        help="headless worker loop: claim → run a command with the payload "
+        "on stdin → publish its stdout (ERROR: on failure)",
+    )
+    p.add_argument("--agent", required=True, help="identity to work as (roster name)")
+    p.add_argument("--once", action="store_true", help="one task (or NO_TASK) then exit")
+    p.add_argument("--lease", type=int, default=900, metavar="SECONDS",
+                   help="lease per claim; extended at every heartbeat while running")
+    p.add_argument("--poll", type=int, default=5, metavar="SECONDS",
+                   help="initial delay between empty claims (doubles up to 60s)")
+    p.add_argument("--task-timeout", type=int, metavar="SECONDS",
+                   help="kill the command and publish ERROR after this long "
+                   "(default: no limit — a hung command holds its task forever)")
+    p.add_argument("worker_cmd", nargs=argparse.REMAINDER, metavar="-- command...",
+                   help="the worker command, after `--`; receives the payload on stdin")
+
+    p = sub.add_parser(
         "install",
         help="register the MCP server in the client (Claude Code: claude mcp add-json)",
     )
@@ -165,6 +183,16 @@ def main(argv: list[str] | None = None) -> int:
                    help="print the JSON registration instead of applying it")
 
     args = parser.parse_args(argv)
+    if args.command == "worker":
+        cmd = args.worker_cmd
+        if cmd and cmd[0] == "--":
+            cmd = cmd[1:]
+        if not cmd:
+            parser.error("worker: missing command after `--`")
+        return worker.run_worker(
+            args.agent, cmd, once=args.once, lease_seconds=args.lease,
+            poll_seconds=args.poll, task_timeout=args.task_timeout,
+        )
     out = {
         "register": lambda: store.register_agent(args.name, args.description),
         "push": lambda: store.push_task(

@@ -25,6 +25,9 @@ every change and are summarized below.
 - `servers/shared_memory/cli.py` — console entry point (`iab`, see
   `pyproject.toml`). Thin argparse over the store, same rule as the
   server: no logic. The package name `iab` maps to this directory.
+- `servers/shared_memory/worker.py` — headless worker driver
+  (`iab worker`): claim → run a command with the payload on stdin →
+  publish. Process orchestration only; state stays in the store.
 - `servers/shared_memory/store_test.py` — tests for the core, runnable
   **without** the MCP SDK, including cross-process sharing and claim
   contention.

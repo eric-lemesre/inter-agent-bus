@@ -104,6 +104,14 @@ def connect() -> sqlite3.Connection:
     path = db_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path, timeout=10, isolation_level=None)
+    if os.name == "posix":
+        # Writing the bus is prompt-injection-adjacent (payloads reach
+        # autonomous agents): keep the file owner-only. Hardening, not
+        # correctness — an exotic filesystem may refuse, the bus still works.
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=10000")

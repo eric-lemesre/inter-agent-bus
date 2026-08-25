@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "inter-agent-bus"
-version = "0.6.0"
+version = "0.7.0"
 description = "Coordination bus between heterogeneous AI agents: task queues with claim/ack leases, shared result store (SQLite), roster-driven routing — the mechanism, never the cast."
 readme = "README.md"
 license = { text = "MIT" }

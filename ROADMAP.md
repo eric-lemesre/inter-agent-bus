@@ -132,7 +132,7 @@ expiry — not worked around.
   journal per task and per agent (the P5 request), ready to paste into
   review sheets and milestone reports.
 
-## Phase 4 — Headless workers
+## Phase 4 — Headless workers — **shipped**
 
 Closes P2. The most valuable phase and the most dangerous as originally
 specified; three corrections from the review are binding.

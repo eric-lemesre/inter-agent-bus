@@ -99,6 +99,25 @@ implementing the Agent Plugins spec). The orchestrating session uses
 `pipeline-router`; each worker session uses `worker-loop` with an identity
 given by the operator.
 
+## Headless workers
+
+Some agent CLIs load no MCP servers in non-interactive mode (the field
+failure behind the worker-daemon request): they cannot hold their own
+claim/publish loop. `iab worker` holds it for them:
+
+```bash
+iab worker --agent kimi --once -- kimi --exec -    # adapt to the CLI's flags
+```
+
+Claim under lease → run the command with the payload **on stdin**
+(never on the command line) → publish stdout with the claim's attempt
+token. Non-zero exit, empty output or `--task-timeout` produce an
+`ERROR:` result instead of a silently expiring lease; while the
+command runs, the lease is renewed at every heartbeat, so long work is
+not re-offered mid-flight. `--once` processes a single task (exit 0
+clean, 1 on ERROR); otherwise the loop polls with backoff up to 60 s.
+Delivery is at-least-once: worker commands should be idempotent.
+
 ## MCP tools
 
 `whoami` (identity of the connected client — `IAB_AGENT_NAME` env var if
@@ -114,3 +133,15 @@ pass the claim's `attempt` token — lease fencing) · `cancel_task` ·
 Identity note: baking `IAB_AGENT_NAME` into each client's MCP
 registration (`env` field) is the reliable way to give every worker its
 identity — some clients announce only a generic SDK name in clientInfo.
+
+## Security / trust model
+
+The bus assumes a single-user machine. Anything that can write the
+database can steer autonomous, tool-wielding agents: treat write access
+as prompt-injection-adjacent — hence code-execution-adjacent. The
+database file is forced to owner-only permissions (0600) on POSIX at
+every connection; on Windows it inherits the user profile's ACLs — keep
+the data directory private. The headless worker keeps payloads off the
+command line (stdin only) and out of its logs (stderr shows task ids,
+never payload content). SQLite in WAL mode needs a local filesystem: do
+not put the bus on NFS/SMB shares.

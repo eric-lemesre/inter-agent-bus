@@ -104,6 +104,27 @@ Plugins). La session qui orchestre utilise `pipeline-router` ; chaque
 session worker utilise `worker-loop` avec une identité donnée par
 l'opérateur.
 
+## Workers headless
+
+Certains CLI d'agents ne chargent aucun serveur MCP en mode non
+interactif (la défaillance de terrain derrière la demande de worker
+daemon) : ils ne peuvent pas tenir leur propre boucle claim/publish.
+`iab worker` la tient pour eux :
+
+```bash
+iab worker --agent kimi --once -- kimi --exec -    # à adapter aux options du CLI
+```
+
+Claim sous bail → exécution de la commande avec le payload **sur
+stdin** (jamais sur la ligne de commande) → publication de stdout avec
+le jeton de tentative du claim. Code de sortie non nul, sortie vide ou
+`--task-timeout` produisent un résultat `ERROR:` plutôt qu'un bail qui
+expire en silence ; pendant l'exécution, le bail est renouvelé à
+chaque battement — un travail long n'est pas re-proposé en plein vol.
+`--once` traite une seule tâche (sortie 0 propre, 1 sur ERROR) ; sinon
+la boucle interroge avec un recul jusqu'à 60 s. La livraison est
+at-least-once : les commandes worker doivent être idempotentes.
+
 ## Outils MCP
 
 `whoami` (identité du client connecté — variable `IAB_AGENT_NAME` si le
@@ -121,3 +142,17 @@ Note d'identité : graver `IAB_AGENT_NAME` dans l'enregistrement MCP de
 chaque client (champ `env`) est le moyen fiable de donner son identité à
 chaque worker — certains clients n'annoncent qu'un nom de SDK générique
 dans le clientInfo.
+
+## Sécurité / modèle de confiance
+
+Le bus suppose une machine mono-utilisateur. Tout ce qui peut écrire la
+base peut piloter des agents autonomes et outillés : l'accès en
+écriture est adjacent à l'injection de prompt — donc adjacent à
+l'exécution de code. Le fichier de base est forcé en permissions
+propriétaire-seul (0600) sous POSIX à chaque connexion ; sous Windows
+il hérite des ACL du profil utilisateur — garder le répertoire de
+données privé. Le worker headless tient les payloads hors de la ligne
+de commande (stdin uniquement) et hors de ses journaux (stderr montre
+les identifiants de tâche, jamais le contenu). SQLite en mode WAL exige
+un système de fichiers local : ne pas placer le bus sur un partage
+NFS/SMB.

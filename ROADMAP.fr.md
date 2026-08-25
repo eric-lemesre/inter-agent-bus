@@ -143,7 +143,7 @@ silencieuse et illimitée — pas contourné.
   journal par tâche et par agent (la demande P5), prêt à coller dans
   les fiches de revue et les rapports de jalon.
 
-## Phase 4 — Workers headless
+## Phase 4 — Workers headless — **livrée**
 
 Clôt P2. La phase la plus utile et la plus dangereuse telle que
 spécifiée à l'origine ; trois corrections de la revue sont impératives.
