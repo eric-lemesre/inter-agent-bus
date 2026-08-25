@@ -154,7 +154,7 @@ specified; three corrections from the review are binding.
   agent. Single-user-machine assumption stated in the README; DB
   created `0600` on POSIX, ACL note for Windows.
 
-## Phase 5 — Review drivers
+## Phase 5 — Review drivers — **shipped**
 
 Closes P4, with the guard recalibrated. Field facts: DeepSeek's
 `review --staged` returns a silently empty success; `deepseek exec` has

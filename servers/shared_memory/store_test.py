@@ -129,6 +129,69 @@ with tempfile.TemporaryDirectory() as tmp:
           and cfg["env"]["IAB_AGENT_NAME"] == "kimi",
           out.stdout + out.stderr)
 
+    # REVIEW DRIVER (iab review): diff embedded in the prompt, structured
+    # output enforced, anti-hallucination guard on every finding.
+    diff_file = Path(tmp) / "change.diff"
+    diff_file.write_text(
+        "diff --git a/mod.py b/mod.py\n--- a/mod.py\n+++ b/mod.py\n"
+        "@@ -1,2 +1,3 @@\n def f():\n+    return 1\n     pass\n",
+        encoding="utf-8",
+    )
+    good_reviewer = (
+        "import sys, re, json; t = sys.stdin.read(); "
+        "n = re.search(r'Nonce: (\\w+)', t).group(1); "
+        "print(json.dumps({'nonce': n, 'verdict': 'request_changes', "
+        "'findings': [{'file': 'mod.py', 'line': 2, 'severity': 'minor', "
+        "'title': 't', 'detail': 'd'}]}))"
+    )
+
+    def run_review_cli(task_id, reviewer, extra_env=None):
+        env = os.environ.copy()
+        env.update(extra_env or {})
+        return subprocess.run(
+            cli + ["review", "--agent", "delta", "--diff", str(diff_file),
+                   "--task-id", task_id, "--", sys.executable, "-c", reviewer],
+            env=env, capture_output=True, text=True)
+
+    out = run_review_cli("R-ok", good_reviewer)
+    check("a structurally sound review passes the guard",
+          out.returncode == 0, out.stdout + out.stderr)
+    check("the verified review is published on the bus",
+          json.loads(json.loads(store.read_result("R-ok"))["content"])["verdict"]
+          == "request_changes")
+
+    out = run_review_cli("R-halluc", good_reviewer.replace("'line': 2", "'line': 99"))
+    r = json.loads(store.read_result("R-halluc"))["content"]
+    check("a finding outside the diff hunks is rejected as ERROR",
+          out.returncode == 1 and r.startswith("ERROR") and "line 99" in r, r)
+
+    out = run_review_cli("R-prose", "print('looks good to me')")
+    r = json.loads(store.read_result("R-prose"))["content"]
+    check("free-prose review output is rejected (not JSON)",
+          r.startswith("ERROR") and "not JSON" in r, r)
+
+    out = run_review_cli("R-empty", "pass")
+    r = json.loads(store.read_result("R-empty"))["content"]
+    check("an empty successful review is rejected",
+          r.startswith("ERROR") and "empty output" in r, r)
+
+    out = run_review_cli(
+        "R-nonce",
+        good_reviewer.replace("'nonce': n", "'nonce': 'forged'"))
+    r = json.loads(store.read_result("R-nonce"))["content"]
+    check("a wrong nonce is rejected (liveness)",
+          r.startswith("ERROR") and "nonce" in r, r)
+
+    roster = Path(tmp) / "roster.json"
+    roster.write_text(json.dumps(
+        {"agents": [{"name": "delta", "context_window": 10}]}), encoding="utf-8")
+    out = run_review_cli("R-window", good_reviewer,
+                         extra_env={"IAB_ROSTER": str(roster)})
+    check("a prompt beyond the roster context_window is refused, never truncated",
+          out.returncode == 1 and "context_window" in out.stdout, out.stdout)
+    check("the refused review never reached the bus",
+          store.read_result("R-window").startswith("ERROR"))
+
     # HEADLESS WORKER (iab worker): claim → command with the payload on
     # stdin → publish stdout with the attempt token.
     store.register_agent("zeta", "worker tests")

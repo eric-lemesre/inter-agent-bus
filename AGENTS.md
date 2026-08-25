@@ -28,6 +28,9 @@ every change and are summarized below.
 - `servers/shared_memory/worker.py` — headless worker driver
   (`iab worker`): claim → run a command with the payload on stdin →
   publish. Process orchestration only; state stays in the store.
+- `servers/shared_memory/review.py` — guarded review driver
+  (`iab review`): diff embedded in the prompt, structured JSON output
+  enforced, findings validated against the diff hunks. Same rule.
 - `servers/shared_memory/store_test.py` — tests for the core, runnable
   **without** the MCP SDK, including cross-process sharing and claim
   contention.

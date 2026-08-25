@@ -118,6 +118,27 @@ not re-offered mid-flight. `--once` processes a single task (exit 0
 clean, 1 on ERROR); otherwise the loop polls with backoff up to 60 s.
 Delivery is at-least-once: worker commands should be idempotent.
 
+## Guarded reviews
+
+Born from the field: one reviewer CLI returned a silently *empty*
+successful review; another, without file access, *hallucinated* the
+diff it was asked to quote. `iab review` closes both holes:
+
+```bash
+iab review --agent deepseek --staged        -- <reviewer command>
+iab review --agent deepseek --diff work.diff -- <reviewer command>
+```
+
+The full diff is embedded in the prompt (the only reliable transport);
+the reviewer must answer with a single JSON object (verdict, findings
+with severities) echoing a per-run nonce (liveness); and every finding
+must point at a file and line actually covered by the diff's hunks. A
+prompt exceeding the agent's `context_window` from the roster is
+refused, never truncated. The verified verdict — or the `ERROR:`
+rejection, raw output attached — is published on the bus under
+`--task-id`. The guard filters *mechanical* failures only; it does not
+judge substance: keep cross-reviewing with another agent (router rule).
+
 ## MCP tools
 
 `whoami` (identity of the connected client — `IAB_AGENT_NAME` env var if

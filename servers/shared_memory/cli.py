@@ -21,8 +21,9 @@ import sys
 from pathlib import Path
 
 try:  # installed package: `iab` maps to this directory (pyproject.toml)
-    from . import store, worker
+    from . import review, store, worker
 except ImportError:  # bare script: python servers/shared_memory/cli.py
+    import review
     import store
     import worker
 
@@ -173,6 +174,21 @@ def main(argv: list[str] | None = None) -> int:
                    help="the worker command, after `--`; receives the payload on stdin")
 
     p = sub.add_parser(
+        "review",
+        help="guarded review: embed a diff in a review prompt, run the "
+        "reviewer command, verify its structured output, publish on the bus",
+    )
+    p.add_argument("--agent", required=True, help="reviewer identity (roster name)")
+    src = p.add_mutually_exclusive_group(required=True)
+    src.add_argument("--staged", action="store_true", help="review `git diff --staged`")
+    src.add_argument("--diff", metavar="FILE", help="unified diff file ('-' for stdin)")
+    p.add_argument("--task-id", help="bus task id (default: review-<random>)")
+    p.add_argument("--lease", type=int, default=900, metavar="SECONDS")
+    p.add_argument("--task-timeout", type=int, metavar="SECONDS")
+    p.add_argument("review_cmd", nargs=argparse.REMAINDER, metavar="-- command...",
+                   help="the reviewer command, after `--`; receives the prompt on stdin")
+
+    p = sub.add_parser(
         "install",
         help="register the MCP server in the client (Claude Code: claude mcp add-json)",
     )
@@ -183,6 +199,30 @@ def main(argv: list[str] | None = None) -> int:
                    help="print the JSON registration instead of applying it")
 
     args = parser.parse_args(argv)
+    if args.command == "review":
+        cmd = args.review_cmd
+        if cmd and cmd[0] == "--":
+            cmd = cmd[1:]
+        if not cmd:
+            parser.error("review: missing reviewer command after `--`")
+        if args.staged:
+            try:
+                diff_text = review.staged_diff()
+            except RuntimeError as exc:
+                print(f"ERROR: {exc}")
+                return 1
+        elif args.diff == "-":
+            diff_text = sys.stdin.read()
+        else:
+            try:
+                diff_text = Path(args.diff).read_text(encoding="utf-8")
+            except OSError as exc:
+                print(f"ERROR: cannot read diff file: {exc}")
+                return 1
+        return review.run_review(
+            args.agent, cmd, diff_text, task_id=args.task_id,
+            lease_seconds=args.lease, task_timeout=args.task_timeout,
+        )
     if args.command == "worker":
         cmd = args.worker_cmd
         if cmd and cmd[0] == "--":

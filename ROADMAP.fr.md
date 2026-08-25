@@ -165,7 +165,7 @@ spécifiée à l'origine ; trois corrections de la revue sont impératives.
   agent outillé. Hypothèse « machine mono-utilisateur » énoncée dans le
   README ; base créée en `0600` sous POSIX, note ACL pour Windows.
 
-## Phase 5 — Drivers de revue
+## Phase 5 — Drivers de revue — **livrée**
 
 Clôt P4, avec la garde recalibrée. Faits de terrain : le
 `review --staged` de DeepSeek renvoie un succès silencieusement vide ;

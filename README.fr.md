@@ -125,6 +125,28 @@ chaque battement — un travail long n'est pas re-proposé en plein vol.
 la boucle interroge avec un recul jusqu'à 60 s. La livraison est
 at-least-once : les commandes worker doivent être idempotentes.
 
+## Revues gardées
+
+Né du terrain : un CLI de revue a renvoyé un succès silencieusement
+*vide* ; un autre, sans accès fichiers, a *halluciné* le diff qu'on lui
+demandait de citer. `iab review` ferme les deux brèches :
+
+```bash
+iab review --agent deepseek --staged         -- <commande de revue>
+iab review --agent deepseek --diff work.diff -- <commande de revue>
+```
+
+Le diff intégral est embarqué dans le prompt (le seul transport
+fiable) ; le relecteur doit répondre par un unique objet JSON (verdict,
+constats avec sévérités) reprenant un nonce propre à l'exécution (test
+de vie) ; et chaque constat doit pointer un fichier et une ligne
+réellement couverts par les hunks du diff. Un prompt qui dépasse le
+`context_window` de l'agent au roster est refusé, jamais tronqué. Le
+verdict vérifié — ou le rejet `ERROR:`, sortie brute jointe — est
+publié sur le bus sous `--task-id`. La garde ne filtre que les
+défaillances *mécaniques* ; elle ne juge pas le fond : maintenir la
+revue croisée par un autre agent (règle du routeur).
+
 ## Outils MCP
 
 `whoami` (identité du client connecté — variable `IAB_AGENT_NAME` si le
