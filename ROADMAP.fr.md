@@ -190,7 +190,7 @@ prompt est fiable.
   produit une revue fausse avec une apparence de succès, exactement le
   mode de défaillance que cette phase existe pour tuer.
 
-## Phase 6 — Documentation et clôture
+## Phase 6 — Documentation et clôture — **livrée**
 
 Clôt P6 et rend le critère d'acceptation exécutable.
 

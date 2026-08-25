@@ -92,6 +92,7 @@ every change and are summarized below.
 python3 -m venv .venv                          # py -m venv .venv on Windows
 .venv/bin/pip install -r requirements.txt -e . # .venv\Scripts\pip on Windows
 .venv/bin/python servers/shared_memory/store_test.py
+python3 scripts/smoke.py       # end-to-end acceptance, CLI only
 ```
 
 The test suite must pass standalone (no MCP SDK needed) before and

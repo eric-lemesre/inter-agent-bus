@@ -177,7 +177,7 @@ embedding the full diff in the prompt is reliable.
   a wrong review with the appearance of success, the exact failure mode
   this phase exists to kill.
 
-## Phase 6 — Documentation and closure
+## Phase 6 — Documentation and closure — **shipped**
 
 Closes P6 and makes the acceptance criterion executable.
 

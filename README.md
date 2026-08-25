@@ -78,8 +78,9 @@ environment and the resolved database path.
 of Claude Code (through `claude mcp add-json`), with this venv's
 interpreter and the server's path as absolute paths and
 `IAB_AGENT_NAME=claude` baked into `env` (`--agent-name` to change,
-`--print` to inspect the JSON without applying, `--scope
-project|local` for narrower scopes). A newly added server only loads
+`--print` to emit the user-scope variant of this repo's project-level
+`mcp.json` without applying it, `--scope project|local` for narrower
+scopes). A newly added server only loads
 in the *next* session — reopen, then verify with `whoami()`. Caveat of
 a user-scope install: every session of that client shares the baked
 identity, and each project gets its own bus database unless `IAB_DB`
@@ -117,6 +118,13 @@ command runs, the lease is renewed at every heartbeat, so long work is
 not re-offered mid-flight. `--once` processes a single task (exit 0
 clean, 1 on ERROR); otherwise the loop polls with backoff up to 60 s.
 Delivery is at-least-once: worker commands should be idempotent.
+
+The last-resort local fallback from the example roster runs the same
+way — ollama reads the prompt on stdin:
+
+```bash
+iab worker --agent qwen-local -- ollama run qwen3-coder:30b
+```
 
 ## Guarded reviews
 

@@ -81,8 +81,9 @@ l'identité issue de l'environnement et le chemin de base résolu.
 utilisateur de Claude Code (via `claude mcp add-json`), avec
 l'interpréteur du venv et le chemin du serveur en absolu et
 `IAB_AGENT_NAME=claude` gravé dans `env` (`--agent-name` pour changer,
-`--print` pour inspecter le JSON sans l'appliquer, `--scope
-project|local` pour des portées plus étroites). Un serveur ajouté ne se
+`--print` pour émettre la variante scope user du `mcp.json` projet de
+ce dépôt sans l'appliquer, `--scope project|local` pour des portées
+plus étroites). Un serveur ajouté ne se
 charge qu'à la *prochaine* session — rouvrir, puis vérifier avec
 `whoami()`. Réserve d'une installation scope user : toutes les
 sessions de ce client partagent l'identité gravée, et chaque projet
@@ -124,6 +125,13 @@ chaque battement — un travail long n'est pas re-proposé en plein vol.
 `--once` traite une seule tâche (sortie 0 propre, 1 sur ERROR) ; sinon
 la boucle interroge avec un recul jusqu'à 60 s. La livraison est
 at-least-once : les commandes worker doivent être idempotentes.
+
+Le repli local de dernier ressort du roster d'exemple se lance de la
+même façon — ollama lit le prompt sur stdin :
+
+```bash
+iab worker --agent qwen-local -- ollama run qwen3-coder:30b
+```
 
 ## Revues gardées
 
