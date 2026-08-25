@@ -40,7 +40,7 @@ change that violates an invariant is wrong even if it closes a request.
    French (`X.md` / `X.fr.md`); code, comments and manifests are in
    English.
 
-## Phase 1 — Foundations
+## Phase 1 — Foundations — **shipped**
 
 Prerequisite of everything else: packaging, platform paths, and the
 event journal that the later phases need to be debuggable.
@@ -69,9 +69,10 @@ platforms; `store_test.py` passes standalone.
 
 Closes P1 and P0 of the field report.
 
-- **CLI `iab`**: `register`, `push`, `claim`, `publish`, `result`,
-  `state`, `log`, `whoami` — argparse over `store.py`, `--json` output
-  for scripting. No more fragile `python -c` piloting.
+- **CLI `iab`** — **shipped with phase 1**: `register`, `push`,
+  `claim`, `publish`, `result`, `state`, `log`, `whoami` — argparse
+  over `store.py`, payloads read from stdin, non-zero exit on `ERROR:`
+  output. No more fragile `python -c` piloting.
 - **User-scope install**: `iab install --scope user` registers the MCP
   server at the user level of the client, going through the client's
   official mechanism (for Claude Code: `claude mcp add-json -s user`),
@@ -128,9 +129,9 @@ expiry — not worked around.
 - **Targeted claim** `claim_task(agent, task_id=…)`: provided, but as a
   logged escape hatch — the root fixes above are what actually prevent
   the incident.
-- **`iab log [task_id]`** renders the phase-1 journal per task and per
-  agent (the P5 request), ready to paste into review sheets and
-  milestone reports.
+- **`iab log [task_id]`** — **shipped with phase 1** — renders the
+  journal per task and per agent (the P5 request), ready to paste into
+  review sheets and milestone reports.
 
 ## Phase 4 — Headless workers
 

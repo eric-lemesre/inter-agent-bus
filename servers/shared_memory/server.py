@@ -72,5 +72,11 @@ def get_system_state() -> str:
     return store.get_system_state()
 
 
+@mcp.tool()
+def get_events(task_id: str = "", agent: str = "", limit: int = 100) -> str:
+    """Chronological transition history of the bus (push/claim/expire/publish), filterable by task and/or agent."""
+    return store.get_events(task_id or None, agent or None, limit)
+
+
 if __name__ == "__main__":
     mcp.run()

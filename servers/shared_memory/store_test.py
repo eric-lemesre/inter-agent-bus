@@ -77,6 +77,48 @@ with tempfile.TemporaryDirectory() as tmp:
     t3 = json.loads(store.claim_task("gamma"))
     check("this process sees the task pushed by the other", t3["task_id"] == "t-ipc")
 
+    # EVENT JOURNAL: every transition leaves a trace, readable per task.
+    kinds = [e["event"] for e in json.loads(store.get_events(task_id="t-high"))]
+    check("journal traces push → claim → publish",
+          kinds == ["push", "claim", "publish"], str(kinds))
+    kinds = [e["event"] for e in json.loads(store.get_events(task_id="t-crash"))]
+    check("journal traces the lease expiry",
+          kinds == ["push", "claim", "expire", "claim"], str(kinds))
+
+    # CLAIM CONTENTION: more processes than tasks race on one queue —
+    # each task must be claimed exactly once, the surplus sees NO_TASK.
+    store.register_agent("delta", "contention")
+    for i in range(4):
+        store.push_task("delta", f"t-race-{i}", "x")
+    procs = [
+        subprocess.Popen(
+            [sys.executable, "-c", "import store; print(store.claim_task('delta'))"],
+            cwd=HERE, env=os.environ.copy(), stdout=subprocess.PIPE, text=True,
+        )
+        for _ in range(8)
+    ]
+    outs = [p.communicate()[0].strip() for p in procs]
+    claimed = sorted(json.loads(o)["task_id"] for o in outs if o != "NO_TASK")
+    check("contended claims: each task claimed exactly once",
+          claimed == [f"t-race-{i}" for i in range(4)], str(outs))
+
+    # CLI: same core, drivable without MCP and without python -c.
+    cli = [sys.executable, str(HERE / "cli.py")]
+    out = subprocess.run(cli + ["state"], env=os.environ.copy(),
+                         capture_output=True, text=True)
+    check("cli state returns the system state", '"agents"' in out.stdout, out.stderr)
+    out = subprocess.run(cli + ["push", "delta", "t-cli", "-"],
+                         input="payload via stdin — quotes ' \" and $vars intact",
+                         env=os.environ.copy(), capture_output=True, text=True)
+    check("cli push reads the payload from stdin",
+          out.stdout.startswith("OK"), out.stdout + out.stderr)
+    check("cli-pushed payload is intact",
+          json.loads(store.claim_task("delta"))["payload"]
+          == "payload via stdin — quotes ' \" and $vars intact")
+    out = subprocess.run(cli + ["result", "t-missing"], env=os.environ.copy(),
+                         capture_output=True, text=True)
+    check("cli exits non-zero on ERROR output", out.returncode == 1, str(out.returncode))
+
     # Naming migration: legacy ORCHESTRATOR_DB honored, IAB_DB wins over it.
     os.environ["ORCHESTRATOR_DB"] = str(Path(tmp) / "legacy.db")
     check("IAB_DB wins over the legacy variable", store.db_path().name == "bus.db")

@@ -7,24 +7,40 @@ Kept separate from the MCP wrapper (server.py) for two reasons:
   2. the core is testable without the MCP SDK installed (store_test.py).
 
 Database path: IAB_DB env var (legacy ORCHESTRATOR_DB still honored),
-otherwise ~/.local/share/inter-agent-bus/bus.db — falling back to the
-pre-rename default if that one exists. This path is the cross-client
-rendezvous point — PLUGIN_DATA does not fit: it is managed PER CLIENT,
-hence invisible to the other agents.
+otherwise the platform data directory (XDG on Linux, Application Support
+on macOS, %LOCALAPPDATA% on Windows) — falling back to the pre-rename
+default if that one exists. This path is the cross-client rendezvous
+point — PLUGIN_DATA does not fit: it is managed PER CLIENT, hence
+invisible to the other agents.
 
 Task lifecycle: queued → claimed (lease) → done. An expired lease requeues
 the task (attempts + 1): an agent dying after claim no longer loses the
-task — the flaw of the destructive pop in the first version.
+task — the flaw of the destructive pop in the first version. Every
+transition is journaled in the append-only `events` table (get_events).
 """
 from __future__ import annotations
 
 import json
 import os
 import sqlite3
+import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-DEFAULT_DB = Path.home() / ".local/share/inter-agent-bus/bus.db"
+
+def _default_db() -> Path:
+    """Platform data directory, resolved like platformdirs would (rule:
+    no new dependency while three branches suffice)."""
+    if sys.platform == "win32":
+        base = Path(os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData/Local")))
+    elif sys.platform == "darwin":
+        base = Path.home() / "Library/Application Support"
+    else:
+        base = Path(os.environ.get("XDG_DATA_HOME", str(Path.home() / ".local/share")))
+    return base / "inter-agent-bus" / "bus.db"
+
+
+DEFAULT_DB = _default_db()
 LEGACY_DB = Path.home() / ".local/share/multi-agent-orchestrator/orchestrator.db"
 
 
@@ -75,9 +91,31 @@ def connect() -> sqlite3.Connection:
             content    TEXT NOT NULL,
             updated_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS events (
+            id      INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_id TEXT,
+            agent   TEXT,
+            event   TEXT NOT NULL,
+            at      TEXT NOT NULL,
+            detail  TEXT NOT NULL DEFAULT ''
+        );
+        CREATE INDEX IF NOT EXISTS events_task ON events(task_id);
         """
     )
     return conn
+
+
+def _log_event(
+    conn: sqlite3.Connection,
+    event: str,
+    task_id: str | None = None,
+    agent: str | None = None,
+    detail: str = "",
+) -> None:
+    conn.execute(
+        "INSERT INTO events(task_id, agent, event, at, detail) VALUES(?,?,?,?,?)",
+        (task_id, agent, event, _now(), detail),
+    )
 
 
 def register_agent(name: str, description: str = "") -> str:
@@ -85,11 +123,14 @@ def register_agent(name: str, description: str = "") -> str:
     if not name:
         return "ERROR: empty agent name."
     with connect() as conn:
+        known = conn.execute("SELECT 1 FROM agents WHERE name=?", (name,)).fetchone()
         conn.execute(
             "INSERT INTO agents(name, description, registered_at) VALUES(?,?,?) "
             "ON CONFLICT(name) DO UPDATE SET description=excluded.description",
             (name, description, _now()),
         )
+        if known is None:
+            _log_event(conn, "register", agent=name, detail=description)
     return f"OK: agent '{name}' registered."
 
 
@@ -116,15 +157,23 @@ def push_task(target_agent: str, task_id: str, payload: str, priority: int = 1) 
             )
         except sqlite3.IntegrityError:
             return f"ERROR: task_id '{task_id}' already exists."
+        _log_event(conn, "push", task_id, target, f"priority {priority}")
     return f"OK: task '{task_id}' queued for {target}."
 
 
 def _requeue_expired(conn: sqlite3.Connection) -> None:
-    conn.execute(
-        "UPDATE tasks SET status='queued', claimed_at=NULL, lease_deadline=NULL "
-        "WHERE status='claimed' AND lease_deadline < ?",
+    expired = conn.execute(
+        "SELECT task_id, agent FROM tasks WHERE status='claimed' AND lease_deadline < ?",
         (_now(),),
-    )
+    ).fetchall()
+    for row in expired:
+        conn.execute(
+            "UPDATE tasks SET status='queued', claimed_at=NULL, lease_deadline=NULL "
+            "WHERE task_id=?",
+            (row["task_id"],),
+        )
+        _log_event(conn, "expire", row["task_id"], row["agent"],
+                   "lease expired — task re-offered")
 
 
 def claim_task(agent_name: str, lease_seconds: int = 900) -> str:
@@ -149,6 +198,8 @@ def claim_task(agent_name: str, lease_seconds: int = 900) -> str:
                 "attempts=attempts+1 WHERE task_id=?",
                 (_now(), deadline, row["task_id"]),
             )
+            _log_event(conn, "claim", row["task_id"], target,
+                       f"attempt {row['attempts'] + 1}, lease until {deadline}")
             conn.execute("COMMIT")
         except Exception:
             conn.execute("ROLLBACK")
@@ -176,7 +227,9 @@ def publish_result(agent_name: str, task_id: str, result_content: str) -> str:
             "content=excluded.content, updated_at=excluded.updated_at",
             (task_id, author, result_content, _now()),
         )
-        conn.execute("UPDATE tasks SET status='done' WHERE task_id=?", (task_id,))
+        cur = conn.execute("UPDATE tasks SET status='done' WHERE task_id=?", (task_id,))
+        _log_event(conn, "publish", task_id, author,
+                   "settled" if cur.rowcount else "no matching task — result stored anyway")
     return f"OK: result for '{task_id}' published by {author}."
 
 
@@ -220,3 +273,25 @@ def get_system_state() -> str:
         indent=2,
         ensure_ascii=False,
     )
+
+
+def get_events(task_id: str | None = None, agent: str | None = None, limit: int = 100) -> str:
+    """Chronological transition history (register/push/claim/expire/publish),
+    filterable by task and/or agent; the `limit` most recent, oldest first."""
+    query = "SELECT task_id, agent, event, at, detail FROM events"
+    conds: list[str] = []
+    params: list[object] = []
+    if task_id:
+        conds.append("task_id=?")
+        params.append(task_id)
+    if agent:
+        conds.append("agent=?")
+        params.append(agent.strip().lower())
+    if conds:
+        query += " WHERE " + " AND ".join(conds)
+    query += " ORDER BY id DESC LIMIT ?"
+    params.append(limit)
+    with connect() as conn:
+        rows = [dict(r) for r in conn.execute(query, params)]
+    rows.reverse()
+    return json.dumps(rows, indent=2, ensure_ascii=False)

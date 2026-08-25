@@ -55,10 +55,18 @@ Règles de contribution (humain ou agent) : [`AGENTS.md`](AGENTS.md).
 ## Mise en place
 
 ```bash
-python3 -m venv .venv                              # les pythons système sont souvent gérés en externe
-.venv/bin/pip install -r requirements.txt          # SDK MCP >= 2.0 (le cœur s'en passe)
+python3 -m venv .venv                                  # py -m venv .venv sous Windows
+.venv/bin/pip install -r requirements.txt -e .         # SDK MCP >= 2.0 + la CLI `iab`
 .venv/bin/python servers/shared_memory/store_test.py   # tests, dont le partage inter-processus
 ```
+
+Le point d'entrée console `iab` reflète les outils MCP (`iab register /
+push / claim / publish / result / state / log / whoami`) : le bus se
+pilote sans MCP et sans `python -c`. Un payload donné comme `-` (ou
+omis) est lu sur stdin — ne jamais construire une ligne de commande
+shell autour d'un payload. `iab log [task_id]` restitue le journal des
+transitions (push/claim/expire/publish) ; `iab whoami` affiche
+l'identité issue de l'environnement et le chemin de base résolu.
 
 Pointer le `command` des clients vers `.venv/bin/python` (chemin absolu) :
 le serveur doit tourner sous un interpréteur qui a le SDK MCP.
@@ -83,7 +91,8 @@ lanceur ou l'enregistrement MCP l'a posée, sinon le clientInfo du
 handshake MCP, à confronter aux `client_hints` du roster — plus le
 chemin résolu de la base du bus) ·
 `register_agent` · `push_task` · `claim_task` · `publish_result`
-(solde la tâche) · `read_result` · `get_system_state`.
+(solde la tâche) · `read_result` · `get_system_state` · `get_events`
+(journal des transitions, filtrable par tâche et/ou agent).
 
 Note d'identité : graver `IAB_AGENT_NAME` dans l'enregistrement MCP de
 chaque client (champ `env`) est le moyen fiable de donner son identité à

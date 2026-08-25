@@ -53,10 +53,18 @@ Contributor rules (human or agent): [`AGENTS.md`](AGENTS.md).
 ## Setup
 
 ```bash
-python3 -m venv .venv                              # system pythons are often externally managed
-.venv/bin/pip install -r requirements.txt          # MCP SDK >= 2.0 (the core does not need it)
+python3 -m venv .venv                                  # py -m venv .venv on Windows
+.venv/bin/pip install -r requirements.txt -e .         # MCP SDK >= 2.0 + the `iab` CLI
 .venv/bin/python servers/shared_memory/store_test.py   # tests, incl. cross-process sharing
 ```
+
+The `iab` console script mirrors the MCP tools (`iab register / push /
+claim / publish / result / state / log / whoami`) so the bus can be
+driven without MCP and without `python -c`. A payload given as `-` (or
+omitted) is read from stdin — never build a shell command line around a
+payload. `iab log [task_id]` renders the transition journal
+(push/claim/expire/publish); `iab whoami` prints the identity from the
+environment and the resolved database path.
 
 Point the clients' `command` to `.venv/bin/python` (absolute path): the
 server must run under an interpreter that has the MCP SDK.
@@ -79,7 +87,8 @@ the launcher or the MCP registration set one, otherwise the MCP
 handshake's clientInfo, to match against the roster's `client_hints` —
 plus the resolved bus database path) ·
 `register_agent` · `push_task` · `claim_task` · `publish_result`
-(settles the task) · `read_result` · `get_system_state`.
+(settles the task) · `read_result` · `get_system_state` · `get_events`
+(transition journal, filterable by task and/or agent).
 
 Identity note: baking `IAB_AGENT_NAME` into each client's MCP
 registration (`env` field) is the reliable way to give every worker its

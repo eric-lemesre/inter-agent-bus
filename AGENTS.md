@@ -22,8 +22,12 @@ every change and are summarized below.
   lives here.** No MCP dependency, ever.
 - `servers/shared_memory/server.py` — MCP wrapper (SDK >= 2.0,
   `MCPServer`). Thin: one `@mcp.tool()` per store function, no logic.
+- `servers/shared_memory/cli.py` — console entry point (`iab`, see
+  `pyproject.toml`). Thin argparse over the store, same rule as the
+  server: no logic. The package name `iab` maps to this directory.
 - `servers/shared_memory/store_test.py` — tests for the core, runnable
-  **without** the MCP SDK, including cross-process sharing.
+  **without** the MCP SDK, including cross-process sharing and claim
+  contention.
 - `skills/` — agent-facing skills (router and worker sides).
 - `mcp.json`, `plugin.json` — Agent Plugins manifests.
 
@@ -79,8 +83,8 @@ every change and are summarized below.
 ## Developing
 
 ```bash
-python3 -m venv .venv                        # py -m venv .venv on Windows
-.venv/bin/pip install -r requirements.txt    # .venv\Scripts\pip on Windows
+python3 -m venv .venv                          # py -m venv .venv on Windows
+.venv/bin/pip install -r requirements.txt -e . # .venv\Scripts\pip on Windows
 .venv/bin/python servers/shared_memory/store_test.py
 ```
 

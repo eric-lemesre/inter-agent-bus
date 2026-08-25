@@ -44,7 +44,7 @@ clôt une demande.
    anglais et en français (`X.md` / `X.fr.md`) ; code, commentaires et
    manifestes sont en anglais.
 
-## Phase 1 — Fondations
+## Phase 1 — Fondations — **livrée**
 
 Prérequis de tout le reste : packaging, chemins par plateforme, et le
 journal d'événements dont les phases suivantes ont besoin pour être
@@ -76,10 +76,10 @@ trois plateformes ; `store_test.py` passe seul.
 
 Clôt P1 et P0 du retour de terrain.
 
-- **CLI `iab`** : `register`, `push`, `claim`, `publish`, `result`,
-  `state`, `log`, `whoami` — argparse au-dessus de `store.py`, sortie
-  `--json` pour la scriptabilité. Fin des pilotages en `python -c`
-  fragiles.
+- **CLI `iab`** — **livrée avec la phase 1** : `register`, `push`,
+  `claim`, `publish`, `result`, `state`, `log`, `whoami` — argparse
+  au-dessus de `store.py`, payloads lus sur stdin, code de sortie non
+  nul sur `ERROR:`. Fin des pilotages en `python -c` fragiles.
 - **Installation scope user** : `iab install --scope user` déclare le
   serveur MCP au niveau utilisateur du client, en passant par le
   mécanisme officiel du client (pour Claude Code :
@@ -139,9 +139,9 @@ silencieuse et illimitée — pas contourné.
 - **Claim ciblé** `claim_task(agent, task_id=…)` : fourni, mais comme
   issue de secours journalisée — ce sont les correctifs de racine
   ci-dessus qui empêchent réellement l'incident.
-- **`iab log [task_id]`** restitue le journal de la phase 1 par tâche
-  et par agent (la demande P5), prêt à coller dans les fiches de revue
-  et les rapports de jalon.
+- **`iab log [task_id]`** — **livré avec la phase 1** — restitue le
+  journal par tâche et par agent (la demande P5), prêt à coller dans
+  les fiches de revue et les rapports de jalon.
 
 ## Phase 4 — Workers headless
 
