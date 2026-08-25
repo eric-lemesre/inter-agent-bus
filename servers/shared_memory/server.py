@@ -43,21 +43,43 @@ def register_agent(name: str, description: str = "") -> str:
 
 
 @mcp.tool()
-def push_task(target_agent: str, task_id: str, payload: str, priority: int = 1) -> str:
-    """Queue a task for a registered agent (higher priority is served first)."""
-    return store.push_task(target_agent, task_id, payload, priority)
+def push_task(
+    target_agent: str, task_id: str, payload: str, priority: int = 1, max_attempts: int = 3
+) -> str:
+    """Queue a task for a registered agent (higher priority is served first; after max_attempts expired leases the task is dead-lettered)."""
+    return store.push_task(target_agent, task_id, payload, priority, max_attempts)
 
 
 @mcp.tool()
-def claim_task(agent_name: str, lease_seconds: int = 900) -> str:
-    """Claim the next task of one's queue, under lease: if not settled before the deadline, it is re-offered."""
-    return store.claim_task(agent_name, lease_seconds)
+def claim_task(agent_name: str, lease_seconds: int = 900, task_id: str = "") -> str:
+    """Claim the next task of one's queue under lease (re-offered if not settled before the deadline) — or one specific queued task of one's own queue when task_id is given."""
+    return store.claim_task(agent_name, lease_seconds, task_id or None)
 
 
 @mcp.tool()
-def publish_result(agent_name: str, task_id: str, result_content: str) -> str:
-    """Publish a task's result (settles the task) into the shared memory readable by all agents."""
-    return store.publish_result(agent_name, task_id, result_content)
+def publish_result(
+    agent_name: str, task_id: str, result_content: str, attempt: int = 0, force: bool = False
+) -> str:
+    """Publish a task's result (settles the task); pass the attempt number received at claim so a stale worker cannot overwrite a re-offered task's result (force overrides every check)."""
+    return store.publish_result(agent_name, task_id, result_content, attempt or None, force)
+
+
+@mcp.tool()
+def cancel_task(task_id: str) -> str:
+    """Cancel a task that is not settled yet (terminal status `cancelled`)."""
+    return store.cancel_task(task_id)
+
+
+@mcp.tool()
+def requeue_task(task_id: str) -> str:
+    """Re-offer a claimed, dead or cancelled task, re-arming three more attempts; a done task stays done."""
+    return store.requeue_task(task_id)
+
+
+@mcp.tool()
+def extend_lease(task_id: str, lease_seconds: int = 900) -> str:
+    """Renew the lease of a claimed task (deadline = now + lease_seconds) so long work is not re-offered mid-flight."""
+    return store.extend_lease(task_id, lease_seconds)
 
 
 @mcp.tool()

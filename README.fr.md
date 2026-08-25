@@ -44,8 +44,13 @@ Règles de contribution (humain ou agent) : [`AGENTS.md`](AGENTS.md).
 
 - `servers/shared_memory/` — le serveur MCP (`server.py`, wrapper fin) et le
   cœur de stockage (`store.py`, sans dépendance MCP, testable seul). Cycle
-  d'une tâche : `queued → claimed (bail) → done` ; un bail expiré re-propose
-  la tâche — un agent qui meurt après `claim_task` ne la perd pas.
+  d'une tâche : `queued → claimed (bail) → done`, avec deux sorties
+  terminales : `dead` (mise en dead-letter après `max_attempts` baux
+  expirés — `requeue_task` la ranime) et `cancelled`. Un bail expiré
+  re-propose la tâche — un agent qui meurt après `claim_task` ne la perd
+  pas ; et le solde est clôturé par le jeton de tentative du claim — un
+  worker périmé ne peut pas écraser le résultat de celui qui a repris la
+  tâche.
 - `skills/pipeline-router/` — skill de routage (côté orchestrateur) :
   règles universelles (le volume aux forfaits, la masse au moins cher au
   token, le critique au meilleur raisonneur, jamais d'auto-revue), roster
@@ -65,8 +70,8 @@ python3 -m venv .venv                                  # py -m venv .venv sous W
 ```
 
 Le point d'entrée console `iab` reflète les outils MCP (`iab register /
-push / claim / publish / result / state / log / whoami`) : le bus se
-pilote sans MCP et sans `python -c`. Un payload donné comme `-` (ou
+push / claim / publish / cancel / requeue / extend / result / state /
+log / whoami`) : le bus se pilote sans MCP et sans `python -c`. Un payload donné comme `-` (ou
 omis) est lu sur stdin — ne jamais construire une ligne de commande
 shell autour d'un payload. `iab log [task_id]` restitue le journal des
 transitions (push/claim/expire/publish) ; `iab whoami` affiche
@@ -105,9 +110,12 @@ l'opérateur.
 lanceur ou l'enregistrement MCP l'a posée, sinon le clientInfo du
 handshake MCP, à confronter aux `client_hints` du roster — plus le
 chemin résolu de la base du bus) ·
-`register_agent` · `push_task` · `claim_task` · `publish_result`
-(solde la tâche) · `read_result` · `get_system_state` · `get_events`
-(journal des transitions, filtrable par tâche et/ou agent).
+`register_agent` · `push_task` · `claim_task` (tête de sa file, ou une
+tâche précise via `task_id`) · `publish_result` (solde la tâche ;
+passer le jeton `attempt` du claim — clôture de bail) · `cancel_task` ·
+`requeue_task` · `extend_lease` · `read_result` · `get_system_state` ·
+`get_events` (journal des transitions, filtrable par tâche et/ou
+agent).
 
 Note d'identité : graver `IAB_AGENT_NAME` dans l'enregistrement MCP de
 chaque client (champ `env`) est le moyen fiable de donner son identité à

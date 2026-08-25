@@ -53,8 +53,11 @@ Before any routing: read the roster, then call
    re-offers it automatically).
 5. Dependencies resolve through `read_result(task_id)` — a downstream
    subtask references in its payload the upstream `task_id`s it needs.
-6. Supervise with `get_system_state()`; route cross-reviews by applying
-   rule 4.
+6. Supervise with `get_system_state()` (queued/claimed/dead/cancelled
+   per queue) and `get_events(task_id)` (transition history). A
+   dead-lettered task is yours to arbitrate: `requeue_task` to retry,
+   `cancel_task` to drop, or re-push a corrected contract under a new
+   `task_id`. Route cross-reviews by applying rule 4.
 
 ## Routing helper outside a session
 

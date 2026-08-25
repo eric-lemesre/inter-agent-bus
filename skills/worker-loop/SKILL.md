@@ -45,19 +45,27 @@ how you work.
 1. `register_agent(name, description)` — idempotent; creates your queue if
    the router has not already done so.
 2. `claim_task(agent_name=<you>)` — claims the highest-priority task of
-   your queue under a lease. Estimate the work first: if it may exceed the
-   default lease (900 s), claim with a larger `lease_seconds` rather than
-   letting the lease expire mid-work (an expired lease re-offers the task
-   to be claimed again — possibly by you, duplicating effort).
+   your queue under a lease. Keep the `attempts` number from the claim
+   response: it is your settle token (step 4). If the work may exceed
+   the default lease (900 s), claim with a larger `lease_seconds`, and
+   call `extend_lease(task_id, seconds)` when a long execution
+   approaches its deadline — an expired lease re-offers the task
+   (duplicated effort), and after `max_attempts` expiries the task is
+   dead-lettered.
 3. **Execute the payload as a closed contract**: inputs, expected outputs
    and acceptance criteria are in the payload. If the payload references
    upstream `task_id`s, fetch their outputs with `read_result(task_id)`
    before starting; if an upstream result is not published yet, publish
    nothing, let your lease expire, and tell the operator the dependency is
    not ready.
-4. `publish_result(agent_name, task_id, result_content)` — settles the
-   task. Publish the deliverable itself (or a precise pointer to it: file
-   paths, branch, commit), not a summary of your intentions.
+4. `publish_result(agent_name, task_id, result_content, attempt=<the
+   attempts number from your claim>)` — settles the task. The token
+   protects everyone: if your lease expired and the task was re-offered
+   to another worker, your stale publish is refused instead of
+   overwriting theirs — treat that refusal as "my work is obsolete",
+   not as an error to force. Publish the deliverable itself (or a
+   precise pointer to it: file paths, branch, commit), not a summary of
+   your intentions.
 5. Back to step 2. On `NO_TASK`, the queue is drained: report it and stop.
    Whether to poll again later is the operator's call — in an interactive
    client, ask rather than busy-loop.
@@ -67,8 +75,9 @@ how you work.
 - **A task you cannot complete is settled, not abandoned.** Publish a
   result starting with `ERROR:` stating what blocked you; the orchestrator
   decides (re-push under a new `task_id`, reroute, drop). A silently
-  expiring lease looks like a crashed agent and gets the same task
-  re-offered forever.
+  expiring lease looks like a crashed agent and burns one of the task's
+  `max_attempts` — after the last one it is dead-lettered and only the
+  orchestrator's `requeue` can revive it.
 - **Never review your own work.** If a claimed review task targets
   something this session produced, publish `ERROR: self-review refused`
   and let the orchestrator reroute it.

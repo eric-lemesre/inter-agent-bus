@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -127,6 +128,106 @@ with tempfile.TemporaryDirectory() as tmp:
           and Path(cfg["args"][0]).is_absolute()
           and cfg["env"]["IAB_AGENT_NAME"] == "kimi",
           out.stdout + out.stderr)
+
+    # LIFECYCLE — dead-letter: after max_attempts expired leases the task
+    # is dead-lettered instead of being re-offered forever.
+    store.register_agent("eps", "lifecycle")
+    store.push_task("eps", "t-dead", "x", max_attempts=2)
+    json.loads(store.claim_task("eps", lease_seconds=1))
+    time.sleep(1.2)
+    t = json.loads(store.claim_task("eps", lease_seconds=1))
+    check("below max_attempts the task is re-offered", t["task_id"] == "t-dead")
+    time.sleep(1.2)
+    check("beyond max_attempts the queue is empty (dead-letter)",
+          store.claim_task("eps") == "NO_TASK")
+    kinds = [e["event"] for e in json.loads(store.get_events(task_id="t-dead"))]
+    check("dead-lettering is journaled", kinds[-1] == "dead", str(kinds))
+
+    # requeue revives a dead task, re-arming attempts (never rewinding them).
+    check("requeue revives a dead task", store.requeue_task("t-dead").startswith("OK"))
+    t = json.loads(store.claim_task("eps"))
+    check("a revived task is claimable again",
+          t["task_id"] == "t-dead" and t["attempts"] == 3, str(t))
+    store.publish_result("eps", "t-dead", "done", attempt=t["attempts"])
+
+    # Ownership on settle: another agent cannot settle someone else's task.
+    store.push_task("eps", "t-own", "x")
+    json.loads(store.claim_task("eps"))
+    r = store.publish_result("alpha", "t-own", "hijack")
+    check("settling someone else's task is refused", r.startswith("ERROR"), r)
+    r = store.publish_result("alpha", "t-own", "override", force=True)
+    check("force overrides the ownership check", r.startswith("OK"), r)
+    r = store.publish_result("eps", "t-ghost", "x")
+    check("settling an unknown task is refused", r.startswith("ERROR"), r)
+    r = store.publish_result("eps", "t-ghost", "x", force=True)
+    check("force stores a result for an unknown task", r.startswith("OK"), r)
+
+    # Lease fencing: a stale worker (expired lease) cannot overwrite the
+    # result of the worker that took the task over.
+    store.push_task("eps", "t-fence", "x")
+    t1 = json.loads(store.claim_task("eps", lease_seconds=1))
+    time.sleep(1.2)
+    t2 = json.loads(store.claim_task("eps"))
+    r = store.publish_result("eps", "t-fence", "stale", attempt=t1["attempts"])
+    check("a stale attempt token is refused", r.startswith("ERROR"), r)
+    r = store.publish_result("eps", "t-fence", "fresh", attempt=t2["attempts"])
+    check("the current attempt token settles", r.startswith("OK"), r)
+    check("the fresh result stands",
+          json.loads(store.read_result("t-fence"))["content"] == "fresh")
+
+    # extend_lease: a renewed lease is not re-offered mid-flight.
+    store.push_task("eps", "t-long", "x")
+    t = json.loads(store.claim_task("eps", lease_seconds=1))
+    store.extend_lease("t-long", 60)
+    time.sleep(1.2)
+    check("an extended lease is not re-offered", store.claim_task("eps") == "NO_TASK")
+    store.publish_result("eps", "t-long", "done", attempt=t["attempts"])
+
+    # Targeted claim: one specific queued task of one's own queue.
+    store.push_task("eps", "t-a", "x")
+    store.push_task("eps", "t-b", "x")
+    t = json.loads(store.claim_task("eps", task_id="t-b"))
+    check("targeted claim picks the requested task", t["task_id"] == "t-b")
+    r = store.claim_task("alpha", task_id="t-a")
+    check("cross-queue targeted claim is refused", r.startswith("ERROR"), r)
+    r = store.claim_task("eps", task_id="t-b")
+    check("targeting a non-queued task is refused", r.startswith("ERROR"), r)
+
+    # cancel: a cancelled task leaves the queue for good.
+    check("a queued task can be cancelled", store.cancel_task("t-a").startswith("OK"))
+    check("a cancelled task is not served", store.claim_task("eps") == "NO_TASK")
+    check("cancelling a settled task is refused",
+          store.cancel_task("t-fence").startswith("ERROR"))
+
+    # SCHEMA MIGRATION: a pre-phase-3 database (no max_attempts column,
+    # no events table) keeps working — additive ALTER on first contact.
+    old = Path(tmp) / "old-schema.db"
+    c = sqlite3.connect(old)
+    c.executescript(
+        """
+        CREATE TABLE agents (name TEXT PRIMARY KEY,
+            description TEXT NOT NULL DEFAULT '', registered_at TEXT NOT NULL);
+        CREATE TABLE tasks (task_id TEXT PRIMARY KEY,
+            agent TEXT NOT NULL REFERENCES agents(name), payload TEXT NOT NULL,
+            priority INTEGER NOT NULL DEFAULT 1,
+            status TEXT NOT NULL DEFAULT 'queued',
+            attempts INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL, claimed_at TEXT, lease_deadline TEXT);
+        CREATE TABLE results (task_id TEXT PRIMARY KEY, author TEXT NOT NULL,
+            content TEXT NOT NULL, updated_at TEXT NOT NULL);
+        INSERT INTO agents VALUES('old', '', '2026-01-01T00:00:00+00:00');
+        INSERT INTO tasks(task_id, agent, payload, created_at)
+            VALUES('t-old', 'old', 'x', '2026-01-01T00:00:00+00:00');
+        """
+    )
+    c.commit()
+    c.close()
+    os.environ["IAB_DB"] = str(old)
+    t = json.loads(store.claim_task("old"))
+    check("a pre-phase-3 database is migrated on contact", t["task_id"] == "t-old")
+    check("a migrated task settles with the fencing token",
+          store.publish_result("old", "t-old", "ok", attempt=t["attempts"]).startswith("OK"))
+    os.environ["IAB_DB"] = str(Path(tmp) / "bus.db")
 
     # Naming migration: legacy ORCHESTRATOR_DB honored, IAB_DB wins over it.
     os.environ["ORCHESTRATOR_DB"] = str(Path(tmp) / "legacy.db")

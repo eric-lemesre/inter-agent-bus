@@ -103,7 +103,7 @@ Acceptance: from a fresh Claude Code session with no project config,
 `whoami()` answers; two different projects do not see each other's
 queues.
 
-## Phase 3 — Task lifecycle
+## Phase 3 — Task lifecycle — **shipped**
 
 Closes P3, corrected: the incident (claiming an old silently-requeued
 task instead of the fresh one) is fixed at the root — unbounded silent

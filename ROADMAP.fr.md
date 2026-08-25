@@ -113,7 +113,7 @@ Acceptation : depuis une session Claude Code fraîche sans configuration
 projet, `whoami()` répond ; deux projets différents ne voient pas les
 files l'un de l'autre.
 
-## Phase 3 — Cycle de vie des tâches
+## Phase 3 — Cycle de vie des tâches — **livrée**
 
 Clôt P3, corrigé : l'incident (réclamer une vieille tâche requeuée en
 silence au lieu de la fraîche) est réglé à la racine — l'expiration

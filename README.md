@@ -43,8 +43,12 @@ Contributor rules (human or agent): [`AGENTS.md`](AGENTS.md).
 
 - `servers/shared_memory/` — the MCP server (`server.py`, thin wrapper) and
   the storage core (`store.py`, no MCP dependency, testable standalone).
-  Task lifecycle: `queued → claimed (lease) → done`; an expired lease
-  re-offers the task, so an agent dying after `claim_task` does not lose it.
+  Task lifecycle: `queued → claimed (lease) → done`, with terminal side
+  exits `dead` (dead-lettered after `max_attempts` expired leases —
+  `requeue_task` revives) and `cancelled`. An expired lease re-offers
+  the task, so an agent dying after `claim_task` does not lose it; and
+  settling is fenced by the claim's attempt token, so a stale worker
+  cannot overwrite the result of the worker that took the task over.
 - `skills/pipeline-router/` — routing skill (orchestrator side): universal
   rules (volume to flat-rate agents, bulk to the cheapest per token,
   critical work to the strongest reasoner, never self-review), roster as
@@ -63,8 +67,8 @@ python3 -m venv .venv                                  # py -m venv .venv on Win
 ```
 
 The `iab` console script mirrors the MCP tools (`iab register / push /
-claim / publish / result / state / log / whoami`) so the bus can be
-driven without MCP and without `python -c`. A payload given as `-` (or
+claim / publish / cancel / requeue / extend / result / state / log /
+whoami`) so the bus can be driven without MCP and without `python -c`. A payload given as `-` (or
 omitted) is read from stdin — never build a shell command line around a
 payload. `iab log [task_id]` renders the transition journal
 (push/claim/expire/publish); `iab whoami` prints the identity from the
@@ -101,9 +105,11 @@ given by the operator.
 the launcher or the MCP registration set one, otherwise the MCP
 handshake's clientInfo, to match against the roster's `client_hints` —
 plus the resolved bus database path) ·
-`register_agent` · `push_task` · `claim_task` · `publish_result`
-(settles the task) · `read_result` · `get_system_state` · `get_events`
-(transition journal, filterable by task and/or agent).
+`register_agent` · `push_task` · `claim_task` (head of one's queue, or
+one specific task via `task_id`) · `publish_result` (settles the task;
+pass the claim's `attempt` token — lease fencing) · `cancel_task` ·
+`requeue_task` · `extend_lease` · `read_result` · `get_system_state` ·
+`get_events` (transition journal, filterable by task and/or agent).
 
 Identity note: baking `IAB_AGENT_NAME` into each client's MCP
 registration (`env` field) is the reliable way to give every worker its

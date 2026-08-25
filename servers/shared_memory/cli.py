@@ -115,15 +115,32 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("task_id")
     p.add_argument("payload", nargs="?", help="omit or use '-' to read from stdin")
     p.add_argument("-p", "--priority", type=int, default=1)
+    p.add_argument("--max-attempts", type=int, default=3,
+                   help="expired leases before dead-lettering (default: 3)")
 
     p = sub.add_parser("claim", help="claim the next task of an agent's queue, under lease")
     p.add_argument("agent")
     p.add_argument("--lease", type=int, default=900, metavar="SECONDS")
+    p.add_argument("--task-id", help="claim this specific queued task of one's own queue")
 
     p = sub.add_parser("publish", help="publish a task's result (settles the task)")
     p.add_argument("agent")
     p.add_argument("task_id")
     p.add_argument("content", nargs="?", help="omit or use '-' to read from stdin")
+    p.add_argument("--attempt", type=int,
+                   help="attempt number received at claim (lease fencing)")
+    p.add_argument("--force", action="store_true",
+                   help="orchestrator override of ownership and fencing checks")
+
+    p = sub.add_parser("cancel", help="cancel a task that is not settled yet")
+    p.add_argument("task_id")
+
+    p = sub.add_parser("requeue", help="re-offer a claimed, dead or cancelled task")
+    p.add_argument("task_id")
+
+    p = sub.add_parser("extend", help="renew the lease of a claimed task")
+    p.add_argument("task_id")
+    p.add_argument("--lease", type=int, default=900, metavar="SECONDS")
 
     p = sub.add_parser("result", help="read the published result of a task")
     p.add_argument("task_id")
@@ -151,10 +168,16 @@ def main(argv: list[str] | None = None) -> int:
     out = {
         "register": lambda: store.register_agent(args.name, args.description),
         "push": lambda: store.push_task(
-            args.agent, args.task_id, _content(args.payload), args.priority
+            args.agent, args.task_id, _content(args.payload), args.priority,
+            args.max_attempts,
         ),
-        "claim": lambda: store.claim_task(args.agent, args.lease),
-        "publish": lambda: store.publish_result(args.agent, args.task_id, _content(args.content)),
+        "claim": lambda: store.claim_task(args.agent, args.lease, args.task_id),
+        "publish": lambda: store.publish_result(
+            args.agent, args.task_id, _content(args.content), args.attempt, args.force
+        ),
+        "cancel": lambda: store.cancel_task(args.task_id),
+        "requeue": lambda: store.requeue_task(args.task_id),
+        "extend": lambda: store.extend_lease(args.task_id, args.lease),
         "result": lambda: store.read_result(args.task_id),
         "state": lambda: store.get_system_state(),
         "log": lambda: store.get_events(args.task_id, args.agent, args.limit),
