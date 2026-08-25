@@ -5,135 +5,139 @@
 An **[Agent Plugins](https://agent-plugins.org/) v1.0.0** plugin: a
 coordination bus between heterogeneous AI agents (Claude Code, Kimi,
 DeepSeek, local models…). The plugin provides the **mechanism** — task
-queues with leases (claim/ack), a shared result store, an observable
-state — and **never the cast**: agents and their roles are declared by the
-consuming project in its roster.
+queues under lease (claim/ack), a shared result store, an event
+journal, an observable state — and **never the cast**: agents and
+their roles are declared by the consuming project in its roster.
 
-## Transport vs shared state — two layers, one bus
+## Two layers, one bus
 
-These are different layers, and both are true at once:
+- **stdio is the transport**: each agent client spawns **its own
+  instance** of the MCP server (one subprocess per client). Nothing is
+  shared at this layer.
+- **SQLite is the bus**: all server instances read and write the
+  **same database** (WAL mode, immediate transactions). *This* is
+  where sharing happens. No daemon to start or supervise.
 
-- **stdio is the transport**: each agent client spawns **its own instance**
-  of the MCP server (that is how stdio servers work — one subprocess per
-  client). Nothing is shared at this layer.
-- **SQLite is the bus**: all server instances read and write the **same
-  database** (WAL mode, immediate transactions). *This* is where sharing
-  happens.
+## Task lifecycle
 
-The zero-daemon alternative would be a single `streamable-http` server that
-*is* the memory — but someone must start, supervise and secure that daemon.
-For a local multi-CLI setup, stdio + a SQLite bus wins.
+`queued → claimed (lease) → done`, with two terminal side exits:
+`dead` (dead-lettered after `max_attempts` expired leases —
+`requeue_task` revives it) and `cancelled`. An expired lease re-offers
+the task, so an agent dying after `claim_task` does not lose it.
+Delivery is therefore **at-least-once**: tasks should be idempotent.
+Settling is **fenced**: the claim response carries an attempt number,
+and `publish_result` refuses a staler token — a slow worker whose
+lease expired cannot overwrite the result of the worker that took the
+task over. Every transition is journaled (`get_events`, `iab log`).
 
-Database path — resolution order: (1) the `IAB_DB` env var, the
-authority — set it per project when in doubt (legacy `ORCHESTRATOR_DB`
-honored); (2) an existing global or pre-rename database is kept
-(migration); (3) otherwise **one database per project**, derived from
-the launch working directory (realpath-normalized) under the platform
-data directory — a user-scope install must not merge every project
-into one bus. All participants of one project must resolve the same
-path: `whoami()` returns the resolved path, its source and the project
-key, so a rendezvous mismatch is diagnosable in one call.
-(`PLUGIN_DATA` does not fit as the bus: the spec defines it *per
-client*, hence invisible to the other agents.)
+## Installation (operator)
 
-Planned evolutions and their invariants: [`ROADMAP.md`](ROADMAP.md).
-Contributor rules (human or agent): [`AGENTS.md`](AGENTS.md).
-
-## Components
-
-- `servers/shared_memory/` — the MCP server (`server.py`, thin wrapper) and
-  the storage core (`store.py`, no MCP dependency, testable standalone).
-  Task lifecycle: `queued → claimed (lease) → done`, with terminal side
-  exits `dead` (dead-lettered after `max_attempts` expired leases —
-  `requeue_task` revives) and `cancelled`. An expired lease re-offers
-  the task, so an agent dying after `claim_task` does not lose it; and
-  settling is fenced by the claim's attempt token, so a stale worker
-  cannot overwrite the result of the worker that took the task over.
-- `skills/pipeline-router/` — routing skill (orchestrator side): universal
-  rules (volume to flat-rate agents, bulk to the cheapest per token,
-  critical work to the strongest reasoner, never self-review), roster as
-  input.
-- `skills/worker-loop/` — worker skill (consumer side): register under the
-  operator-given identity, then loop `claim_task` → execute →
-  `publish_result`; failure discipline (`ERROR:` results instead of
-  silently expiring leases, self-review refusal, budget-cap handback).
-
-## Setup
+Run the bus from a dedicated venv installed from a **tagged release**,
+never from a working tree:
 
 ```bash
-python3 -m venv .venv                                  # py -m venv .venv on Windows
-.venv/bin/pip install -r requirements.txt -e .         # MCP SDK >= 2.0 + the `iab` CLI
-.venv/bin/python servers/shared_memory/store_test.py   # tests, incl. cross-process sharing
+python3 -m venv ~/.local/venvs/inter-agent-bus
+~/.local/venvs/inter-agent-bus/bin/pip install \
+  'inter-agent-bus[server] @ git+https://github.com/eric-lemesre/inter-agent-bus@v0.10.0'
+~/.local/venvs/inter-agent-bus/bin/iab install --scope user
 ```
 
-The `iab` console script mirrors the MCP tools (`iab register / push /
-claim / publish / cancel / requeue / extend / result / state / log /
-whoami`) so the bus can be driven without MCP and without `python -c`. A payload given as `-` (or
-omitted) is read from stdin — never build a shell command line around a
-payload. `iab log [task_id]` renders the transition journal
-(push/claim/expire/publish); `iab whoami` prints the identity from the
-environment and the resolved database path.
+`iab install` registers the MCP server in Claude Code (through
+`claude mcp add-json`) as the `iab-server` executable of that venv —
+no repository path involved. A newly added server only loads in the
+**next** session: reopen, then call `whoami()` (it returns the
+identity, the resolved bus database and how it was chosen). To
+upgrade: `pip install -U` with the next tag, then reopen sessions.
+Caveat of a user-scope install: every Claude Code session shares the
+baked identity (`--agent-name` to change it, `--print` to inspect the
+JSON without applying, `--scope project|local` for narrower scopes).
 
-`iab install --scope user` registers the MCP server at the user level
-of Claude Code (through `claude mcp add-json`), with this venv's
-interpreter and the server's path as absolute paths and
-`IAB_AGENT_NAME=claude` baked into `env` (`--agent-name` to change,
-`--print` to emit the user-scope variant of this repo's project-level
-`mcp.json` without applying it, `--scope project|local` for narrower
-scopes). A newly added server only loads
-in the *next* session — reopen, then verify with `whoami()`. Caveat of
-a user-scope install: every session of that client shares the baked
-identity, and each project gets its own bus database unless `IAB_DB`
-says otherwise.
+### Other agent clients (Kimi, DeepSeek, …)
 
-Point the clients' `command` to `.venv/bin/python` (absolute path): the
-server must run under an interpreter that has the MCP SDK.
+Emit the registration block with the client's roster identity and
+paste it under `mcpServers` in the client's MCP configuration (e.g.
+`~/.kimi/mcp.json`, `~/.codewhale/mcp.json`):
 
-Consumer project side: copy
-`skills/pipeline-router/references/roster.example.json` to `roster.json`,
-adapt the cast, set `IAB_ROSTER` (and `IAB_DB` if the default path does
-not suit). The legacy `ORCHESTRATOR_*` variable names remain honored.
+```bash
+~/.local/venvs/inter-agent-bus/bin/iab install --print --agent-name kimi
+```
 
-Each agent client registers the MCP server (with generic MCP clients, use
-**absolute paths** — the `cwd` = plugin-root convention only binds clients
-implementing the Agent Plugins spec). The orchestrating session uses
-`pipeline-router`; each worker session uses `worker-loop` with an identity
-given by the operator.
+Use **absolute paths** with generic MCP clients — the `cwd` =
+plugin-root convention only binds clients implementing the Agent
+Plugins spec. Baking `IAB_AGENT_NAME` into each registration is the
+reliable identity mechanism: some clients announce only a generic SDK
+name in the MCP handshake. Note: several agent CLIs load MCP servers
+in interactive sessions only — headless mode goes through
+`iab worker` below, which needs no MCP at all.
+
+## Project setup (consumer side)
+
+Copy `skills/pipeline-router/references/roster.example.json` to
+`roster.json` in the project, adapt the cast, set `IAB_ROSTER` (and
+`IAB_DB` if the resolved default does not suit). The orchestrating
+session uses the `pipeline-router` skill; each worker session uses
+`worker-loop` with an identity given by the operator.
+
+**Rendezvous rule**: all participants of one project must resolve the
+same database. `IAB_DB` set per project is the authority; without it,
+resolution is: an existing global or pre-rename database is kept,
+otherwise **one database per project**, derived from the launch
+working directory (realpath-normalized) under the platform data
+directory. `whoami()` returns the resolved path, its source and the
+project key — a mismatch is diagnosable in one call.
+
+## MCP tools
+
+`whoami` · `register_agent` · `push_task` · `claim_task` (head of
+one's queue, or one specific task via `task_id`) · `publish_result`
+(settles the task; pass the claim's `attempt` token — lease fencing) ·
+`cancel_task` · `requeue_task` · `extend_lease` · `read_result` ·
+`get_system_state` · `get_events` (transition journal, filterable by
+task and/or agent).
+
+## CLI
+
+The `iab` console script mirrors the MCP tools — the bus can be driven
+without MCP and without `python -c`:
+
+```
+iab register <agent> [-d DESC]          iab result <task_id>
+iab push <agent> <task_id> [payload|-]  iab state
+iab claim <agent> [--lease S] [--task-id ID]
+iab publish <agent> <task_id> [content|-] [--attempt N] [--force]
+iab cancel|requeue <task_id>            iab log [task_id] [-a AGENT]
+iab extend <task_id> [--lease S]        iab whoami
+```
+
+A payload given as `-` (or omitted) is read from stdin — never build a
+shell command line around a payload. Exit code is non-zero on `ERROR:`
+output.
 
 ## Headless workers
 
-Some agent CLIs load no MCP servers in non-interactive mode (the field
-failure behind the worker-daemon request): they cannot hold their own
-claim/publish loop. `iab worker` holds it for them:
+Some agent CLIs cannot hold their own claim/publish loop in
+non-interactive mode. `iab worker` holds it for them:
 
 ```bash
 iab worker --agent kimi --once -- kimi --exec -    # adapt to the CLI's flags
-```
-
-Claim under lease → run the command with the payload **on stdin**
-(never on the command line) → publish stdout with the claim's attempt
-token. Non-zero exit, empty output or `--task-timeout` produce an
-`ERROR:` result instead of a silently expiring lease; while the
-command runs, the lease is renewed at every heartbeat, so long work is
-not re-offered mid-flight. `--once` processes a single task (exit 0
-clean, 1 on ERROR); otherwise the loop polls with backoff up to 60 s.
-Delivery is at-least-once: worker commands should be idempotent.
-
-The last-resort local fallback from the example roster runs the same
-way — ollama reads the prompt on stdin:
-
-```bash
 iab worker --agent qwen-local -- ollama run qwen3-coder:30b
 ```
 
+Claim under lease → run the command with the payload **on stdin** →
+publish stdout with the claim's attempt token. Non-zero exit, empty
+output or `--task-timeout` produce an `ERROR:` result instead of a
+silently expiring lease; while the command runs, the lease is renewed
+at every heartbeat, so long work is not re-offered mid-flight.
+`--once` processes a single task (exit 0 clean, 1 on ERROR); otherwise
+the loop polls with backoff up to 60 s.
+
 ## Guarded reviews
 
-Born from the field: one reviewer CLI returned a silently *empty*
-successful review; another, without file access, *hallucinated* the
-diff it was asked to quote. `iab review` closes both holes:
+`iab review` makes a reviewer CLI reliable when it has no file access
+or answers emptily:
 
 ```bash
-iab review --agent deepseek --staged        -- <reviewer command>
+iab review --agent deepseek --staged         -- <reviewer command>
 iab review --agent deepseek --diff work.diff -- <reviewer command>
 ```
 
@@ -144,33 +148,40 @@ must point at a file and line actually covered by the diff's hunks. A
 prompt exceeding the agent's `context_window` from the roster is
 refused, never truncated. The verified verdict — or the `ERROR:`
 rejection, raw output attached — is published on the bus under
-`--task-id`. The guard filters *mechanical* failures only; it does not
-judge substance: keep cross-reviewing with another agent (router rule).
+`--task-id`. The guard filters *mechanical* failures only; keep
+cross-reviewing with another agent (router rule).
 
-## MCP tools
+## Configuration
 
-`whoami` (identity of the connected client — `IAB_AGENT_NAME` env var if
-the launcher or the MCP registration set one, otherwise the MCP
-handshake's clientInfo, to match against the roster's `client_hints` —
-plus the resolved bus database path) ·
-`register_agent` · `push_task` · `claim_task` (head of one's queue, or
-one specific task via `task_id`) · `publish_result` (settles the task;
-pass the claim's `attempt` token — lease fencing) · `cancel_task` ·
-`requeue_task` · `extend_lease` · `read_result` · `get_system_state` ·
-`get_events` (transition journal, filterable by task and/or agent).
+- `IAB_DB` — bus database path; the rendezvous authority.
+- `IAB_ROSTER` — roster path (default: `roster.json` in the project).
+- `IAB_AGENT_NAME` — identity of the session/registration.
 
-Identity note: baking `IAB_AGENT_NAME` into each client's MCP
-registration (`env` field) is the reliable way to give every worker its
-identity — some clients announce only a generic SDK name in clientInfo.
+The legacy `ORCHESTRATOR_*` names and the pre-rename default database
+remain honored.
 
 ## Security / trust model
 
 The bus assumes a single-user machine. Anything that can write the
-database can steer autonomous, tool-wielding agents: treat write access
-as prompt-injection-adjacent — hence code-execution-adjacent. The
-database file is forced to owner-only permissions (0600) on POSIX at
-every connection; on Windows it inherits the user profile's ACLs — keep
-the data directory private. The headless worker keeps payloads off the
-command line (stdin only) and out of its logs (stderr shows task ids,
-never payload content). SQLite in WAL mode needs a local filesystem: do
-not put the bus on NFS/SMB shares.
+database can steer autonomous, tool-wielding agents: treat write
+access as prompt-injection-adjacent — hence code-execution-adjacent.
+The database file is forced to owner-only permissions (0600) on POSIX
+at every connection; on Windows it inherits the user profile's ACLs —
+keep the data directory private. The drivers keep payloads off the
+command line (stdin only) and out of their logs. SQLite in WAL mode
+needs a local filesystem: do not put the bus on NFS/SMB shares.
+
+## Development
+
+```bash
+git clone git@github.com:eric-lemesre/inter-agent-bus.git && cd inter-agent-bus
+python3 -m venv .venv                          # py -m venv .venv on Windows
+.venv/bin/pip install -r requirements.txt -e . # .venv\Scripts\pip on Windows
+.venv/bin/python servers/shared_memory/store_test.py   # core tests, no MCP SDK needed
+python3 scripts/smoke.py                       # end-to-end, CLI only
+```
+
+Never register the working tree as the running plugin — install from a
+tag (see Installation). Planned work and its invariants:
+[`ROADMAP.md`](ROADMAP.md). Rules for contributors, human or agent:
+[`AGENTS.md`](AGENTS.md).
