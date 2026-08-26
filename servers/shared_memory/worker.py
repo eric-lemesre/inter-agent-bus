@@ -84,6 +84,7 @@ def run_worker(
     _log(store.register_agent(agent, "headless worker (iab worker)"))
     delay = poll_seconds
     while True:
+        _log(store.heartbeat(agent, ttl_seconds=2 * poll_seconds + 60))
         claimed = store.claim_task(agent, lease_seconds)
         if claimed == "NO_TASK":
             if once:
@@ -115,5 +116,15 @@ def run_worker(
             result = out
         published = store.publish_result(agent, task_id, result, attempt=attempt)
         _log(published)
+        try:
+            channel = store.read_channel(agent=agent)
+            if channel.startswith("ERROR"):
+                _log(f"channel read failed: {channel}")
+            else:
+                for entry in json.loads(channel):
+                    _log(f"channel [{entry['topic']}] from {entry['author']}: "
+                         f"{entry['message']}")
+        except Exception as exc:  # channel read must not kill the worker loop
+            _log(f"channel read failed: {exc}")
         if once:
             return 0 if published.startswith("OK") and not result.startswith("ERROR") else 1

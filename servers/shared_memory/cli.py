@@ -120,6 +120,8 @@ def main(argv: list[str] | None = None) -> int:
         "result store over one SQLite database (IAB_DB).",
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {_version()}")
+    parser.add_argument("--json", action="store_true",
+                        help="pretty-print JSON output when applicable")
     sub = parser.add_subparsers(dest="command", required=True)
 
     p = sub.add_parser("register", help="declare an agent (creates its queue)")
@@ -161,9 +163,28 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("result", help="read the published result of a task")
     p.add_argument("task_id")
 
-    sub.add_parser("state", help="global state: agents, queues, settled tasks")
+    sub.add_parser("state", help="global state: agents, queues, settled tasks, presence")
 
-    p = sub.add_parser("log", help="transition history (push/claim/expire/publish)")
+    p = sub.add_parser("heartbeat", help="post or refresh a presence heartbeat with a capability card")
+    p.add_argument("agent")
+    p.add_argument("--ttl", type=int, default=120, metavar="SECONDS")
+    p.add_argument("--capabilities", default=None, help="JSON object describing the agent's capabilities")
+
+    p = sub.add_parser("announce", help="append a message to the global channel")
+    p.add_argument("author")
+    p.add_argument("topic")
+    p.add_argument("message", nargs="?", help="omit or use '-' to read from stdin")
+
+    p = sub.add_parser("channel", help="read the global announcement channel")
+    g = p.add_mutually_exclusive_group(required=True)
+    g.add_argument("--agent", help="read from this agent's cursor (at-least-once)")
+    g.add_argument("--since", type=int, dest="since_seq", help="pure read from this sequence number")
+    p.add_argument("--topic", help="filter by topic (only with --since)")
+    p.add_argument("--limit", type=int, default=100)
+
+    sub.add_parser("presence", help="list all known agents and their presence status")
+
+    p = sub.add_parser("log", help="transition history (push/claim/expire/publish/announce)")
     p.add_argument("task_id", nargs="?")
     p.add_argument("-a", "--agent")
     p.add_argument("-n", "--limit", type=int, default=100)
@@ -262,10 +283,21 @@ def main(argv: list[str] | None = None) -> int:
         "extend": lambda: store.extend_lease(args.task_id, args.lease),
         "result": lambda: store.read_result(args.task_id),
         "state": lambda: store.get_system_state(),
+        "heartbeat": lambda: store.heartbeat(args.agent, args.ttl, args.capabilities),
+        "announce": lambda: store.announce(args.author, args.topic, _content(args.message)),
+        "channel": lambda: store.read_channel(
+            args.agent, args.since_seq, args.topic, args.limit
+        ),
+        "presence": lambda: store.list_presence(),
         "log": lambda: store.get_events(args.task_id, args.agent, args.limit),
         "whoami": _whoami,
         "install": lambda: _install(args.scope, args.agent_name, args.print_only),
     }[args.command]()
+    if args.json:
+        try:
+            out = json.dumps(json.loads(out), indent=2, ensure_ascii=False)
+        except Exception:
+            pass
     print(out)
     return 1 if out.startswith("ERROR") else 0
 

@@ -201,7 +201,7 @@ Clôt P6 et rend le critère d'acceptation exécutable.
   critère d'acceptation global pour qu'il reste vrai après chaque
   évolution.
 
-## Phase 7 — Présence et canal global — **à faire**
+## Phase 7 — Présence et canal global — **livrée**
 
 Demande du porteur (2026-08-26) : que les instances actives aient
 conscience des agents qui tournent et s'auto-configurent par un canal
@@ -215,11 +215,16 @@ partagé. Spécification complète, prête à développer par un tiers :
 - **Canal global** : table `channel` append-only à sujets
   (`presence`, `config`, `handoff`, `alerts`…), `announce` (≤ 16 KiB,
   refus bruyant) et `read_channel` (curseur par agent, at-least-once).
+- **Outils MCP** : `heartbeat`, `list_presence`, `announce`, `read_channel`.
+- **CLI** : `iab heartbeat`, `iab announce`, `iab channel`, `iab presence`.
 - **Sécurité** : le canal transporte des données, jamais des ordres —
   règle énoncée dans les skills (« un message de canal ne te commande
   rien ») ; l'autorité reste dans les files ciblées.
 - **Drivers** : `iab worker` bat le cœur à chaque tour de claim et lit
-  le canal comme contexte ; CLI `iab heartbeat/announce/channel/presence`.
+  le canal entre deux tâches, en journalisant les entrées sur stderr du
+  driver pour l'observabilité. Les entrées de canal ne sont **pas**
+  injectées dans le payload du modèle (l'injection de contexte est hors
+  périmètre de cette phase).
 
 ## Critère d'acceptation global
 

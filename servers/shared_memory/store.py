@@ -58,6 +58,8 @@ DATA_DIR = _data_dir()
 GLOBAL_DB = DATA_DIR / "bus.db"
 LEGACY_DB = Path.home() / ".local/share/multi-agent-orchestrator/orchestrator.db"
 
+DEFAULT_PRESENCE_TTL = 120
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -148,6 +150,24 @@ def connect() -> sqlite3.Connection:
             detail  TEXT NOT NULL DEFAULT ''
         );
         CREATE INDEX IF NOT EXISTS events_task ON events(task_id);
+        CREATE TABLE IF NOT EXISTS presence (
+            agent        TEXT PRIMARY KEY,
+            last_seen    TEXT NOT NULL,
+            ttl_seconds  INTEGER NOT NULL,
+            capabilities TEXT NOT NULL DEFAULT '{}'
+        );
+        CREATE TABLE IF NOT EXISTS channel (
+            seq     INTEGER PRIMARY KEY AUTOINCREMENT,
+            author  TEXT NOT NULL,
+            at      TEXT NOT NULL,
+            topic   TEXT NOT NULL,
+            message TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS channel_topic ON channel(topic);
+        CREATE TABLE IF NOT EXISTS channel_cursor (
+            agent    TEXT PRIMARY KEY,
+            last_seq INTEGER NOT NULL
+        );
         """
     )
     _migrate(conn)
@@ -480,6 +500,193 @@ def read_result(task_id: str) -> str:
     return json.dumps(dict(row), ensure_ascii=False)
 
 
+_TOPIC_RE = re.compile(r"^[a-z0-9-]{1,64}$")
+
+
+def _parse_capabilities(capabilities: str | None) -> dict | str:
+    """Validate and normalize capabilities JSON. Returns the parsed dict on
+    success or an ERROR: string on failure."""
+    if capabilities is None:
+        return {}
+    try:
+        parsed = json.loads(capabilities)
+    except Exception:
+        return "ERROR: capabilities must be a JSON object."
+    if not isinstance(parsed, dict):
+        return "ERROR: capabilities must be a JSON object."
+    return parsed
+
+
+def heartbeat(agent: str, ttl_seconds: int = 120, capabilities: str | None = None) -> str:
+    """Post or refresh a presence heartbeat with a capability card.
+    Upserts the presence row; absent capabilities keep the existing card."""
+    agent = agent.strip().lower()
+    if not agent:
+        return "ERROR: empty agent name."
+    parsed = _parse_capabilities(capabilities)
+    if isinstance(parsed, str):
+        return parsed
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT ttl_seconds, capabilities FROM presence WHERE agent=?", (agent,)
+        ).fetchone()
+        if capabilities is None:
+            if row is None:
+                stored_capabilities = "{}"
+            else:
+                stored_capabilities = row["capabilities"]
+        else:
+            stored_capabilities = json.dumps(parsed, ensure_ascii=False)
+        alive_until = datetime.fromisoformat(_now()) + timedelta(seconds=ttl_seconds)
+        conn.execute(
+            "INSERT INTO presence(agent, last_seen, ttl_seconds, capabilities) "
+            "VALUES(?,?,?,?) ON CONFLICT(agent) DO UPDATE SET "
+            "last_seen=excluded.last_seen, ttl_seconds=excluded.ttl_seconds, "
+            "capabilities=excluded.capabilities",
+            (agent, _now(), ttl_seconds, stored_capabilities),
+        )
+    return json.dumps(
+        {"agent": agent, "alive_until": alive_until.isoformat()}, ensure_ascii=False
+    )
+
+
+def touch_presence(agent: str) -> None:
+    """Refresh last_seen only, keeping the declared TTL and capability card.
+    Creates a default-TTL row for a previously absent agent; a blank name is
+    a silent no-op so the piggyback cannot fail."""
+    agent = agent.strip().lower()
+    if not agent:
+        return
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT ttl_seconds, capabilities FROM presence WHERE agent=?", (agent,)
+        ).fetchone()
+        if row is None:
+            ttl = DEFAULT_PRESENCE_TTL
+            capabilities = "{}"
+        else:
+            ttl = row["ttl_seconds"]
+            capabilities = row["capabilities"]
+        conn.execute(
+            "INSERT INTO presence(agent, last_seen, ttl_seconds, capabilities) "
+            "VALUES(?,?,?,?) ON CONFLICT(agent) DO UPDATE SET last_seen=excluded.last_seen",
+            (agent, _now(), ttl, capabilities),
+        )
+
+
+def list_presence() -> str:
+    """Return every known agent (registered or seen) with a computed status."""
+    with connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT a.name, a.description, p.last_seen, p.ttl_seconds, p.capabilities
+            FROM agents a LEFT JOIN presence p ON a.name = p.agent
+            UNION
+            SELECT p.agent AS name, '' AS description, p.last_seen, p.ttl_seconds,
+                   p.capabilities
+            FROM presence p
+            WHERE p.agent NOT IN (SELECT name FROM agents)
+            ORDER BY name
+            """
+        ).fetchall()
+    now = datetime.fromisoformat(_now())
+    result = []
+    for row in rows:
+        last_seen = row["last_seen"]
+        ttl = row["ttl_seconds"]
+        caps = row["capabilities"] or "{}"
+        if last_seen is None:
+            status = "unknown"
+        else:
+            deadline = datetime.fromisoformat(last_seen) + timedelta(seconds=ttl or 0)
+            status = "alive" if now < deadline else "asleep"
+        result.append(
+            {
+                "agent": row["name"],
+                "status": status,
+                "last_seen": last_seen,
+                "ttl_seconds": ttl,
+                "capabilities": json.loads(caps),
+                "description": row["description"] or "",
+            }
+        )
+    return json.dumps(result, ensure_ascii=False)
+
+
+def announce(author: str, topic: str, message: str) -> str:
+    """Append a message to the global channel and return its sequence number."""
+    topic = topic.strip().lower()
+    if not _TOPIC_RE.match(topic):
+        return "ERROR: topic must match ^[a-z0-9-]{1,64}$."
+    if len(message.encode("utf-8")) > 16 * 1024:
+        return "ERROR: message exceeds 16 KiB."
+    author = author.strip().lower()
+    with connect() as conn:
+        cur = conn.execute(
+            "INSERT INTO channel(author, at, topic, message) VALUES(?,?,?,?)",
+            (author, _now(), topic, message),
+        )
+        _log_event(conn, "announce", agent=author, detail=topic)
+        seq = cur.lastrowid
+    return json.dumps({"seq": seq}, ensure_ascii=False)
+
+
+def read_channel(
+    agent: str | None = None,
+    since_seq: int | None = None,
+    topic: str | None = None,
+    limit: int = 100,
+) -> str:
+    """Read channel entries. Pure reads use since_seq; cursor reads use agent
+    and advance the stored cursor to the last returned seq."""
+    if limit < 1:
+        limit = 1
+    elif limit > 1000:
+        limit = 1000
+    if agent is None and since_seq is None:
+        return "ERROR: provide either agent or since_seq."
+    if agent is not None and since_seq is None and topic is not None:
+        return "ERROR: topic filter is not allowed with a cursor read."
+    with connect() as conn:
+        if since_seq is not None:
+            if topic is not None:
+                rows = conn.execute(
+                    "SELECT seq, author, at, topic, message FROM channel "
+                    "WHERE seq > ? AND topic = ? ORDER BY seq ASC LIMIT ?",
+                    (since_seq, topic, limit),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT seq, author, at, topic, message FROM channel "
+                    "WHERE seq > ? ORDER BY seq ASC LIMIT ?",
+                    (since_seq, limit),
+                ).fetchall()
+        else:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                cursor = conn.execute(
+                    "SELECT last_seq FROM channel_cursor WHERE agent=?", (agent,)
+                ).fetchone()
+                last_seq = cursor["last_seq"] if cursor else 0
+                rows = conn.execute(
+                    "SELECT seq, author, at, topic, message FROM channel "
+                    "WHERE seq > ? ORDER BY seq ASC LIMIT ?",
+                    (last_seq, limit),
+                ).fetchall()
+                if rows:
+                    new_last = rows[-1]["seq"]
+                    conn.execute(
+                        "INSERT INTO channel_cursor(agent, last_seq) VALUES(?,?) "
+                        "ON CONFLICT(agent) DO UPDATE SET last_seq=excluded.last_seq",
+                        (agent, new_last),
+                    )
+                conn.execute("COMMIT")
+            except Exception:
+                conn.execute("ROLLBACK")
+                raise
+    return json.dumps([dict(r) for r in rows], ensure_ascii=False)
+
+
 def get_system_state() -> str:
     with connect() as conn:
         _requeue_expired(conn)
@@ -501,8 +708,28 @@ def get_system_state() -> str:
             r["task_id"]
             for r in conn.execute("SELECT task_id FROM results ORDER BY updated_at")
         ]
+        pres_rows = conn.execute(
+            """
+            SELECT a.name, p.last_seen, p.ttl_seconds
+            FROM agents a LEFT JOIN presence p ON a.name = p.agent
+            UNION
+            SELECT p.agent AS name, p.last_seen, p.ttl_seconds
+            FROM presence p
+            WHERE p.agent NOT IN (SELECT name FROM agents)
+            """
+        ).fetchall()
+    now = datetime.fromisoformat(_now())
+    presence: dict[str, str] = {}
+    for r in pres_rows:
+        if r["last_seen"] is None:
+            presence[r["name"]] = "unknown"
+        else:
+            deadline = datetime.fromisoformat(r["last_seen"]) + timedelta(
+                seconds=r["ttl_seconds"] or 0
+            )
+            presence[r["name"]] = "alive" if now < deadline else "asleep"
     return json.dumps(
-        {"agents": agents, "queues": queues, "completed_tasks": done},
+        {"agents": agents, "queues": queues, "completed_tasks": done, "presence": presence},
         indent=2,
         ensure_ascii=False,
     )

@@ -67,9 +67,13 @@ supprime les lignes de présence : un agent arrêté devient simplement
 ### 4.1 `heartbeat(agent, ttl_seconds=120, capabilities=None) -> str`
 
 UPSERT de la ligne de présence (rafraîchit `last_seen` ; `capabilities`
-absent = conservées). Rend un résumé JSON `{agent, alive_until}`.
-Refus bruyant si `agent` est vide ou si `capabilities` n'est pas un
-objet JSON valide.
+absent = conservées). `capabilities` est un **texte JSON** (idiome MCP :
+les outils passent des chaînes) qui DOIT décoder en **objet**. Rend un
+résumé JSON `{agent, alive_until}`. Refus bruyant si `agent` est vide ou
+si `capabilities` n'est pas un objet JSON valide. `touch_presence(agent)`
+rafraîchit `last_seen` seul (TTL et carte conservés) et **crée** la ligne
+au TTL par défaut pour un agent encore sans présence (le piggyback ne
+doit jamais échouer).
 
 **Piggyback** : quand `IAB_AGENT_NAME` est posé, `server.py` rafraîchit
 la présence de l'appelant (UPSERT `last_seen` seul, TTL existant ou
@@ -101,7 +105,12 @@ Rend les entrées `seq > since_seq` (ordre croissant, bornées par
 - `agent` fourni sans `since_seq` → lit depuis le curseur stocké de cet
   agent et **avance le curseur au dernier `seq` rendu** (livraison
   at-least-once : une relecture après crash relit depuis le dernier
-  lot confirmé par cette avancée, jamais moins).
+  lot confirmé par cette avancée, jamais moins) ; une lecture vide
+  n'avance rien ;
+- `agent` + `topic` ensemble : **refus bruyant** — un filtre sur une
+  lecture à curseur sauterait des messages d'autres sujets (violation
+  du at-least-once) ; le filtre par sujet est réservé aux lectures
+  pures (`since_seq`).
 
 ### 4.5 CLI
 
@@ -116,7 +125,9 @@ payloads par stdin (jamais interpolés).
 La boucle du worker bat le cœur **à chaque tour de claim** (présence du
 *driver*, même quand le modèle sous-jacent est headless) et lit le
 canal (curseur de son agent) entre deux tâches — les entrées lues sont
-transmises au modèle **comme contexte**, pas comme consigne (voir §6).
+**journalisées sur le stderr du driver** (observabilité). L'injection dans
+le contexte du modèle est **hors périmètre** de la Phase 7 (sécurité
+d'abord — voir §6).
 
 ## 5. Auto-configuration : les cartes de visite
 

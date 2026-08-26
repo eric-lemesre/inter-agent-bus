@@ -65,9 +65,13 @@ deletes presence rows: a stopped agent simply reads as "asleep" (and
 ### 4.1 `heartbeat(agent, ttl_seconds=120, capabilities=None) -> str`
 
 UPSERT of the presence row (refreshes `last_seen`; absent
-`capabilities` = kept). Returns a JSON summary `{agent, alive_until}`.
-Loud refusal when `agent` is empty or `capabilities` is not a valid
-JSON object.
+`capabilities` = kept). `capabilities` is **JSON text** (MCP idiom:
+tools pass strings) that MUST decode to an **object**. Returns a JSON
+summary `{agent, alive_until}`. Loud refusal when `agent` is empty or
+`capabilities` is not a valid JSON object. `touch_presence(agent)`
+refreshes `last_seen` alone (TTL and card kept) and **creates** the row
+with the default TTL for an agent without presence yet (piggyback must
+never fail).
 
 **Piggyback**: when `IAB_AGENT_NAME` is set, `server.py` refreshes the
 caller's presence (UPSERT of `last_seen` only, existing TTL or the
@@ -98,7 +102,12 @@ filtered by `topic` when given. Cursor handling:
 - `agent` given without `since_seq` → reads from that agent's stored
   cursor and **advances the cursor to the last returned `seq`**
   (at-least-once delivery: a re-read after a crash resumes from the
-  last batch confirmed by that advance, never less).
+  last batch confirmed by that advance, never less); an empty read
+  advances nothing;
+- `agent` + `topic` together: **loud refusal** — filtering a cursor
+  read would skip messages of other topics (an at-least-once
+  violation); topic filtering is reserved for pure reads
+  (`since_seq`).
 
 ### 4.5 CLI
 
@@ -112,8 +121,10 @@ payloads via stdin (never interpolated).
 
 The worker loop heartbeats **on every claim iteration** (presence of
 the *driver*, even when the underlying model is headless) and reads the
-channel (its agent's cursor) between tasks — entries read are handed to
-the model **as context**, never as orders (see §6).
+channel (its agent's cursor) between tasks — entries read are
+**logged on the driver's stderr** (observability). Injecting them into
+the model's context is **out of scope** for Phase 7 (security first —
+see §6).
 
 ## 5. Self-configuration: capability cards
 

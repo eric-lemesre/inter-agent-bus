@@ -415,6 +415,121 @@ with tempfile.TemporaryDirectory() as tmp:
     check("IAB_DB overrides every fallback", store.db_path().name == "explicit.db")
     del os.environ["IAB_DB"]
 
+    # =====================================================================
+    # PHASE 7 — presence and global channel (spec PRESENCE-CHANNEL.md).
+    # Written by the architect BEFORE the implementation (three-hands
+    # protocol): these checks are the closed contract of the feature.
+    # =====================================================================
+    from datetime import datetime, timedelta, timezone
+
+    os.environ["IAB_DB"] = str(Path(tmp) / "phase7.db")
+
+    # Injectable clock: every presence/channel code path goes through
+    # store._now() only — liveness is computed at read time, never slept on.
+    real_now = store._now
+    clock = {"t": datetime(2026, 8, 26, 12, 0, 0, tzinfo=timezone.utc)}
+    store._now = lambda: clock["t"].isoformat()
+
+    store.register_agent("gamma", "presence test")
+    store.register_agent("delta", "registered, no heartbeat")
+
+    # Loud refusals.
+    check("heartbeat with an empty agent is refused",
+          store.heartbeat("").startswith("ERROR"))
+    check("heartbeat with invalid capabilities JSON is refused",
+          store.heartbeat("gamma", capabilities="not json").startswith("ERROR"))
+    check("heartbeat with a non-object capabilities JSON is refused",
+          store.heartbeat("gamma", capabilities="[1, 2]").startswith("ERROR"))
+
+    # Nominal: card posted, liveness horizon returned.
+    r = json.loads(store.heartbeat(
+        "gamma", ttl_seconds=120,
+        capabilities='{"limits": {"max_inline_payload_bytes": 8192}}'))
+    check("heartbeat returns the liveness horizon", "alive_until" in r)
+    rows = {a["agent"]: a for a in json.loads(store.list_presence())}
+    check("a fresh heartbeat reads alive", rows["gamma"]["status"] == "alive")
+    check("the capability card is served back",
+          rows["gamma"]["capabilities"]["limits"]["max_inline_payload_bytes"] == 8192)
+    check("a registered agent without presence reads unknown",
+          rows["delta"]["status"] == "unknown")
+
+    # Liveness expires by the clock alone — no daemon, no sleep.
+    clock["t"] += timedelta(seconds=121)
+    rows = {a["agent"]: a for a in json.loads(store.list_presence())}
+    check("an expired presence reads asleep", rows["gamma"]["status"] == "asleep")
+
+    # touch_presence: refreshes last_seen, keeps TTL and card; creates a
+    # default-TTL row for an agent without presence (piggyback never fails).
+    store.touch_presence("gamma")
+    store.touch_presence("delta")
+    rows = {a["agent"]: a for a in json.loads(store.list_presence())}
+    check("touch wakes a known agent up", rows["gamma"]["status"] == "alive")
+    check("touch keeps the capability card",
+          rows["gamma"]["capabilities"]["limits"]["max_inline_payload_bytes"] == 8192)
+    check("touch creates a default presence for a new agent",
+          rows["delta"]["status"] == "alive")
+    clock["t"] += timedelta(seconds=121)
+    rows = {a["agent"]: a for a in json.loads(store.list_presence())}
+    check("touch did not change the declared TTL", rows["gamma"]["status"] == "asleep")
+
+    # get_system_state exposes the computed presence statuses.
+    state = json.loads(store.get_system_state())
+    check("get_system_state carries presence statuses",
+          state.get("presence", {}).get("gamma") == "asleep")
+
+    # Channel: loud refusals.
+    check("an invalid topic is refused",
+          store.announce("gamma", "Bad Topic!", "x").startswith("ERROR"))
+    check("an oversized message is refused",
+          store.announce("gamma", "alerts", "x" * (16 * 1024 + 1)).startswith("ERROR"))
+
+    # Append + pure reads (no cursor touched).
+    s1 = json.loads(store.announce("gamma", "presence", '{"name": "gamma"}'))["seq"]
+    s2 = json.loads(store.announce("gamma", "config", "roster digest"))["seq"]
+    s3 = json.loads(store.announce("delta", "presence", '{"name": "delta"}'))["seq"]
+    check("channel sequence is monotonic", s1 < s2 < s3)
+    msgs = json.loads(store.read_channel(since_seq=0))
+    check("a pure read returns everything in order",
+          [m["seq"] for m in msgs] == [s1, s2, s3])
+    msgs = json.loads(store.read_channel(since_seq=0, topic="presence"))
+    check("a pure read filters by topic",
+          [m["seq"] for m in msgs] == [s1, s3]
+          and all(m["topic"] == "presence" for m in msgs))
+
+    # Cursor semantics: agent reads advance to the last returned seq.
+    check("cursor reads refuse a topic filter (at-least-once)",
+          store.read_channel(agent="gamma", topic="config").startswith("ERROR"))
+    batch = json.loads(store.read_channel(agent="gamma", limit=2))
+    check("a cursor read starts from the beginning",
+          [m["seq"] for m in batch] == [s1, s2])
+    batch = json.loads(store.read_channel(agent="gamma"))
+    check("the cursor advanced to the last returned seq",
+          [m["seq"] for m in batch] == [s3])
+    check("an empty cursor read returns nothing",
+          json.loads(store.read_channel(agent="gamma")) == [])
+    s4 = json.loads(store.announce("delta", "handoff", "later"))["seq"]
+    batch = json.loads(store.read_channel(agent="gamma"))
+    check("an empty read advanced nothing — the next message is served",
+          [m["seq"] for m in batch] == [s4])
+    check("pure reads did not move the other agent's cursor",
+          [m["seq"] for m in json.loads(store.read_channel(agent="delta", limit=1))]
+          == [s1])
+
+    # Cross-process sharing: an announcement written by another process is
+    # read here (same pattern as the historical cross-process check).
+    env7 = os.environ.copy()
+    env7["PYTHONPATH"] = str(HERE)
+    probe7 = "import store; print(store.announce('delta', 'alerts', 'from-child'))"
+    out = subprocess.run([sys.executable, "-c", probe7], env=env7,
+                         capture_output=True, text=True).stdout.strip()
+    check("another process can announce on the channel", out.startswith("{"))
+    msgs = json.loads(store.read_channel(since_seq=s4))
+    check("the child's announcement is visible here",
+          any(m["message"] == "from-child" for m in msgs))
+
+    store._now = real_now
+    del os.environ["IAB_DB"]
+
 if fail:
     print("store_test: FAIL.")
     sys.exit(1)
