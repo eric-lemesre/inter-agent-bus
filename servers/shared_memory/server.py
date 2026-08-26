@@ -148,15 +148,23 @@ def announce(author: str, topic: str, message: str) -> str:
 
 
 @mcp.tool()
-def read_channel(agent: str = "", since_seq: int = 0, topic: str = "", limit: int = 100) -> str:
-    """Read channel entries. Use since_seq for a pure read, or agent to read from that agent's cursor (topic filter only allowed with since_seq)."""
+def read_channel(agent: str = "", since_seq: int = -1, topic: str = "", limit: int = 100) -> str:
+    """Read channel entries. Use since_seq >= 0 for a pure read, or agent (since_seq omitted) to read from that agent's cursor and advance it (topic filter only allowed with since_seq)."""
     _touch()
-    return store.read_channel(agent or None, since_seq, topic or None, limit)
+    # -1 is the "not given" sentinel: the core distinguishes None (cursor
+    # read) from 0 (pure read from the beginning).
+    return store.read_channel(
+        agent or None, None if since_seq < 0 else since_seq, topic or None, limit
+    )
 
 
 def main() -> None:
     """Entry point of the `iab-server` console script (pyproject.toml):
     lets an installed runtime register without any repository path."""
+    # A launched client is a present client: mark the agent as seen as soon
+    # as the server starts, without waiting for its first tool call (the
+    # per-call piggyback then keeps the presence fresh).
+    _touch()
     mcp.run()
 
 
