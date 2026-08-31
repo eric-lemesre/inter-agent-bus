@@ -94,7 +94,14 @@ one's queue, or one specific task via `task_id`) · `publish_result`
 `cancel_task` · `requeue_task` · `extend_lease` · `read_result` ·
 `get_system_state` · `get_events` (transition journal, filterable by
 task and/or agent) · `heartbeat` · `list_presence` · `announce` ·
-`read_channel`.
+`read_channel` · `notify` / `poll` (directed signals, point-to-point) ·
+`wait_task` (blocking wait until a task lands in one's queue).
+
+`push_task` also drops a directed notification in the target's mailbox
+("task queued") unless called with `notify=False` — so a watcher or a
+`poll()` wakes the worker instead of a human relaunching it. The hint
+follows at-least-once discipline: a woken worker may still find an
+empty queue (lease expiry, cancellation) and must tolerate it.
 
 ## CLI
 
@@ -112,7 +119,15 @@ iab heartbeat <agent> [--ttl S] [--capabilities JSON]
 iab announce <author> <topic> [message|-]
 iab channel [--agent A | --since N] [--topic T] [--limit N]
 iab presence
+iab notify <author> <agent> [message|-] iab poll <agent> [--limit N]
+iab watch <agent> [--timeout S] [--interval S]
 ```
+
+`iab watch` is the supervisor primitive (systemd user timer, cron, or a
+background task of an agent session): it blocks until a task lands in
+the agent's queue, prints the queued task_ids one per line and exits 0 —
+or prints nothing at the timeout, exit 0 too. See
+`skills/worker-wake/` for wiring it to an interactive client.
 
 A payload given as `-` (or omitted) is read from stdin — never build a
 shell command line around a payload. Exit code is non-zero on `ERROR:`

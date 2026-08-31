@@ -66,9 +66,14 @@ how you work.
    not as an error to force. Publish the deliverable itself (or a
    precise pointer to it: file paths, branch, commit), not a summary of
    your intentions.
-5. Back to step 2. On `NO_TASK`, the queue is drained: report it and stop.
-   Whether to poll again later is the operator's call — in an interactive
-   client, ask rather than busy-loop.
+5. Back to step 2. On `NO_TASK`, the queue is drained: do **not**
+   busy-loop. Either stop and report, or block on the bus itself:
+   `wait_task(agent, timeout_seconds)` (MCP) or `iab watch <agent>`
+   (CLI/supervisor) returns as soon as a task lands — `push_task` now
+   drops a wake-up notification, so the wait is cheap and the full
+   cycle becomes *watch → claim → execute → publish → watch*. A woken
+   worker may still find an empty queue (at-least-once): treat that as
+   a normal pass, not an error.
 
 ## Failure discipline
 

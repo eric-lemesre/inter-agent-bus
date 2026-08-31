@@ -527,6 +527,78 @@ with tempfile.TemporaryDirectory() as tmp:
     check("the child's announcement is visible here",
           any(m["message"] == "from-child" for m in msgs))
 
+    # Directed notifications: point-to-point signal + cursor poll.
+    check("notify to an unregistered agent is refused",
+          store.notify("gamma", "ghost", "x").startswith("ERROR"))
+    check("notify with an empty author is refused",
+          store.notify("", "gamma", "x").startswith("ERROR"))
+    check("notify with an empty target is refused",
+          store.notify("gamma", "", "x").startswith("ERROR"))
+    check("notify with an oversized message is refused",
+          store.notify("gamma", "delta", "x" * (16 * 1024 + 1)).startswith("ERROR"))
+
+    n1 = json.loads(store.notify("gamma", "delta", "tâche à regarder"))["seq"]
+    n2 = json.loads(store.notify("gamma", "gamma", "own note"))["seq"]
+    check("notification sequence is monotonic", n1 < n2)
+    check("poll serves only the recipient's own notifications",
+          [m["seq"] for m in json.loads(store.poll("delta"))] == [n1])
+    check("another agent polls only its own notifications",
+          [m["seq"] for m in json.loads(store.poll("gamma"))] == [n2])
+    check("an empty poll returns nothing",
+          json.loads(store.poll("delta")) == [])
+    n3 = json.loads(store.notify("gamma", "delta", "after empty poll"))["seq"]
+    check("an empty poll advanced nothing — the next signal is served",
+          [m["seq"] for m in json.loads(store.poll("delta"))] == [n3])
+
+    # Cross-process: a notification written by another process is polled here.
+    env8 = os.environ.copy()
+    env8["PYTHONPATH"] = str(HERE)
+    probe8 = "import store; print(store.notify('child', 'delta', 'from-child'))"
+    out = subprocess.run([sys.executable, "-c", probe8], env=env8,
+                         capture_output=True, text=True).stdout.strip()
+    check("another process can notify", out.startswith("{"))
+    check("the child's notification is polled here",
+          any(m["message"] == "from-child" for m in json.loads(store.poll("delta"))))
+
+    # Task-watch: push_task drops a wake-up notification in the target's
+    # mailbox (and only there), unless notify=False; wait_for_task blocks
+    # until a task lands, and wakes on a push from another process.
+    store.register_agent("epsilon", "watch tests")
+    store.push_task("epsilon", "wake-1", "payload")
+    wakes = json.loads(store.poll("epsilon"))
+    check("push_task notifies the target",
+          any("wake-1" in m["message"] for m in wakes))
+    check("the wake-up hint is authored by the bus",
+          all(m["author"] == "bus" for m in wakes))
+    check("push_task does not notify other agents",
+          not any("wake-1" in m["message"] for m in json.loads(store.poll("gamma"))))
+    store.push_task("epsilon", "wake-2", "payload", notify=False)
+    check("notify=False suppresses the wake-up hint",
+          json.loads(store.poll("epsilon")) == [])
+
+    check("wait_for_task returns queued ids immediately when the queue holds tasks",
+          set(json.loads(store.wait_for_task("epsilon", timeout_s=5))) == {"wake-1", "wake-2"})
+    check("wait_for_task on an empty queue times out with an empty list",
+          json.loads(store.wait_for_task("delta", timeout_s=0.5, interval_s=0.2)) == [])
+    check("wait_for_task refuses an empty agent",
+          store.wait_for_task("").startswith("ERROR"))
+
+    # Cross-process wake: a child pushes after a delay; the parent's wait
+    # returns the id well before its timeout.
+    env9 = os.environ.copy()
+    env9["PYTHONPATH"] = str(HERE)
+    probe9 = ("import time, store; time.sleep(1.0); "
+              "print(store.push_task('delta', 'wake-3', 'late push'))")
+    child = subprocess.Popen([sys.executable, "-c", probe9], env=env9,
+                             stdout=subprocess.PIPE, text=True)
+    t0 = time.monotonic()
+    woken = json.loads(store.wait_for_task("delta", timeout_s=15, interval_s=0.2))
+    elapsed = time.monotonic() - t0
+    child.wait(timeout=15)
+    check("wait_for_task wakes on a push from another process",
+          woken == ["wake-3"])
+    check("the wake happens before the timeout, not at it", elapsed < 10)
+
     store._now = real_now
     del os.environ["IAB_DB"]
 
