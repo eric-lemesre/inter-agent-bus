@@ -98,7 +98,16 @@ tâche ; passer le jeton `attempt` du claim — clôture de bail) ·
 `cancel_task` · `requeue_task` · `extend_lease` · `read_result` ·
 `get_system_state` · `get_events` (journal des transitions, filtrable
 par tâche et/ou agent) · `heartbeat` · `list_presence` · `announce` ·
-`read_channel`.
+`read_channel` · `notify` / `poll` (signaux dirigés, point à point) ·
+`wait_task` (attente bloquante jusqu'à l'arrivée d'une tâche dans sa
+file).
+
+`push_task` dépose aussi une notification dirigée dans la boîte de la
+cible (« tâche en file ») sauf appel avec `notify=False` — un veilleur
+ou un `poll()` réveille ainsi le worker au lieu qu'un humain le
+relance. L'indice suit la discipline at-least-once : un worker réveillé
+peut trouver une file vide (bail expiré, annulation) et doit le
+tolérer.
 
 ## CLI
 
@@ -116,7 +125,16 @@ iab heartbeat <agent> [--ttl S] [--capabilities JSON]
 iab announce <auteur> <topic> [message|-]
 iab channel [--agent A | --since N] [--topic T] [--limit N]
 iab presence
+iab notify <auteur> <agent> [message|-] iab poll <agent> [--limit N]
+iab watch <agent> [--timeout S] [--interval S]
 ```
+
+`iab watch` est la primitive du superviseur (unité systemd utilisateur,
+cron, ou tâche de fond d'une session d'agent) : elle bloque jusqu'à
+l'arrivée d'une tâche dans la file de l'agent, affiche les identifiants
+en file un par ligne et sort 0 — ou n'affiche rien au timeout, sortie 0
+aussi. Voir `skills/worker-wake/` pour le raccordement à un client
+interactif.
 
 Un payload donné comme `-` (ou omis) est lu sur stdin — ne jamais
 construire une ligne de commande shell autour d'un payload. Le code de

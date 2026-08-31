@@ -113,6 +113,17 @@ def _install(scope: str, agent_name: str, print_only: bool) -> str:
     )
 
 
+def _watch(agent: str, timeout: float, interval: float) -> str:
+    """Supervisor primitive: task_ids one per line so a shell/timer unit can
+    consume them without a JSON parser; silent empty output on timeout, exit
+    0 either way (the supervisor distinguishes by output, not by rc)."""
+    out = store.wait_for_task(agent, timeout, interval)
+    if out.startswith("ERROR"):
+        return out
+    ids = json.loads(out)
+    return "\n".join(ids)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="iab",
@@ -135,6 +146,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("-p", "--priority", type=int, default=1)
     p.add_argument("--max-attempts", type=int, default=3,
                    help="expired leases before dead-lettering (default: 3)")
+    p.add_argument("--no-notify", action="store_true",
+                   help="do not drop a wake-up notification in the target's mailbox")
 
     p = sub.add_parser("claim", help="claim the next task of an agent's queue, under lease")
     p.add_argument("agent")
@@ -181,6 +194,22 @@ def main(argv: list[str] | None = None) -> int:
     g.add_argument("--since", type=int, dest="since_seq", help="pure read from this sequence number")
     p.add_argument("--topic", help="filter by topic (only with --since)")
     p.add_argument("--limit", type=int, default=100)
+
+    p = sub.add_parser("notify", help="send a directed signal to one agent (pick it up with `poll`)")
+    p.add_argument("author")
+    p.add_argument("agent")
+    p.add_argument("message", nargs="?", help="omit or use '-' to read from stdin")
+
+    p = sub.add_parser("poll", help="read an agent's own directed notifications (at-least-once)")
+    p.add_argument("agent")
+    p.add_argument("--limit", type=int, default=100)
+
+    p = sub.add_parser("watch",
+                       help="block until a task lands in the agent's queue "
+                            "(prints queued task_ids, one per line; exits 0 either way)")
+    p.add_argument("agent")
+    p.add_argument("--timeout", type=float, default=300.0, metavar="SECONDS")
+    p.add_argument("--interval", type=float, default=2.0, metavar="SECONDS")
 
     sub.add_parser("presence", help="list all known agents and their presence status")
 
@@ -272,8 +301,9 @@ def main(argv: list[str] | None = None) -> int:
         "register": lambda: store.register_agent(args.name, args.description),
         "push": lambda: store.push_task(
             args.agent, args.task_id, _content(args.payload), args.priority,
-            args.max_attempts,
+            args.max_attempts, not args.no_notify,
         ),
+        "watch": lambda: _watch(args.agent, args.timeout, args.interval),
         "claim": lambda: store.claim_task(args.agent, args.lease, args.task_id),
         "publish": lambda: store.publish_result(
             args.agent, args.task_id, _content(args.content), args.attempt, args.force
@@ -288,6 +318,8 @@ def main(argv: list[str] | None = None) -> int:
         "channel": lambda: store.read_channel(
             args.agent, args.since_seq, args.topic, args.limit
         ),
+        "notify": lambda: store.notify(args.author, args.agent, _content(args.message)),
+        "poll": lambda: store.poll(args.agent, args.limit),
         "presence": lambda: store.list_presence(),
         "log": lambda: store.get_events(args.task_id, args.agent, args.limit),
         "whoami": _whoami,
@@ -298,7 +330,8 @@ def main(argv: list[str] | None = None) -> int:
             out = json.dumps(json.loads(out), indent=2, ensure_ascii=False)
         except Exception:
             pass
-    print(out)
+    if out:
+        print(out)
     return 1 if out.startswith("ERROR") else 0
 
 

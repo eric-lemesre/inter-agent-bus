@@ -38,6 +38,7 @@ import os
 import re
 import sqlite3
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -168,6 +169,19 @@ def connect() -> sqlite3.Connection:
             agent    TEXT PRIMARY KEY,
             last_seq INTEGER NOT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS notifications (
+            seq     INTEGER PRIMARY KEY AUTOINCREMENT,
+            target  TEXT NOT NULL,
+            author  TEXT NOT NULL,
+            at      TEXT NOT NULL,
+            message TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS notifications_target ON notifications(target);
+        CREATE TABLE IF NOT EXISTS notification_cursor (
+            target   TEXT PRIMARY KEY,
+            last_seq INTEGER NOT NULL
+        );
         """
     )
     _migrate(conn)
@@ -216,8 +230,15 @@ def _known_agents(conn: sqlite3.Connection) -> list[str]:
 
 
 def push_task(
-    target_agent: str, task_id: str, payload: str, priority: int = 1, max_attempts: int = 3
+    target_agent: str, task_id: str, payload: str, priority: int = 1, max_attempts: int = 3,
+    notify: bool = True,
 ) -> str:
+    """Queue a task and, unless notify=False, drop a directed notification in
+    the target's mailbox ("task queued") so a watcher or a poll() wakes the
+    worker — before this, a queued task sat invisible until a human relaunched
+    the agent. The notification is a hint for claim_task, not a delivery
+    channel: at-least-once still rules, and a woken worker may find an empty
+    queue (lease expiry, cancellation) and must tolerate it."""
     target = target_agent.strip().lower()
     with connect() as conn:
         known = _known_agents(conn)
@@ -237,7 +258,46 @@ def push_task(
         except sqlite3.IntegrityError:
             return f"ERROR: task_id '{task_id}' already exists."
         _log_event(conn, "push", task_id, target, f"priority {priority}")
+        if notify:
+            # Same transaction as the insert: a task never exists without its
+            # wake-up hint (author 'bus' is the mechanism speaking, not a cast
+            # member — rule 1 forbids hardcoding agents, not the bus itself).
+            conn.execute(
+                "INSERT INTO notifications(target, author, at, message) VALUES(?,?,?,?)",
+                (target, "bus", _now(),
+                 f"task '{task_id}' queued (priority {priority}) — claim it with claim_task"),
+            )
     return f"OK: task '{task_id}' queued for {target}."
+
+
+def wait_for_task(agent: str, timeout_s: float = 300.0, interval_s: float = 2.0) -> str:
+    """Block until the agent's queue holds at least one queued task, then
+    return the queued task_ids as a JSON list (highest priority first).
+    Returns "[]" on timeout. The poll runs the same expiry sweep as
+    claim_task, so a watcher also wakes on a lease-expired, re-offered task.
+
+    Pure-Python sleep loop (no OS-specific primitive): this is the core that
+    the CLI `iab watch` and the MCP tool wait_task wrap, so a supervisor
+    (systemd user timer, cron, or an agent background task) can wake a worker
+    without a hand-rolled SQLite watcher that dies with its session."""
+    target = agent.strip().lower()
+    if not target:
+        return "ERROR: empty agent."
+    interval_s = max(0.2, float(interval_s))
+    deadline = time.monotonic() + max(0.0, float(timeout_s))
+    while True:
+        with connect() as conn:
+            _requeue_expired(conn)
+            rows = conn.execute(
+                "SELECT task_id FROM tasks WHERE agent=? AND status='queued' "
+                "ORDER BY priority DESC, created_at ASC",
+                (target,),
+            ).fetchall()
+        if rows:
+            return json.dumps([r["task_id"] for r in rows], ensure_ascii=False)
+        if time.monotonic() >= deadline:
+            return "[]"
+        time.sleep(min(interval_s, max(0.0, deadline - time.monotonic())))
 
 
 def _requeue_expired(conn: sqlite3.Connection) -> None:
@@ -684,6 +744,70 @@ def read_channel(
             except Exception:
                 conn.execute("ROLLBACK")
                 raise
+    return json.dumps([dict(r) for r in rows], ensure_ascii=False)
+
+
+def notify(author: str, target_agent: str, message: str) -> str:
+    """Send a directed signal to one agent — point-to-point, unlike the
+    broadcast channel; the recipient picks it up with poll(). The target must
+    be a registered agent (typo detection, same as push_task); the message is
+    a notice, capped like the channel at 16 KiB."""
+    target = target_agent.strip().lower()
+    author = author.strip().lower()
+    if not author:
+        return "ERROR: empty author."
+    if not target:
+        return "ERROR: empty target agent."
+    if len(message.encode("utf-8")) > 16 * 1024:
+        return "ERROR: message exceeds 16 KiB."
+    with connect() as conn:
+        known = _known_agents(conn)
+        if target not in known:
+            return (
+                f"ERROR: agent '{target_agent}' not registered. "
+                f"Known agents: {known or 'none — call register_agent first'}."
+            )
+        cur = conn.execute(
+            "INSERT INTO notifications(target, author, at, message) VALUES(?,?,?,?)",
+            (target, author, _now(), message),
+        )
+        _log_event(conn, "notify", agent=author, detail=target)
+        seq = cur.lastrowid
+    return json.dumps({"seq": seq}, ensure_ascii=False)
+
+
+def poll(agent: str, limit: int = 100) -> str:
+    """Read an agent's own directed notifications and advance its cursor to
+    the last returned seq (at-least-once); an empty read advances nothing."""
+    target = agent.strip().lower()
+    if not target:
+        return "ERROR: empty agent."
+    if limit < 1:
+        limit = 1
+    elif limit > 1000:
+        limit = 1000
+    with connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            cursor = conn.execute(
+                "SELECT last_seq FROM notification_cursor WHERE target=?", (target,)
+            ).fetchone()
+            last_seq = cursor["last_seq"] if cursor else 0
+            rows = conn.execute(
+                "SELECT seq, author, at, message FROM notifications "
+                "WHERE target=? AND seq > ? ORDER BY seq ASC LIMIT ?",
+                (target, last_seq, limit),
+            ).fetchall()
+            if rows:
+                conn.execute(
+                    "INSERT INTO notification_cursor(target, last_seq) VALUES(?,?) "
+                    "ON CONFLICT(target) DO UPDATE SET last_seq=excluded.last_seq",
+                    (target, rows[-1]["seq"]),
+                )
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
     return json.dumps([dict(r) for r in rows], ensure_ascii=False)
 
 

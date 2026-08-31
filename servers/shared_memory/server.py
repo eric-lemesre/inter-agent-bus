@@ -61,11 +61,12 @@ def register_agent(name: str, description: str = "") -> str:
 
 @mcp.tool()
 def push_task(
-    target_agent: str, task_id: str, payload: str, priority: int = 1, max_attempts: int = 3
+    target_agent: str, task_id: str, payload: str, priority: int = 1, max_attempts: int = 3,
+    notify: bool = True,
 ) -> str:
-    """Queue a task for a registered agent (higher priority is served first; after max_attempts expired leases the task is dead-lettered)."""
+    """Queue a task for a registered agent (higher priority is served first; after max_attempts expired leases the task is dead-lettered); unless notify=False a directed notification wakes the target's watcher."""
     _touch()
-    return store.push_task(target_agent, task_id, payload, priority, max_attempts)
+    return store.push_task(target_agent, task_id, payload, priority, max_attempts, notify)
 
 
 @mcp.tool()
@@ -156,6 +157,27 @@ def read_channel(agent: str = "", since_seq: int = -1, topic: str = "", limit: i
     return store.read_channel(
         agent or None, None if since_seq < 0 else since_seq, topic or None, limit
     )
+
+
+@mcp.tool()
+def notify(author: str, target_agent: str, message: str) -> str:
+    """Send a directed signal to one agent (point-to-point); the recipient picks it up with poll()."""
+    _touch()
+    return store.notify(author, target_agent, message)
+
+
+@mcp.tool()
+def poll(agent: str, limit: int = 100) -> str:
+    """Read an agent's own directed notifications and advance its cursor (at-least-once)."""
+    _touch()
+    return store.poll(agent, limit)
+
+
+@mcp.tool()
+def wait_task(agent: str, timeout_seconds: float = 300.0, interval_seconds: float = 2.0) -> str:
+    """Block until the agent's queue holds a queued task and return the task_ids (JSON list, "[]" on timeout) — BLOCKING call, use from a background-capable runtime."""
+    _touch()
+    return store.wait_for_task(agent, timeout_seconds, interval_seconds)
 
 
 def main() -> None:
