@@ -813,7 +813,103 @@ with tempfile.TemporaryDirectory() as tmp:
     check("cli heartbeat --model declares the model",
           json.loads(out.stdout)["model"] == "qwen3.6", out.stdout + out.stderr)
 
+
     store._now = real_now
+
+    # ---- Phase 8b: broadcast — fan-out into the existing mailboxes.
+    # Fresh instances for the scenario (the earlier ones carry history).
+    for n in ("claude@homelab", "claude@leadsage", "kimi@brother", "codewhale@leadsage"):
+        store.register_agent(n, "8b")
+    store.register_agent("opencode@homelab", "8b", model="qwen3-coder-next")
+    store.heartbeat("claude@homelab", ttl_seconds=600)
+    store.heartbeat("kimi@brother", ttl_seconds=600)
+    store.heartbeat("opencode@homelab", ttl_seconds=600, model="qwen3-coder-next")
+    for n in ("claude@leadsage", "codewhale@leadsage", "claude@conciliateur", "opencode@vm"):
+        store.heartbeat(n, ttl_seconds=0)  # seen, but already expired: asleep
+    # drain the mailboxes so the scenario reads only its own messages
+    for n in ("claude@homelab", "claude@leadsage", "kimi@brother", "codewhale@leadsage",
+              "opencode@homelab"):
+        store.poll(n)
+
+    r = store.broadcast("nobody", "x")
+    check("broadcast refuses an unregistered author", r.startswith("ERROR"), r)
+    r = store.broadcast("kimi@brother", "x", scope="*@nowhere")
+    check("broadcast refuses an empty scope", r.startswith("ERROR"), r)
+    r = store.broadcast("kimi@brother", "x", scope="claude@homelab,ghost@x")
+    check("one unresolvable entry refuses the whole broadcast (atomic)",
+          r.startswith("ERROR")
+          and not any("x" == m["message"] for m in json.loads(store.poll("claude@homelab"))), r)
+
+    b = json.loads(store.broadcast("kimi@brother", "who touched roles/mail_print?",
+                                   scope="claude@*"))
+    check("harness scope reaches every instance of the harness",
+          set(b["recipients"]) == {"claude@homelab", "claude@leadsage", "claude@conciliateur"},
+          json.dumps(b))
+    check("delivered/asleep split follows presence",
+          "claude@homelab" in b["delivered"] and "claude@leadsage" in b["asleep"]
+          and b["to_wake"] == [], json.dumps(b))
+    inbox = json.loads(store.poll("claude@homelab"))
+    check("the recipient reads the broadcast with its usual poll, tagged with the id",
+          any(m["broadcast_id"] == b["broadcast_id"]
+              and m["message"] == "who touched roles/mail_print?" for m in inbox),
+          json.dumps(inbox))
+    chan = json.loads(store.read_channel(since_seq=b["broadcast_id"] - 1, topic="broadcast"))
+    check("the broadcast leaves a public trace on the channel under its id",
+          chan and chan[0]["seq"] == b["broadcast_id"] and chan[0]["author"] == "kimi@brother")
+    check("…and is journaled", any(e["event"] == "broadcast" and f"id {b['broadcast_id']}" in e["detail"]
+                                   for e in json.loads(store.get_events(agent="kimi@brother"))))
+
+    r = store.notify("claude@homelab", "kimi@brother", "me, on 10/15", reply_to=999999)
+    check("a reply to a non-broadcast id is refused", r.startswith("ERROR"), r)
+    store.notify("claude@homelab", "kimi@brother", "me, on 10/15", reply_to=b["broadcast_id"])
+    store.notify("claude@leadsage", "kimi@brother", "not me", reply_to=b["broadcast_id"])
+    store.notify("claude@leadsage", "kimi@brother", "unrelated note")
+    rep = json.loads(store.replies(b["broadcast_id"]))
+    check("replies collects only the answers to that broadcast, oldest first",
+          [m["message"] for m in rep] == ["me, on 10/15", "not me"], json.dumps(rep))
+    kimi_inbox = json.loads(store.poll("kimi@brother"))
+    check("replies also arrive in the asker's mailbox with reply_to set",
+          sum(1 for m in kimi_inbox if m["reply_to"] == b["broadcast_id"]) == 2)
+    check("replies refuses a non-broadcast id", store.replies(1).startswith("ERROR"))
+
+    b2 = json.loads(store.broadcast("claude@homelab", "freeze at 07:45", scope="*@homelab"))
+    check("workspace scope reaches every agent of the workspace, author included",
+          set(b2["recipients"]) == {"claude@homelab", "opencode@homelab"}, json.dumps(b2))
+    b3 = json.loads(store.broadcast("claude@homelab", "local models only", scope="model:qwen3-coder*"))
+    check("model scope matches declared models by glob",
+          b3["recipients"] == ["opencode@homelab"], json.dumps(b3))
+    b4 = json.loads(store.broadcast("claude@homelab", "alive?", scope="*", alive_only=True))
+    check("alive_only drops asleep recipients",
+          set(b4["recipients"]) <= {"claude@homelab", "kimi@brother", "opencode@homelab"}
+          and "claude@leadsage" not in b4["recipients"], json.dumps(b4))
+    b5 = json.loads(store.broadcast("claude@homelab", "wake up", scope="claude@leadsage,codewhale",
+                                    wake=True))
+    check("list scope resolves bare harnesses and marks asleep recipients to wake",
+          set(b5["recipients"]) == {"claude@leadsage", "codewhale@leadsage"}
+          and set(b5["to_wake"]) == {"claude@leadsage", "codewhale@leadsage"}, json.dumps(b5))
+    check("the wake flag travels with the notification",
+          any(m["wake"] and m["broadcast_id"] == b5["broadcast_id"]
+              for m in json.loads(store.poll("codewhale@leadsage"))))
+    check("a JSON list scope is accepted too",
+          json.loads(store.broadcast("kimi@brother", "x", scope='["claude@homelab"]'))["recipients"]
+          == ["claude@homelab"])
+    check("broadcast caps the message at 16 KiB",
+          store.broadcast("kimi@brother", "x" * (16 * 1024 + 1)).startswith("ERROR"))
+
+    out = subprocess.run(cli + ["broadcast", "kimi@brother", "claude@*", "-"],
+                         input="via cli", env=os.environ.copy(), capture_output=True, text=True)
+    check("cli broadcast reads the message from stdin and returns the id",
+          "broadcast_id" in out.stdout, out.stdout + out.stderr)
+    bid = json.loads(out.stdout)["broadcast_id"]
+    out = subprocess.run(cli + ["notify", "claude@homelab", "kimi@brother", "cli reply",
+                                "--reply-to", str(bid)],
+                         env=os.environ.copy(), capture_output=True, text=True)
+    out2 = subprocess.run(cli + ["replies", str(bid)], env=os.environ.copy(),
+                          capture_output=True, text=True)
+    check("cli notify --reply-to and cli replies round-trip",
+          out.stdout.startswith("{") and json.loads(out2.stdout)[0]["message"] == "cli reply",
+          out.stdout + out2.stdout + out.stderr + out2.stderr)
+
     del os.environ["IAB_DB"]
 
 if fail:

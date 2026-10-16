@@ -264,12 +264,20 @@ vingt heures.
 - Petites corrections : nom de curseur normalisé dans `read_channel` ;
   `wait_for_task` garde une connexion pour toute l'attente.
 
-### 8b — diffusion — *à faire*
+### 8b — diffusion — **livrée**
 
-`broadcast(scope)` par éventail dans la table `notifications` existante
-(`broadcast_id`, `reply_to`, `replies`) ; portées `*`, `harnais@*`,
-`*@espace`, listes ; destinataires endormis signalés. Toujours des
-données, jamais des ordres : le travail passe par `push_task`.
+- `broadcast(author, message, scope, alive_only, wake)` : une entrée de
+  canal (sujet `broadcast`, seq = identifiant) plus une notification par
+  destinataire dans la même transaction (colonnes additives
+  `notifications.broadcast_id/reply_to/wake`) ; les destinataires lisent
+  avec leur `poll()` habituel. Portées `*`, `harnais@*`, `*@espace`,
+  `model:<motif>`, liste séparée par des virgules ou JSON — une entrée
+  irrésoluble refuse tout l'éventail. Réponse : `recipients`,
+  `delivered` (vivants), `asleep`, `to_wake`.
+- `notify(reply_to=, wake=)` et `replies(broadcast_id)` (lecture pure) ;
+  `iab broadcast`, `iab replies`, `iab notify --reply-to --wake`.
+- Toujours des données, jamais des ordres : les skills le disent ; le
+  travail passe par `push_task`.
 
 ### 8c — réveil — *à faire*
 

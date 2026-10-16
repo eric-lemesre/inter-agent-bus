@@ -32,6 +32,7 @@ journaled in the append-only `events` table (get_events).
 """
 from __future__ import annotations
 
+import fnmatch
 import hashlib
 import json
 import os
@@ -316,6 +317,13 @@ def _migrate(conn: sqlite3.Connection) -> None:
     columns = {r["name"] for r in conn.execute("PRAGMA table_info(presence)")}
     if "model" not in columns:
         conn.execute("ALTER TABLE presence ADD COLUMN model TEXT NOT NULL DEFAULT ''")
+    columns = {r["name"] for r in conn.execute("PRAGMA table_info(notifications)")}
+    if "broadcast_id" not in columns:
+        conn.execute("ALTER TABLE notifications ADD COLUMN broadcast_id INTEGER")
+    if "reply_to" not in columns:
+        conn.execute("ALTER TABLE notifications ADD COLUMN reply_to INTEGER")
+    if "wake" not in columns:
+        conn.execute("ALTER TABLE notifications ADD COLUMN wake INTEGER NOT NULL DEFAULT 0")
 
 
 def _log_event(
@@ -1043,11 +1051,17 @@ def read_channel(
     return json.dumps([dict(r) for r in rows], ensure_ascii=False)
 
 
-def notify(author: str, target_agent: str, message: str) -> str:
+def notify(
+    author: str, target_agent: str, message: str,
+    reply_to: int | None = None, wake: bool = False,
+) -> str:
     """Send a directed signal to one agent — point-to-point, unlike the
-    broadcast channel; the recipient picks it up with poll(). The target must
-    be a registered agent (typo detection, same as push_task); the message is
-    a notice, capped like the channel at 16 KiB."""
+    broadcast channel; the recipient picks it up with poll(). Author and
+    target must be registered (typo detection, same as push_task); the
+    message is a notice, capped like the channel at 16 KiB. `reply_to` ties
+    the notice to a broadcast (its id) so the asker can collect it with
+    replies(); `wake` asks a supervisor to launch an asleep recipient —
+    granted only if the recipient's roster allows it (see wake policy)."""
     if not author.strip():
         return "ERROR: empty author."
     if not target_agent.strip():
@@ -1061,13 +1075,162 @@ def notify(author: str, target_agent: str, message: str) -> str:
         target, error = _resolve_target(conn, target_agent)
         if error:
             return error
+        if reply_to is not None:
+            if not _is_broadcast(conn, reply_to):
+                return f"ERROR: reply_to {reply_to} is not a broadcast id."
         cur = conn.execute(
-            "INSERT INTO notifications(target, author, at, message) VALUES(?,?,?,?)",
-            (target, author, _now(), message),
+            "INSERT INTO notifications(target, author, at, message, reply_to, wake) "
+            "VALUES(?,?,?,?,?,?)",
+            (target, author, _now(), message, reply_to, 1 if wake else 0),
         )
-        _log_event(conn, "notify", agent=author, detail=target)
+        _log_event(conn, "notify", agent=author,
+                   detail=target + (f" (reply to broadcast {reply_to})" if reply_to else "")
+                   + (" (wake)" if wake else ""))
         seq = cur.lastrowid
     return json.dumps({"seq": seq}, ensure_ascii=False)
+
+
+def _is_broadcast(conn: sqlite3.Connection, broadcast_id: int) -> bool:
+    return conn.execute(
+        "SELECT 1 FROM channel WHERE seq=? AND topic='broadcast'", (broadcast_id,)
+    ).fetchone() is not None
+
+
+def _alive_set(conn: sqlite3.Connection) -> set[str]:
+    now = datetime.fromisoformat(_now())
+    alive = set()
+    for r in conn.execute("SELECT agent, last_seen, ttl_seconds FROM presence"):
+        deadline = datetime.fromisoformat(r["last_seen"]) + timedelta(seconds=r["ttl_seconds"] or 0)
+        if now < deadline:
+            alive.add(r["agent"])
+    return alive
+
+
+def _expand_scope(conn: sqlite3.Connection, scope: str | list) -> tuple[list[str], str | None]:
+    """Recipients of a broadcast: `*` (every registered agent), `harness@*`
+    (every instance of a harness, a legacy bare row included), `*@workspace`
+    (every agent of a workspace), `model:<glob>` (instances whose declared
+    model matches), or an explicit list — comma-separated or a JSON list —
+    where every entry must resolve (one typo refuses the whole broadcast:
+    a partial fan-out would be a silent loss)."""
+    if isinstance(scope, str):
+        text = scope.strip().lower()
+        if not text:
+            return [], "ERROR: empty scope."
+        if text == "*":
+            names = _known_agents(conn)
+            return names, None if names else "ERROR: no registered agent."
+        if text.endswith("@*") and text.count("@") == 1:
+            harness = text[:-2]
+            names = [r["name"] for r in conn.execute(
+                "SELECT name FROM agents WHERE harness=? ORDER BY name", (harness,))]
+            return names, None if names else f"ERROR: no instance of harness '{harness}'."
+        if text.startswith("*@") and text.count("@") == 1:
+            workspace = text[2:]
+            names = [r["name"] for r in conn.execute(
+                "SELECT name FROM agents WHERE workspace=? ORDER BY name", (workspace,))]
+            return names, None if names else f"ERROR: no agent in workspace '{workspace}'."
+        if text.startswith("model:"):
+            glob = text[len("model:"):]
+            names = [r["agent"] for r in conn.execute(
+                "SELECT a.name AS agent, p.model FROM agents a "
+                "JOIN presence p ON p.agent = a.name ORDER BY a.name")
+                if r["model"] and fnmatch.fnmatchcase(r["model"].lower(), glob)]
+            return names, None if names else f"ERROR: no instance with a model matching '{glob}'."
+        if text.startswith("["):
+            try:
+                items = json.loads(scope)
+            except ValueError:
+                return [], "ERROR: scope list is not valid JSON."
+        else:
+            items = [part for part in text.split(",")]
+    else:
+        items = list(scope)
+    names: list[str] = []
+    for item in items:
+        name, error = _resolve_target(conn, str(item))
+        if error:
+            return [], error
+        if name not in names:
+            names.append(name)
+    return names, None if names else "ERROR: empty scope."
+
+
+def broadcast(
+    author: str, message: str, scope: str | list = "*",
+    alive_only: bool = False, wake: bool = False,
+) -> str:
+    """Ask or tell several agents at once: one channel entry (topic
+    `broadcast`, its seq is the broadcast id) plus one directed notification
+    per recipient, written in the SAME transaction, so recipients read it
+    with the poll() they already have and can answer with
+    notify(reply_to=id). Returns who will see it now (`delivered`, alive)
+    and who is asleep (`asleep`, pending until their next poll or a
+    supervisor wake when `wake` is set — `to_wake`). A broadcast is a
+    question or a signal, never a work order: work goes through push_task."""
+    if not author.strip():
+        return "ERROR: empty author."
+    if len(message.encode("utf-8")) > 16 * 1024:
+        return "ERROR: message exceeds 16 KiB."
+    with connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            author_name, error = _resolve_target(conn, author)
+            if error:
+                conn.execute("COMMIT")
+                return error.replace("agent", "author", 1)
+            names, error = _expand_scope(conn, scope)
+            if error:
+                conn.execute("COMMIT")
+                return error
+            alive = _alive_set(conn)
+            if alive_only:
+                names = [n for n in names if n in alive]
+                if not names:
+                    conn.execute("COMMIT")
+                    return "ERROR: no alive recipient in scope."
+            scope_text = scope if isinstance(scope, str) else ",".join(scope)
+            cur = conn.execute(
+                "INSERT INTO channel(author, at, topic, message) VALUES(?,?,?,?)",
+                (author_name, _now(), "broadcast", message),
+            )
+            broadcast_id = cur.lastrowid
+            now = _now()
+            for name in names:
+                conn.execute(
+                    "INSERT INTO notifications(target, author, at, message, broadcast_id, wake) "
+                    "VALUES(?,?,?,?,?,?)",
+                    (name, author_name, now, message, broadcast_id, 1 if wake else 0),
+                )
+            _log_event(conn, "broadcast", agent=author_name,
+                       detail=f"id {broadcast_id}, scope {scope_text} → {len(names)} recipient(s)"
+                       + (" (wake)" if wake else ""))
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+    delivered = [n for n in names if n in alive]
+    asleep = [n for n in names if n not in alive]
+    return json.dumps(
+        {"broadcast_id": broadcast_id, "recipients": names, "delivered": delivered,
+         "asleep": asleep, "to_wake": asleep if wake else []},
+        ensure_ascii=False,
+    )
+
+
+def replies(broadcast_id: int) -> str:
+    """Answers to a broadcast (notifications sent with reply_to=id), oldest
+    first — a pure read, no cursor moves. Refused for an id that is not a
+    broadcast."""
+    with connect() as conn:
+        if not _is_broadcast(conn, broadcast_id):
+            return f"ERROR: {broadcast_id} is not a broadcast id."
+        rows = conn.execute(
+            "SELECT seq, author, target, at, message FROM notifications "
+            "WHERE reply_to=? ORDER BY seq ASC",
+            (broadcast_id,),
+        ).fetchall()
+    return json.dumps([dict(r) for r in rows], ensure_ascii=False)
 
 
 def poll(agent: str, limit: int = 100) -> str:
@@ -1091,8 +1254,8 @@ def poll(agent: str, limit: int = 100) -> str:
             ).fetchone()
             last_seq = cursor["last_seq"] if cursor else 0
             rows = conn.execute(
-                "SELECT seq, author, at, message FROM notifications "
-                "WHERE target=? AND seq > ? ORDER BY seq ASC LIMIT ?",
+                "SELECT seq, author, at, message, broadcast_id, reply_to, wake "
+                "FROM notifications WHERE target=? AND seq > ? ORDER BY seq ASC LIMIT ?",
                 (target, last_seq, limit),
             ).fetchall()
             if rows:
@@ -1105,7 +1268,9 @@ def poll(agent: str, limit: int = 100) -> str:
         except Exception:
             conn.execute("ROLLBACK")
             raise
-    return json.dumps([dict(r) for r in rows], ensure_ascii=False)
+    return json.dumps(
+        [{**dict(r), "wake": bool(r["wake"])} for r in rows], ensure_ascii=False
+    )
 
 
 def get_system_state() -> str:

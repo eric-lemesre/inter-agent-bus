@@ -204,6 +204,23 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("author")
     p.add_argument("agent")
     p.add_argument("message", nargs="?", help="omit or use '-' to read from stdin")
+    p.add_argument("--reply-to", type=int, default=None, metavar="BROADCAST_ID",
+                   help="answer a broadcast (collected by `iab replies`)")
+    p.add_argument("--wake", action="store_true",
+                   help="ask a supervisor to launch the recipient if asleep (roster permitting)")
+
+    p = sub.add_parser("broadcast", help="ask or tell several agents at once "
+                                         "(scope: '*', 'harness@*', '*@workspace', "
+                                         "'model:<glob>' or a comma-separated list)")
+    p.add_argument("author")
+    p.add_argument("scope")
+    p.add_argument("message", nargs="?", help="omit or use '-' to read from stdin")
+    p.add_argument("--alive-only", action="store_true", help="skip asleep recipients")
+    p.add_argument("--wake", action="store_true",
+                   help="ask a supervisor to launch asleep recipients (roster permitting)")
+
+    p = sub.add_parser("replies", help="answers received to a broadcast")
+    p.add_argument("broadcast_id", type=int)
 
     p = sub.add_parser("poll", help="read an agent's own directed notifications (at-least-once)")
     p.add_argument("agent")
@@ -331,7 +348,11 @@ def main(argv: list[str] | None = None) -> int:
         "channel": lambda: store.read_channel(
             args.agent, args.since_seq, args.topic, args.limit
         ),
-        "notify": lambda: store.notify(args.author, args.agent, _content(args.message)),
+        "notify": lambda: store.notify(args.author, args.agent, _content(args.message),
+                                       args.reply_to, args.wake),
+        "broadcast": lambda: store.broadcast(args.author, _content(args.message), args.scope,
+                                             args.alive_only, args.wake),
+        "replies": lambda: store.replies(args.broadcast_id),
         "poll": lambda: store.poll(args.agent, args.limit),
         "presence": lambda: store.list_presence(),
         "log": lambda: store.get_events(args.task_id, args.agent, args.limit),

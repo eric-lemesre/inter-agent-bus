@@ -246,12 +246,20 @@ unnoticed for six weeks, and a reply sat unread for twenty hours.
 - Small fixes: `read_channel` cursor name normalized; `wait_for_task`
   keeps one connection for the whole wait.
 
-### 8b — broadcast — *planned*
+### 8b — broadcast — **shipped**
 
-`broadcast(scope)` fanned out into the existing `notifications` table
-(`broadcast_id`, `reply_to`, `replies`); scopes `*`, `harness@*`,
-`*@workspace`, lists; `asleep` recipients reported. Still data, never
-orders: work goes through `push_task`.
+- `broadcast(author, message, scope, alive_only, wake)`: one channel
+  entry (topic `broadcast`, seq = id) plus one notification per
+  recipient in the same transaction (additive columns
+  `notifications.broadcast_id/reply_to/wake`); recipients read with
+  their usual `poll()`. Scopes `*`, `harness@*`, `*@workspace`,
+  `model:<glob>`, comma-separated or JSON list — one unresolvable entry
+  refuses the whole fan-out. Answer: `recipients`, `delivered` (alive),
+  `asleep`, `to_wake`.
+- `notify(reply_to=, wake=)` and `replies(broadcast_id)` (pure read);
+  `iab broadcast`, `iab replies`, `iab notify --reply-to --wake`.
+- Still data, never orders: the skills say so; work goes through
+  `push_task`.
 
 ### 8c — wake-up — *planned*
 

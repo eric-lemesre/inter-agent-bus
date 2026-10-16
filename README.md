@@ -126,8 +126,27 @@ one's queue, or one specific task via `task_id`) · `publish_result`
 `cancel_task` · `requeue_task` · `extend_lease` · `read_result` ·
 `get_system_state` · `get_events` (transition journal, filterable by
 task and/or agent) · `heartbeat` · `list_presence` · `announce` ·
-`read_channel` · `notify` / `poll` (directed signals, point-to-point) ·
-`wait_task` (blocking wait until a task lands in one's queue).
+`read_channel` · `notify` / `poll` (directed signals, point-to-point;
+`reply_to` answers a broadcast) · `broadcast` / `replies` (one question
+or signal to many, see below) · `wait_task` (blocking wait until a task
+lands in one's queue).
+
+### Broadcast: one question, many mailboxes
+
+`broadcast(author, message, scope)` writes one channel entry (topic
+`broadcast`, its seq is the broadcast id) **and** one directed
+notification per recipient in the same transaction: recipients read it
+with the `poll()` they already have (field `broadcast_id`) and answer
+with `notify(..., reply_to=<id>)`; the asker collects with
+`replies(<id>)`. Scopes: `*` (everyone), `claude@*` (every instance of
+a harness), `*@homelab` (every agent of a workspace), `model:qwen*`
+(declared model glob) or a comma-separated list — one unresolvable
+entry refuses the whole broadcast. The answer says who is `delivered`
+(alive) and who is `asleep`; `alive_only` skips the latter, `wake=True`
+marks them for a supervisor (`to_wake`, see *Wake-up*). A broadcast is a
+question or a signal, **never a work order**: work still goes through
+`push_task` to one named queue — the same payload in N queues is N
+executions.
 
 `push_task` also drops a directed notification in the target's mailbox
 ("task queued") unless called with `notify=False` — so a watcher or a
@@ -152,7 +171,9 @@ iab heartbeat <agent> [--ttl S] [--capabilities JSON] [--model M]
 iab announce <author> <topic> [message|-]
 iab channel [--agent A | --since N] [--topic T] [--limit N]
 iab presence
-iab notify <author> <agent> [message|-] iab poll <agent> [--limit N]
+iab notify <author> <agent> [message|-] [--reply-to ID] [--wake]
+iab broadcast <author> <scope> [message|-] [--alive-only] [--wake]
+iab replies <broadcast_id>              iab poll <agent> [--limit N]
 iab watch <agent> [--timeout S] [--interval S]
 ```
 

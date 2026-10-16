@@ -134,9 +134,28 @@ tâche ; passer le jeton `attempt` du claim — clôture de bail) ·
 `cancel_task` · `requeue_task` · `extend_lease` · `read_result` ·
 `get_system_state` · `get_events` (journal des transitions, filtrable
 par tâche et/ou agent) · `heartbeat` · `list_presence` · `announce` ·
-`read_channel` · `notify` / `poll` (signaux dirigés, point à point) ·
-`wait_task` (attente bloquante jusqu'à l'arrivée d'une tâche dans sa
-file).
+`read_channel` · `notify` / `poll` (signaux dirigés, point à point ;
+`reply_to` répond à une diffusion) · `broadcast` / `replies` (une
+question ou un signal à plusieurs, ci-dessous) · `wait_task` (attente
+bloquante jusqu'à l'arrivée d'une tâche dans sa file).
+
+### Diffusion : une question, plusieurs boîtes
+
+`broadcast(author, message, scope)` écrit une entrée de canal (sujet
+`broadcast`, son seq est l'identifiant de la diffusion) **et** une
+notification dirigée par destinataire dans la même transaction : les
+destinataires la lisent avec le `poll()` qu'ils ont déjà (champ
+`broadcast_id`) et répondent par `notify(..., reply_to=<id>)` ;
+l'émetteur collecte avec `replies(<id>)`. Portées : `*` (tout le
+monde), `claude@*` (toutes les instances d'un harnais), `*@homelab`
+(tous les agents d'un espace), `model:qwen*` (motif sur le modèle
+déclaré) ou une liste séparée par des virgules — une entrée
+irrésoluble refuse toute la diffusion. La réponse dit qui est
+`delivered` (vivant) et qui est `asleep` ; `alive_only` saute ces
+derniers, `wake=True` les marque pour un superviseur (`to_wake`, voir
+*Réveil*). Une diffusion est une question ou un signal, **jamais un
+ordre de travail** : le travail passe toujours par `push_task` vers une
+file nommée — le même payload dans N files, c'est N exécutions.
 
 `push_task` dépose aussi une notification dirigée dans la boîte de la
 cible (« tâche en file ») sauf appel avec `notify=False` — un veilleur
@@ -162,7 +181,9 @@ iab heartbeat <agent> [--ttl S] [--capabilities JSON] [--model M]
 iab announce <auteur> <topic> [message|-]
 iab channel [--agent A | --since N] [--topic T] [--limit N]
 iab presence
-iab notify <auteur> <agent> [message|-] iab poll <agent> [--limit N]
+iab notify <auteur> <agent> [message|-] [--reply-to ID] [--wake]
+iab broadcast <auteur> <portée> [message|-] [--alive-only] [--wake]
+iab replies <broadcast_id>              iab poll <agent> [--limit N]
 iab watch <agent> [--timeout S] [--interval S]
 ```
 

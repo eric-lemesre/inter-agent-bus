@@ -178,10 +178,28 @@ def read_channel(agent: str = "", since_seq: int = -1, topic: str = "", limit: i
 
 
 @mcp.tool()
-def notify(author: str, target_agent: str, message: str) -> str:
-    """Send a directed signal to one agent instance (point-to-point; a bare harness is accepted only when it designates a single instance); the recipient picks it up with poll(). Author and target must be registered."""
+def notify(
+    author: str, target_agent: str, message: str, reply_to: int = 0, wake: bool = False
+) -> str:
+    """Send a directed signal to one agent instance (point-to-point; a bare harness is accepted only when it designates a single instance); the recipient picks it up with poll(). Author and target must be registered. reply_to=<broadcast id> answers a broadcast; wake=True asks a supervisor to launch an asleep recipient if its roster allows."""
     _touch()
-    return store.notify(author, target_agent, message)
+    return store.notify(author, target_agent, message, reply_to or None, wake)
+
+
+@mcp.tool()
+def broadcast(
+    author: str, message: str, scope: str = "*", alive_only: bool = False, wake: bool = False
+) -> str:
+    """Ask or tell several agents at once — scope `*`, `harness@*`, `*@workspace`, `model:<glob>` or a comma-separated list — as one channel entry plus one notification per recipient (read with poll(), answered with notify(reply_to=broadcast_id)); returns who is alive to see it now and who is asleep. A question or a signal, never a work order: work goes through push_task."""
+    _touch()
+    return store.broadcast(author, message, scope, alive_only, wake)
+
+
+@mcp.tool()
+def replies(broadcast_id: int) -> str:
+    """Answers received to a broadcast (notifications sent with reply_to=broadcast_id), oldest first; a pure read."""
+    _touch()
+    return store.replies(broadcast_id)
 
 
 @mcp.tool()
