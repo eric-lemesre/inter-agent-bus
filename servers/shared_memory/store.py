@@ -289,6 +289,12 @@ def connect() -> sqlite3.Connection:
             target   TEXT PRIMARY KEY,
             last_seq INTEGER NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS wake_locks (
+            agent  TEXT PRIMARY KEY,
+            token  TEXT NOT NULL,
+            until  TEXT NOT NULL,
+            holder TEXT NOT NULL DEFAULT ''
+        );
         """
     )
     _migrate(conn)
@@ -1271,6 +1277,157 @@ def poll(agent: str, limit: int = 100) -> str:
     return json.dumps(
         [{**dict(r), "wake": bool(r["wake"])} for r in rows], ensure_ascii=False
     )
+
+
+def _pending(conn: sqlite3.Connection, target: str) -> dict:
+    """Signals waiting for an instance, without moving any cursor: queued
+    task ids (highest priority first), unread notifications (total, those
+    flagged `wake`, and the broadcast ids among the flagged ones)."""
+    _requeue_expired(conn)
+    tasks = [r["task_id"] for r in conn.execute(
+        "SELECT task_id FROM tasks WHERE agent=? AND status='queued' "
+        "ORDER BY priority DESC, created_at ASC", (target,))]
+    cursor = conn.execute(
+        "SELECT last_seq FROM notification_cursor WHERE target=?", (target,)).fetchone()
+    last_seq = cursor["last_seq"] if cursor else 0
+    rows = conn.execute(
+        "SELECT seq, broadcast_id, wake FROM notifications WHERE target=? AND seq > ?",
+        (target, last_seq)).fetchall()
+    wake_direct = sum(1 for r in rows if r["wake"] and r["broadcast_id"] is None)
+    wake_broadcasts = sorted({r["broadcast_id"] for r in rows if r["wake"] and r["broadcast_id"]})
+    return {
+        "agent": target,
+        "tasks": tasks,
+        "notifications": len(rows),
+        "wake_notifications": wake_direct,
+        "wake_broadcasts": wake_broadcasts,
+        "broadcasts": sorted({r["broadcast_id"] for r in rows if r["broadcast_id"]}),
+    }
+
+
+def _kinds(kinds: str | tuple | list) -> set[str] | str:
+    wanted = {k.strip().lower() for k in (kinds.split(",") if isinstance(kinds, str) else kinds)}
+    wanted.discard("")
+    if "any" in wanted or not wanted:
+        return {"task", "notification"}
+    if not wanted <= {"task", "notification"}:
+        return f"ERROR: kinds must be task, notification or any (got {sorted(wanted)})."
+    return wanted
+
+
+def _signalled(pending: dict, wanted: set[str]) -> bool:
+    return bool(("task" in wanted and pending["tasks"])
+                or ("notification" in wanted and pending["notifications"]))
+
+
+def pending_signals(agent: str) -> str:
+    """Snapshot of what waits for an instance (see _pending) — read only."""
+    with connect() as conn:
+        target, error = _resolve_target(conn, agent)
+        if error:
+            return error
+        return json.dumps(_pending(conn, target), ensure_ascii=False)
+
+
+def wait_signal(
+    agent: str, kinds: str | tuple | list = "any",
+    timeout_s: float = 300.0, interval_s: float = 2.0,
+) -> str:
+    """Block until a task is queued for the instance and/or an unread
+    notification (a broadcast included) waits in its mailbox — whichever
+    `kinds` asks for — and return the snapshot with `signalled: true`;
+    `signalled: false` on timeout. Generalises wait_for_task: this is the
+    wake-up of an OPEN interactive session (run it as a background task,
+    the harness hands control back when it returns) and the probe of a
+    supervisor. No cursor moves: the session still polls/claims itself."""
+    wanted = _kinds(kinds)
+    if isinstance(wanted, str):
+        return wanted
+    if not agent.strip():
+        return "ERROR: empty agent."
+    interval_s = max(0.2, float(interval_s))
+    deadline = time.monotonic() + max(0.0, float(timeout_s))
+    conn = connect()
+    try:
+        target, error = _resolve_target(conn, agent)
+        if error:
+            return error
+        while True:
+            pending = _pending(conn, target)
+            if _signalled(pending, wanted):
+                return json.dumps({"signalled": True, **pending}, ensure_ascii=False)
+            if time.monotonic() >= deadline:
+                return json.dumps({"signalled": False, **pending}, ensure_ascii=False)
+            time.sleep(min(interval_s, max(0.0, deadline - time.monotonic())))
+    finally:
+        conn.close()
+
+
+def acquire_wake_lock(agent: str, lease_seconds: int = 600, holder: str = "") -> str:
+    """Take the wake lock of an instance for `lease_seconds` — the guard
+    that keeps two supervisors (or a timer firing twice) from launching the
+    same agent at once. Lives in the database like everything else: no
+    flock, no state file, same lease trick as tasks (an expired lock is
+    free). Returns {token, until} or BUSY."""
+    target = agent.strip().lower()
+    if not target:
+        return "ERROR: empty agent."
+    token = hashlib.sha256(f"{target}{time.time_ns()}{os.getpid()}".encode()).hexdigest()[:16]
+    until = (datetime.now(timezone.utc) + timedelta(seconds=lease_seconds)).isoformat()
+    with connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            row = conn.execute(
+                "SELECT token, until FROM wake_locks WHERE agent=?", (target,)).fetchone()
+            if row is not None and row["until"] > _now():
+                conn.execute("COMMIT")
+                return "BUSY"
+            conn.execute(
+                "INSERT INTO wake_locks(agent, token, until, holder) VALUES(?,?,?,?) "
+                "ON CONFLICT(agent) DO UPDATE SET token=excluded.token, "
+                "until=excluded.until, holder=excluded.holder",
+                (target, token, until, holder),
+            )
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+    return json.dumps({"token": token, "until": until}, ensure_ascii=False)
+
+
+def renew_wake_lock(agent: str, token: str, lease_seconds: int = 600) -> str:
+    target = agent.strip().lower()
+    until = (datetime.now(timezone.utc) + timedelta(seconds=lease_seconds)).isoformat()
+    with connect() as conn:
+        cur = conn.execute(
+            "UPDATE wake_locks SET until=? WHERE agent=? AND token=?", (until, target, token))
+    return "OK" if cur.rowcount else "ERROR: wake lock not held with this token."
+
+
+def release_wake_lock(agent: str, token: str) -> str:
+    target = agent.strip().lower()
+    with connect() as conn:
+        cur = conn.execute(
+            "DELETE FROM wake_locks WHERE agent=? AND token=?", (target, token))
+    return "OK" if cur.rowcount else "ERROR: wake lock not held with this token."
+
+
+def record_wake(agent: str, detail: str) -> None:
+    """Journal a wake-up transition (`wake` event: start/end/refused) — the
+    budget `wake_count` is computed from these starts."""
+    with connect() as conn:
+        _log_event(conn, "wake", agent=agent.strip().lower(), detail=detail)
+
+
+def wake_count(agent: str, window_seconds: int = 3600) -> int:
+    """Launches of an instance within the window (events `wake` whose detail
+    starts with `start`)."""
+    since = (datetime.now(timezone.utc) - timedelta(seconds=window_seconds)).isoformat()
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) c FROM events WHERE event='wake' AND agent=? AND at >= ? "
+            "AND detail LIKE 'start%'", (agent.strip().lower(), since)).fetchone()
+    return row["c"]
 
 
 def get_system_state() -> str:

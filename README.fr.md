@@ -40,7 +40,7 @@ taguée**, jamais depuis un arbre de travail :
 ```bash
 python3 -m venv ~/.local/venvs/inter-agent-bus
 ~/.local/venvs/inter-agent-bus/bin/pip install \
-  'inter-agent-bus[server] @ git+https://github.com/eric-lemesre/inter-agent-bus@v0.11.0'
+  'inter-agent-bus[server] @ git+https://github.com/eric-lemesre/inter-agent-bus@v0.12.0'
 ~/.local/venvs/inter-agent-bus/bin/iab install --scope user
 ```
 
@@ -137,7 +137,8 @@ par tâche et/ou agent) · `heartbeat` · `list_presence` · `announce` ·
 `read_channel` · `notify` / `poll` (signaux dirigés, point à point ;
 `reply_to` répond à une diffusion) · `broadcast` / `replies` (une
 question ou un signal à plusieurs, ci-dessous) · `wait_task` (attente
-bloquante jusqu'à l'arrivée d'une tâche dans sa file).
+bloquante jusqu'à l'arrivée d'une tâche dans sa file) · `wait_signal` /
+`pending_signals` (tâches et notifications, voir *Réveil*).
 
 ### Diffusion : une question, plusieurs boîtes
 
@@ -156,6 +157,58 @@ derniers, `wake=True` les marque pour un superviseur (`to_wake`, voir
 *Réveil*). Une diffusion est une question ou un signal, **jamais un
 ordre de travail** : le travail passe toujours par `push_task` vers une
 file nommée — le même payload dans N files, c'est N exécutions.
+
+### Réveil : sessions ouvertes et agents endormis
+
+Le bus reste passif — rien en lui ne produit un événement de réveil.
+Deux voies comblent l'écart, toutes deux clientes du bus :
+
+- **Une session interactive ouverte** se réveille elle-même :
+  `wait_signal(agent, kinds="any")` (CLI `iab watch <agent> --on any`)
+  bloque jusqu'à ce qu'une tâche soit en file ou qu'une notification ou
+  diffusion non lue attende, sans déplacer aucun curseur. À lancer en
+  **tâche de fond** de la session : le harnais rend la main au modèle
+  quand la commande se termine (Claude Code le fait ; tout client qui a
+  des commandes de fond fonctionne pareil), la session relève et réclame
+  ensuite comme d'habitude.
+- **Un agent endormi** est lancé par `iab wake <agent>` depuis le bloc
+  `launch` de son entrée de roster (ou de celle de son harnais) :
+
+  ```json
+  "launch": {
+    "cwd": "~/Dev/git/eric-lemesre/HomeLab",
+    "command": ["codewhale", "exec", "--auto", "-"],
+    "prompt": "worker-wake",
+    "wake_on": ["task", "broadcast"],
+    "max_wakes_per_hour": 4,
+    "lease_seconds": 10800,
+    "timeout": 21600
+  }
+  ```
+
+  Le prompt (gabarit strict intégré, chemin de fichier, ou texte avec
+  les variables `{agent}`, `{iab}`, `{cwd}`, `{lease}`, `{task_ids}`,
+  `{signals}`) part vers la commande **sur stdin** — ou dans un fichier
+  temporaire 0600 si un argument contient `{prompt_file}` — jamais en
+  argv. Un verrou **en base** (`wake_locks`, à bail comme les tâches :
+  pas de flock, pas de fichier d'état) empêche deux superviseurs de
+  lancer la même instance ; début, fin et refus sont journalisés en
+  événements `wake` (`iab log -a <agent>`). `iab supervise [--interval
+  60]` est le veilleur unique qui remplace un timer par agent : il
+  parcourt toutes les entrées du roster qui ont un bloc `launch` et
+  réveille dans un fil par agent (une revue peut durer des heures sans
+  bloquer les autres) ; à lancer depuis un timer systemd user, une tâche
+  planifiée Windows ou un terminal — sa mort ne perd rien, les signaux
+  attendent dans la base.
+
+  **Politique de réveil** : une tâche en file réveille toujours ; une
+  notification ou une diffusion ne réveillent que si l'émetteur a posé
+  `wake=True` **et** que le roster liste `notification` / `broadcast`
+  dans `wake_on` — un agent payant n'est jamais lancé pour un accusé de
+  réception. `max_wakes_per_hour` casse les boucles (un agent réveillé
+  qui diffuse une question qui réveille les autres), `timeout` tue un
+  worker bloqué (son bail de claim expire alors et le bus re-propose la
+  tâche). `--dry-run` affiche la décision sans rien lancer.
 
 `push_task` dépose aussi une notification dirigée dans la boîte de la
 cible (« tâche en file ») sauf appel avec `notify=False` — un veilleur
@@ -184,7 +237,9 @@ iab presence
 iab notify <auteur> <agent> [message|-] [--reply-to ID] [--wake]
 iab broadcast <auteur> <portée> [message|-] [--alive-only] [--wake]
 iab replies <broadcast_id>              iab poll <agent> [--limit N]
-iab watch <agent> [--timeout S] [--interval S]
+iab watch <agent> [--on task|notification|any] [--timeout S] [--interval S]
+iab signals <agent>                     iab wake <agent> [--dry-run]
+iab supervise [--interval S] [--once] [--dry-run]
 ```
 
 `iab watch` est la primitive du superviseur (unité systemd utilisateur,

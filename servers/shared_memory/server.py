@@ -210,6 +210,22 @@ def poll(agent: str, limit: int = 100) -> str:
 
 
 @mcp.tool()
+def wait_signal(
+    agent: str, kinds: str = "any", timeout_seconds: float = 300.0, interval_seconds: float = 2.0
+) -> str:
+    """Block until a task is queued for the instance and/or an unread notification (broadcasts included) waits in its mailbox — kinds: task, notification or any — and return the snapshot with signalled true/false; no cursor moves. BLOCKING call for a background-capable runtime: the wake-up of an open session."""
+    _touch()
+    return store.wait_signal(agent, kinds, timeout_seconds, interval_seconds)
+
+
+@mcp.tool()
+def pending_signals(agent: str) -> str:
+    """What waits for an instance right now — queued task ids, unread notifications, broadcast ids — without moving any cursor."""
+    _touch()
+    return store.pending_signals(agent)
+
+
+@mcp.tool()
 def wait_task(agent: str, timeout_seconds: float = 300.0, interval_seconds: float = 2.0) -> str:
     """Block until the agent's queue holds a queued task and return the task_ids (JSON list, "[]" on timeout) — BLOCKING call, use from a background-capable runtime."""
     _touch()

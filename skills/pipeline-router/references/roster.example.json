@@ -5,8 +5,16 @@
       "name": "claude",
       "provider": "Anthropic (Claude Code)",
       "cost_model": "flat",
-      "client_hints": ["claude"],
-      "specialties": ["architecture", "security", "review", "design", "integration"],
+      "client_hints": [
+        "claude"
+      ],
+      "specialties": [
+        "architecture",
+        "security",
+        "review",
+        "design",
+        "integration"
+      ],
       "context_window": 200000,
       "notes": "High-level reasoning: critical code, design patterns, final review."
     },
@@ -14,8 +22,15 @@
       "name": "kimi",
       "provider": "Moonshot (subscription)",
       "cost_model": "flat",
-      "client_hints": ["kimi"],
-      "specialties": ["test", "parallel", "refactor", "qa"],
+      "client_hints": [
+        "kimi"
+      ],
+      "specialties": [
+        "test",
+        "parallel",
+        "refactor",
+        "qa"
+      ],
       "context_window": 262144,
       "notes": "Parallelization (swarm): test suites, large-scale refactoring."
     },
@@ -25,16 +40,48 @@
       "cost_model": "credits",
       "budget_cap_usd": 34,
       "fallback": "qwen-local",
-      "client_hints": ["deepseek", "codewhale"],
-      "specialties": ["format", "json", "parse", "triage", "mock"],
+      "client_hints": [
+        "deepseek",
+        "codewhale"
+      ],
+      "specialties": [
+        "format",
+        "json",
+        "parse",
+        "triage",
+        "mock"
+      ],
       "context_window": 131072,
-      "notes": "Ultra-low per-token cost: parsing, formatting, triage, mocks."
+      "notes": "Ultra-low per-token cost: parsing, formatting, triage, mocks.",
+      "launch": {
+        "_comment": "iab wake / iab supervise: how to launch this agent when a signal waits (see README, Wake-up)",
+        "cwd": "~/Dev/git/example-project",
+        "command": [
+          "codewhale",
+          "exec",
+          "--auto",
+          "-"
+        ],
+        "prompt": "worker-wake",
+        "wake_on": [
+          "task",
+          "broadcast"
+        ],
+        "max_wakes_per_hour": 4,
+        "lease_seconds": 10800,
+        "timeout": 21600
+      }
     },
     {
       "name": "gemini",
       "provider": "Google",
       "cost_model": "credits",
-      "specialties": ["ingest", "documentation", "multimodal", "logs"],
+      "specialties": [
+        "ingest",
+        "documentation",
+        "multimodal",
+        "logs"
+      ],
       "context_window": 1048576,
       "notes": "Massive window: ingesting whole repositories, bulky PDFs and logs."
     },
@@ -42,7 +89,10 @@
       "name": "qwen-local",
       "provider": "ollama (qwen3-coder:30b)",
       "cost_model": "local",
-      "specialties": ["code", "test"],
+      "specialties": [
+        "code",
+        "test"
+      ],
       "context_window": 262144,
       "notes": "Free, confidential fallback — below frontier quality, always review."
     }

@@ -21,10 +21,11 @@ import sys
 from pathlib import Path
 
 try:  # installed package: `iab` maps to this directory (pyproject.toml)
-    from . import review, store, worker
+    from . import review, store, wake, worker
 except ImportError:  # bare script: python servers/shared_memory/cli.py
     import review
     import store
+    import wake
     import worker
 
 
@@ -109,15 +110,18 @@ def _install(scope: str, agent_name: str, print_only: bool) -> str:
     )
 
 
-def _watch(agent: str, timeout: float, interval: float) -> str:
-    """Supervisor primitive: task_ids one per line so a shell/timer unit can
-    consume them without a JSON parser; silent empty output on timeout, exit
-    0 either way (the supervisor distinguishes by output, not by rc)."""
-    out = store.wait_for_task(agent, timeout, interval)
-    if out.startswith("ERROR"):
-        return out
-    ids = json.loads(out)
-    return "\n".join(ids)
+def _watch(agent: str, timeout: float, interval: float, on: str) -> str:
+    """Supervisor primitive. `--on task` (default): task_ids one per line so
+    a shell/timer unit can consume them without a JSON parser; silent empty
+    output on timeout, exit 0 either way. `--on notification|any`: the
+    signal snapshot as JSON (`signalled` tells timeout from arrival) — the
+    wake-up of an open interactive session run as a background task."""
+    if on == "task":
+        out = store.wait_for_task(agent, timeout, interval)
+        if out.startswith("ERROR"):
+            return out
+        return "\n".join(json.loads(out))
+    return store.wait_signal(agent, on, timeout, interval)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -227,11 +231,30 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--limit", type=int, default=100)
 
     p = sub.add_parser("watch",
-                       help="block until a task lands in the agent's queue "
-                            "(prints queued task_ids, one per line; exits 0 either way)")
+                       help="block until a signal lands for the agent: --on task (default) "
+                            "prints queued task_ids one per line; --on notification|any "
+                            "prints the signal snapshot as JSON; exits 0 either way")
     p.add_argument("agent")
+    p.add_argument("--on", choices=["task", "notification", "any"], default="task",
+                   help="which signal ends the wait (default: task)")
     p.add_argument("--timeout", type=float, default=300.0, metavar="SECONDS")
     p.add_argument("--interval", type=float, default=2.0, metavar="SECONDS")
+
+    p = sub.add_parser("signals", help="what waits for an agent (tasks, unread "
+                                       "notifications, broadcasts) — read only")
+    p.add_argument("agent")
+
+    p = sub.add_parser("wake", help="launch an asleep agent if a signal waits for it, "
+                                    "from the roster's `launch` block (one decision, synchronous)")
+    p.add_argument("agent")
+    p.add_argument("--dry-run", action="store_true",
+                   help="print the decision and the command, launch nothing")
+
+    p = sub.add_parser("supervise", help="the single watcher: wake every roster agent "
+                                         "with a `launch` block when a signal waits")
+    p.add_argument("--interval", type=float, default=60.0, metavar="SECONDS")
+    p.add_argument("--once", action="store_true", help="one pass, then exit")
+    p.add_argument("--dry-run", action="store_true")
 
     sub.add_parser("presence", help="list all known agents and their presence status")
 
@@ -289,6 +312,8 @@ def main(argv: list[str] | None = None) -> int:
                    help="print the JSON registration instead of applying it")
 
     args = parser.parse_args(argv)
+    if args.command == "supervise":
+        return wake.supervise(args.interval, args.once, args.dry_run)
     if args.command == "review":
         cmd = args.review_cmd
         if cmd and cmd[0] == "--":
@@ -332,7 +357,9 @@ def main(argv: list[str] | None = None) -> int:
             args.agent, args.task_id, _content(args.payload), args.priority,
             args.max_attempts, not args.no_notify,
         ),
-        "watch": lambda: _watch(args.agent, args.timeout, args.interval),
+        "watch": lambda: _watch(args.agent, args.timeout, args.interval, args.on),
+        "signals": lambda: store.pending_signals(args.agent),
+        "wake": lambda: wake.wake_agent(args.agent, dry_run=args.dry_run),
         "claim": lambda: store.claim_task(args.agent, args.lease, args.task_id),
         "publish": lambda: store.publish_result(
             args.agent, args.task_id, _content(args.content), args.attempt, args.force

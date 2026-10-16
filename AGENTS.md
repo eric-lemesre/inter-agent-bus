@@ -28,6 +28,9 @@ every change and are summarized below.
 - `servers/shared_memory/worker.py` — headless worker driver
   (`iab worker`): claim → run a command with the payload on stdin →
   publish. Process orchestration only; state stays in the store.
+- `servers/shared_memory/wake.py` — wake-up driver (`iab wake`,
+  `iab supervise`): launches an asleep agent from the roster's `launch`
+  block when a signal waits; locks, budget and journal live in the store.
 - `servers/shared_memory/review.py` — guarded review driver
   (`iab review`): diff embedded in the prompt, structured JSON output
   enforced, findings validated against the diff hunks. Same rule.

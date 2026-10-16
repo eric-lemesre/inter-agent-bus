@@ -360,6 +360,7 @@ with tempfile.TemporaryDirectory() as tmp:
     # Naming migration: legacy ORCHESTRATOR_DB honored, IAB_DB wins over it.
     os.environ["ORCHESTRATOR_DB"] = str(Path(tmp) / "legacy.db")
     check("IAB_DB wins over the legacy variable", store.db_path().name == "bus.db")
+
     del os.environ["IAB_DB"]
     check("legacy ORCHESTRATOR_DB honored when IAB_DB is unset",
           store.db_path().name == "legacy.db")
@@ -909,6 +910,143 @@ with tempfile.TemporaryDirectory() as tmp:
     check("cli notify --reply-to and cli replies round-trip",
           out.stdout.startswith("{") and json.loads(out2.stdout)[0]["message"] == "cli reply",
           out.stdout + out2.stdout + out.stderr + out2.stderr)
+
+    # ---- Phase 8c: signals, generalised wait, wake locks, wake driver.
+    import wake
+    store.register_agent("zz@wake", "8c")
+    store.register_agent("yy@wake", "8c peer")
+    store.poll("zz@wake")
+    sig = json.loads(store.pending_signals("zz@wake"))
+    check("pending_signals of a quiet instance is empty",
+          sig["tasks"] == [] and sig["notifications"] == 0 and sig["broadcasts"] == [], json.dumps(sig))
+    check("pending_signals refuses an unregistered name",
+          store.pending_signals("nobody@here").startswith("ERROR"))
+    store.notify("yy@wake", "zz@wake", "ping")
+    bw = json.loads(store.broadcast("yy@wake", "all hands", scope="zz@wake", wake=True))
+    sig = json.loads(store.pending_signals("zz@wake"))
+    check("pending_signals counts unread notifications, flags and broadcast ids without moving the cursor",
+          sig["notifications"] == 2 and sig["wake_notifications"] == 0
+          and sig["wake_broadcasts"] == [bw["broadcast_id"]]
+          and json.loads(store.pending_signals("zz@wake"))["notifications"] == 2, json.dumps(sig))
+    w = json.loads(store.wait_signal("zz@wake", "notification", timeout_s=5))
+    check("wait_signal returns at once when a notification waits",
+          w["signalled"] and w["notifications"] == 2, json.dumps(w))
+    w = json.loads(store.wait_signal("zz@wake", "task", timeout_s=0.3, interval_s=0.1))
+    check("wait_signal on tasks only ignores the notifications and times out",
+          w["signalled"] is False and w["tasks"] == [], json.dumps(w))
+    check("wait_signal refuses an unknown kind",
+          store.wait_signal("zz@wake", "carrier-pigeon", timeout_s=0.1).startswith("ERROR"))
+    store.poll("zz@wake")  # drain
+    child = subprocess.Popen(
+        [sys.executable, "-c",
+         "import time, store; time.sleep(1.0); print(store.notify('yy@wake', 'zz@wake', 'late'))"],
+        env=env9, stdout=subprocess.PIPE, text=True)
+    t0 = time.monotonic()
+    w = json.loads(store.wait_signal("zz@wake", "any", timeout_s=15, interval_s=0.2))
+    child.wait(timeout=15)
+    check("wait_signal wakes on a notification from another process, before the timeout",
+          w["signalled"] and w["notifications"] == 1 and time.monotonic() - t0 < 10, json.dumps(w))
+
+    lock = store.acquire_wake_lock("zz@wake", lease_seconds=60, holder="test")
+    check("wake lock acquired", lock.startswith("{"), lock)
+    token = json.loads(lock)["token"]
+    check("a second acquisition is BUSY while the lease holds",
+          store.acquire_wake_lock("zz@wake", lease_seconds=60) == "BUSY")
+    check("renew with a wrong token is refused",
+          store.renew_wake_lock("zz@wake", "nope").startswith("ERROR")
+          and store.renew_wake_lock("zz@wake", token) == "OK")
+    check("release frees the lock", store.release_wake_lock("zz@wake", token) == "OK"
+          and store.acquire_wake_lock("zz@wake", lease_seconds=0).startswith("{"))
+    lock = store.acquire_wake_lock("zz@wake", lease_seconds=60)
+    check("an expired lock is free for the taker", lock.startswith("{"), lock)
+    store.release_wake_lock("zz@wake", json.loads(lock)["token"])
+
+    # Wake driver against a dummy launcher that records the prompt it got.
+    got = Path(tmp) / "prompt-received.txt"
+    recorder = ("import sys; d = sys.stdin.read(); open(sys.argv[1], 'w', encoding='utf-8')"
+                ".write(d); print('launched')")
+    roster_w = Path(tmp) / "roster-wake.json"
+    roster_w.write_text(json.dumps({"agents": [
+        {"name": "zz@wake", "launch": {
+            "cwd": tmp, "command": [sys.executable, "-c", recorder, str(got)],
+            "wake_on": ["task", "broadcast"], "max_wakes_per_hour": 2, "lease_seconds": 300}},
+        {"name": "yy", "launch": {"cwd": tmp, "command": [sys.executable, "-c", "raise SystemExit(3)"]}},
+        {"name": "nolaunch@wake"},
+    ]}), encoding="utf-8")
+    roster_list = json.loads(roster_w.read_text())["agents"]
+    store.poll("zz@wake")
+    check("no signal → NO_SIGNAL, nothing launched",
+          wake.wake_agent("zz@wake", roster_list) == "NO_SIGNAL" and not got.exists())
+    store.register_agent("nolaunch@wake", "8c")
+    store.push_task("nolaunch@wake", "t-nl", "x")
+    check("an instance without a launch block is refused loudly",
+          wake.wake_agent("nolaunch@wake", roster_list).startswith("ERROR"))
+    store.push_task("zz@wake", "t-wake-1", "do it")
+    r = wake.wake_agent("zz@wake", roster_list, dry_run=True)
+    check("dry run states the decision and launches nothing",
+          r.startswith("DRY_RUN") and "t-wake-1" in r and not got.exists(), r)
+    r = wake.wake_agent("zz@wake", roster_list)
+    check("a queued task wakes the agent", r.startswith("OK"), r)
+    prompt = got.read_text(encoding="utf-8")
+    check("the prompt reached the launcher on stdin, instantiated for the instance",
+          "claim zz@wake --lease 300" in prompt and "t-wake-1" in prompt and tmp in prompt,
+          prompt[:200])
+    ev = [e["detail"] for e in json.loads(store.get_events(agent="zz@wake")) if e["event"] == "wake"]
+    check("start and end are journaled",
+          any(d.startswith("start: 1 queued task") for d in ev)
+          and any(d.startswith("end: exit 0") for d in ev), str(ev))
+    store.cancel_task("t-wake-1")
+    got.unlink()
+    store.notify("yy@wake", "zz@wake", "fyi")
+    check("a notification without the wake flag does not wake", wake.wake_agent("zz@wake", roster_list) == "NO_SIGNAL")
+    store.notify("yy@wake", "zz@wake", "please wake", wake=True)
+    check("a flagged notification does not wake when the roster does not allow notifications",
+          wake.wake_agent("zz@wake", roster_list) == "NO_SIGNAL")
+    store.broadcast("yy@wake", "status?", scope="zz@wake", wake=True)
+    r = wake.wake_agent("zz@wake", roster_list)
+    check("a flagged broadcast wakes when the roster allows broadcasts",
+          r.startswith("OK") and got.exists(), r)
+    store.poll("zz@wake")
+    store.push_task("zz@wake", "t-wake-3", "third")
+    r = wake.wake_agent("zz@wake", roster_list)
+    check("the hourly budget refuses the third wake (loop breaker)", r.startswith("REFUSED"), r)
+    check("the refusal is journaled",
+          any(e["event"] == "wake" and e["detail"].startswith("refused: budget")
+              for e in json.loads(store.get_events(agent="zz@wake"))))
+    store.cancel_task("t-wake-3")
+    store.register_agent("yy@wake", "8c peer")
+    store.push_task("yy@wake", "t-yy", "x")
+    r = wake.wake_agent("yy@wake", roster_list)
+    check("the harness entry serves an instance without its own entry, and a failing launcher is an ERROR",
+          r.startswith("ERROR") and "exited 3" in r, r)
+    held_lock = store.acquire_wake_lock("yy@wake", 60)
+    check("the lock is released after a failed launch", held_lock.startswith("{"), held_lock)
+    held = json.loads(held_lock)["token"]
+    check("a held lock makes wake BUSY", wake.wake_agent("yy@wake", roster_list) == "BUSY")
+    store.release_wake_lock("yy@wake", held)
+    store.cancel_task("t-yy")
+    env_w = os.environ.copy()
+    env_w["IAB_ROSTER"] = str(roster_w)
+    store.push_task("yy@wake", "t-cli", "x")
+    out = subprocess.run(cli + ["wake", "yy@wake", "--dry-run"], env=env_w,
+                         capture_output=True, text=True)
+    check("cli wake --dry-run reads the roster from IAB_ROSTER",
+          out.stdout.startswith("DRY_RUN") and "t-cli" in out.stdout, out.stdout + out.stderr)
+    check("a dry run over an exhausted budget reports it without journaling",
+          wake.wake_agent("zz@wake", roster_list, dry_run=True) == "NO_SIGNAL")
+    out = subprocess.run(cli + ["signals", "yy@wake"], env=env_w, capture_output=True, text=True)
+    check("cli signals shows the queued task", "t-cli" in out.stdout, out.stdout + out.stderr)
+    out = subprocess.run(cli + ["watch", "yy@wake", "--on", "any", "--timeout", "1"],
+                         env=env_w, capture_output=True, text=True)
+    check("cli watch --on any prints the JSON snapshot",
+          json.loads(out.stdout)["signalled"] is True, out.stdout + out.stderr)
+    out = subprocess.run(cli + ["supervise", "--once", "--dry-run"], env=env_w,
+                         capture_output=True, text=True)
+    check("cli supervise --once --dry-run covers every launchable entry",
+          out.returncode == 0 and "supervising zz@wake, yy" in out.stderr
+          and "yy: DRY_RUN" in out.stderr, out.stdout + out.stderr)
+    store.cancel_task("t-cli")
+
 
     del os.environ["IAB_DB"]
 

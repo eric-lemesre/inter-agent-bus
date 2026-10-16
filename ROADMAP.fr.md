@@ -279,13 +279,27 @@ vingt heures.
 - Toujours des données, jamais des ordres : les skills le disent ; le
   travail passe par `push_task`.
 
-### 8c — réveil — *à faire*
+### 8c — réveil — **livrée**
 
-`wait_signal` (tâches et notifications), bloc `launch` au roster,
-`iab wake` avec verrou en base, `iab supervise`, politique de réveil
-(`wake_on`, `max_wakes_per_hour`), skill `worker-wake` réécrite ; une
-session Claude Code ouverte se réveille par `iab watch --on any` lancé
-en tâche de fond.
+- **Cœur** : `pending_signals` (tâches en file, notifications non lues,
+  drapeaux de réveil, identifiants de diffusion — aucun curseur
+  déplacé), `wait_signal(kinds)` qui généralise `wait_for_task`, table
+  `wake_locks` avec `acquire/renew/release_wake_lock` à bail,
+  `record_wake` / `wake_count` (budget horaire d'après les événements
+  `wake`).
+- **Driver** `wake.py` : `iab wake <agent> [--dry-run]` lit le bloc
+  `launch` de l'entrée de roster de l'instance (ou de son harnais),
+  décide selon la politique (tâche toujours ; notification/diffusion
+  seulement si marquées par l'émetteur et permises par `wake_on`),
+  vérifie `max_wakes_per_hour`, prend le verrou en base, lance la
+  commande dans `cwd` avec le prompt sur stdin (ou `{prompt_file}`), tue
+  au `timeout`, journalise début/fin. `iab supervise [--interval]
+  [--once]` : un veilleur, un fil par agent. Le dry-run ne journalise
+  jamais.
+- **MCP** : `wait_signal`, `pending_signals` ; **CLI** : `iab watch --on
+  task|notification|any`, `iab signals`, `iab wake`, `iab supervise`.
+- **Skill** `worker-wake` réécrite autour du lanceur au roster et de la
+  voie « session ouverte » (`iab watch --on any` en tâche de fond).
 
 ## Critère d'acceptation global
 

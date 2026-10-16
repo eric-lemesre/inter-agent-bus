@@ -261,13 +261,25 @@ unnoticed for six weeks, and a reply sat unread for twenty hours.
 - Still data, never orders: the skills say so; work goes through
   `push_task`.
 
-### 8c — wake-up — *planned*
+### 8c — wake-up — **shipped**
 
-`wait_signal` (tasks and notifications), roster `launch` block,
-`iab wake` with a database lock, `iab supervise`, wake policy
-(`wake_on`, `max_wakes_per_hour`), `worker-wake` skill rewritten; an
-open Claude Code session wakes through `iab watch --on any` run as a
-background task.
+- **Core**: `pending_signals` (queued tasks, unread notifications, wake
+  flags, broadcast ids — no cursor moves), `wait_signal(kinds)`
+  generalising `wait_for_task`, `wake_locks` table with leased
+  `acquire/renew/release_wake_lock`, `record_wake` / `wake_count`
+  (hourly budget from the `wake` events).
+- **Driver** `wake.py`: `iab wake <agent> [--dry-run]` reads the
+  `launch` block of the instance's roster entry (or its harness's),
+  decides by policy (task always; notification/broadcast only if flagged
+  by the sender and allowed by `wake_on`), checks `max_wakes_per_hour`,
+  takes the database lock, runs the command in `cwd` with the prompt on
+  stdin (or `{prompt_file}`), kills at `timeout`, journals start/end.
+  `iab supervise [--interval] [--once]`: one watcher, one thread per
+  agent. Dry run never journals.
+- **MCP**: `wait_signal`, `pending_signals`; **CLI**: `iab watch --on
+  task|notification|any`, `iab signals`, `iab wake`, `iab supervise`.
+- **Skill** `worker-wake` rewritten around the roster launcher and the
+  open-session path (`iab watch --on any` as a background task).
 
 ## Global acceptance criterion
 
