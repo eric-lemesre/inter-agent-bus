@@ -49,7 +49,7 @@ except ImportError:  # bare script usage
 DEFAULT_LEASE = 10800
 DEFAULT_MAX_WAKES_PER_HOUR = 4
 DEFAULT_WAKE_ON = ("task",)
-STDERR_TAIL = 2000
+STDERR_TAIL = 300  # journal hint only: a worker's output may carry secrets
 
 DEFAULT_PROMPT = """You are the worker agent {agent} of the inter-agent bus. A signal is waiting for you:
 {signals}
@@ -211,7 +211,10 @@ def wake_agent(agent: str, roster: list[dict] | None = None, dry_run: bool = Fal
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(prompt)
         argv = [a.replace("{prompt_file}", prompt_file) for a in argv]
-    store.record_wake(agent, f"start: {reason}; {json.dumps(argv)} in {cwd}")
+    # The journal is a shared, long-lived record: it gets the decision, the
+    # program name and the directory — never the full argv (an operator may
+    # pass a token there), never the prompt, never the worker's stdout.
+    store.record_wake(agent, f"start: {reason}; {Path(argv[0]).name} in {cwd}")
     started = time.monotonic()
     try:
         proc = subprocess.Popen(argv, cwd=cwd, stdin=subprocess.PIPE,
@@ -237,15 +240,19 @@ def wake_agent(agent: str, roster: list[dict] | None = None, dry_run: bool = Fal
                 pass
     elapsed = int(time.monotonic() - started)
     if code is None:
-        detail = f"end: killed after timeout {timeout}s; stderr: {_tail(err)}"
+        detail = f"end: killed after timeout {timeout}s"
         status = f"ERROR: worker killed after {timeout}s (task lease will expire, bus re-offers)"
     elif code != 0:
-        detail = f"end: exit {code} after {elapsed}s; stderr: {_tail(err)}"
+        detail = f"end: exit {code} after {elapsed}s"
         status = f"ERROR: worker exited {code} after {elapsed}s"
     else:
-        detail = f"end: exit 0 after {elapsed}s; stdout: {_tail(out)[-300:]}"
+        detail = f"end: exit 0 after {elapsed}s"
         status = f"OK: worker finished in {elapsed}s"
     store.record_wake(agent, detail)
+    if code != 0:
+        # Diagnosis goes to the supervisor's stderr (operator's terminal or
+        # unit log), trimmed — not into the bus journal.
+        _log(f"{agent}: {status}; stderr tail: {_tail(err)}")
     store.release_wake_lock(agent, token)
     return status
 
