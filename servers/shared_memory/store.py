@@ -114,19 +114,26 @@ def derive_workspace(cwd: str | os.PathLike | None = None) -> tuple[str, str]:
     """Workspace slug of a launch directory and how it was found: `alias`
     (operator table, longest matching prefix), `git` (name of the first
     ancestor holding a `.git` — file or directory, so a submodule yields its
-    own name, not its superproject's) or `cwd` (the directory's own name)."""
+    own name, not its superproject's) or `cwd` (the directory's own name).
+    An alias never reaches past a repository boundary: a `.git` strictly
+    between the alias path and the launch directory wins, so an alias on a
+    parent folder (a home directory) does not swallow the repositories
+    beneath it, while an alias on a repository still covers its subfolders."""
     real = Path(os.path.realpath(cwd if cwd is not None else os.getcwd()))
-    aliases = _workspace_aliases()
+    git_top = next((c for c in (real, *real.parents) if (c / ".git").exists()), None)
     best = ""
-    for prefix, slug in aliases.items():
+    for prefix, slug in _workspace_aliases().items():
         pre = Path(prefix)
-        if (real == pre or pre in real.parents) and len(prefix) > len(best):
+        if real != pre and pre not in real.parents:
+            continue
+        if git_top is not None and git_top != pre and git_top not in pre.parents:
+            continue  # the repository lies below the alias: it wins
+        if len(prefix) > len(best):
             best, chosen = prefix, slug
     if best:
         return chosen, "alias"
-    for candidate in (real, *real.parents):
-        if (candidate / ".git").exists():
-            return slugify_component(candidate.name), "git"
+    if git_top is not None:
+        return slugify_component(git_top.name), "git"
     return slugify_component(real.name), "cwd"
 
 

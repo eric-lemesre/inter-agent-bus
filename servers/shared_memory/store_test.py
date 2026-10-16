@@ -618,11 +618,20 @@ with tempfile.TemporaryDirectory() as tmp:
           store.derive_workspace(ws_root / "Loose") == ("loose", "cwd"))
     aliases = Path(tmp) / "workspaces.json"
     aliases.write_text(json.dumps({str(ws_root / "Home Lab"): "homelab",
-                                   str(ws_root / "Home Lab" / "infra"): "Infra!"}))
+                                   str(ws_root / "Home Lab" / "infra"): "Infra!",
+                                   str(ws_root): "poste"}))
     os.environ["IAB_WORKSPACES"] = str(aliases)
     check("alias table wins, longest prefix first, value slugified",
           store.derive_workspace(ws_root / "Home Lab" / "infra" ) == ("infra", "alias")
           and store.derive_workspace(ws_root / "Home Lab" / "docs") == ("homelab", "alias"))
+    check("an alias on a parent folder applies to loose folders beneath it",
+          store.derive_workspace(ws_root / "Loose") == ("poste", "alias"))
+    (ws_root / "Other Repo" / ".git").mkdir(parents=True)
+    check("…but never swallows a repository beneath it",
+          store.derive_workspace(ws_root / "Other Repo") == ("other-repo", "git"))
+    aliases.write_text(json.dumps({str(ws_root / "Home Lab"): "homelab"}))
+    check("a repository alias stops at a submodule boundary",
+          store.derive_workspace(ws_root / "Home Lab" / "infra") == ("infra", "git"))
     del os.environ["IAB_WORKSPACES"]
 
     ident = store.resolve_identity({"IAB_AGENT_NAME": "Claude"}, ws_root / "Home Lab" / "docs")
