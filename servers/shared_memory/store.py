@@ -60,10 +60,109 @@ GLOBAL_DB = DATA_DIR / "bus.db"
 LEGACY_DB = Path.home() / ".local/share/multi-agent-orchestrator/orchestrator.db"
 
 DEFAULT_PRESENCE_TTL = 120
+WORKSPACES_FILE = DATA_DIR / "workspaces.json"
+
+# Identity of an agent = one INSTANCE: a harness (the client/CLI carrying
+# the model: claude, kimi, codewhale…) on a workspace (the repository or
+# folder it works in: homelab, infra…), written `harness@workspace`. Both
+# components share one character class; a bare harness (legacy names,
+# headless workers) remains a valid name.
+_COMPONENT = r"[a-z0-9][a-z0-9._-]{0,39}"
+_NAME_RE = re.compile(rf"^{_COMPONENT}(@{_COMPONENT})?$")
+_PATTERN_RE = re.compile(r"[*]")
 
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def split_name(name: str) -> tuple[str, str]:
+    """`harness@workspace` → (harness, workspace); a bare name → (name, "")."""
+    name = name.strip().lower()
+    if "@" in name:
+        harness, _, workspace = name.partition("@")
+        return harness, workspace
+    return name, ""
+
+
+def slugify_component(text: str) -> str:
+    """Fold a folder or client name into one identity component: lowercase,
+    out-of-class runs → '-', leading punctuation dropped, 40 chars max."""
+    slug = re.sub(r"[^a-z0-9._-]+", "-", text.lower()).lstrip("._-").rstrip("-")
+    return slug[:40].rstrip("-") or "root"
+
+
+def _workspace_aliases() -> dict[str, str]:
+    """Operator table {path: workspace} (IAB_WORKSPACES, else the data
+    directory's workspaces.json); keys are realpath-normalized. Unreadable
+    or malformed → empty, the derivation falls back to the directory name."""
+    path = Path(os.environ.get("IAB_WORKSPACES") or WORKSPACES_FILE)
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    return {
+        os.path.realpath(os.path.expanduser(str(k))): slugify_component(str(v))
+        for k, v in raw.items()
+        if isinstance(v, str) and v.strip()
+    }
+
+
+def derive_workspace(cwd: str | os.PathLike | None = None) -> tuple[str, str]:
+    """Workspace slug of a launch directory and how it was found: `alias`
+    (operator table, longest matching prefix), `git` (name of the first
+    ancestor holding a `.git` — file or directory, so a submodule yields its
+    own name, not its superproject's) or `cwd` (the directory's own name)."""
+    real = Path(os.path.realpath(cwd if cwd is not None else os.getcwd()))
+    aliases = _workspace_aliases()
+    best = ""
+    for prefix, slug in aliases.items():
+        pre = Path(prefix)
+        if (real == pre or pre in real.parents) and len(prefix) > len(best):
+            best, chosen = prefix, slug
+    if best:
+        return chosen, "alias"
+    for candidate in (real, *real.parents):
+        if (candidate / ".git").exists():
+            return slugify_component(candidate.name), "git"
+    return slugify_component(real.name), "cwd"
+
+
+def resolve_identity(
+    environ: dict | None = None, cwd: str | os.PathLike | None = None
+) -> dict:
+    """Who the caller is, from most explicit to most inferred. Harness from
+    IAB_AGENT_NAME (legacy ORCHESTRATOR_AGENT_NAME honored); when it already
+    holds an `@`, the full name wins (`workspace_source: name`). Otherwise
+    the workspace comes from IAB_WORKSPACE (`env`), else is derived from the
+    launch directory (`alias`/`git`/`cwd`, see derive_workspace). Without a
+    harness, `source` is `none` and `agent_name` is None: the worker asks the
+    operator. `model` echoes IAB_MODEL (a declaration, never a guess)."""
+    env = os.environ if environ is None else environ
+    real_cwd = os.path.realpath(cwd if cwd is not None else os.getcwd())
+    model = (env.get("IAB_MODEL") or "").strip() or None
+    forced = (env.get("IAB_AGENT_NAME") or env.get("ORCHESTRATOR_AGENT_NAME") or "").strip()
+    if not forced:
+        return {"source": "none", "agent_name": None, "harness": None,
+                "workspace": None, "workspace_source": None, "cwd": real_cwd,
+                "model": model}
+    forced = forced.lower()
+    if "@" in forced:
+        harness, workspace = split_name(forced)
+        ws_source = "name"
+    else:
+        harness = forced
+        workspace = (env.get("IAB_WORKSPACE") or "").strip().lower()
+        if workspace:
+            workspace, ws_source = slugify_component(workspace), "env"
+        else:
+            workspace, ws_source = derive_workspace(real_cwd)
+    name = f"{harness}@{workspace}" if workspace else harness
+    return {"source": "env", "agent_name": name, "harness": harness,
+            "workspace": workspace, "workspace_source": ws_source,
+            "cwd": real_cwd, "model": model}
 
 
 def project_key(cwd: str | os.PathLike | None = None) -> str:
@@ -194,6 +293,22 @@ def _migrate(conn: sqlite3.Connection) -> None:
     columns = {r["name"] for r in conn.execute("PRAGMA table_info(tasks)")}
     if "max_attempts" not in columns:
         conn.execute("ALTER TABLE tasks ADD COLUMN max_attempts INTEGER NOT NULL DEFAULT 3")
+    columns = {r["name"] for r in conn.execute("PRAGMA table_info(agents)")}
+    for column in ("harness", "workspace", "cwd"):
+        if column not in columns:
+            conn.execute(f"ALTER TABLE agents ADD COLUMN {column} TEXT NOT NULL DEFAULT ''")
+    # Rows registered before the composed identity: their harness is their
+    # name (a legacy bare name stays addressable, see _resolve_target).
+    conn.execute(
+        "UPDATE agents SET harness = CASE WHEN instr(name, '@') > 0 "
+        "THEN substr(name, 1, instr(name, '@') - 1) ELSE name END, "
+        "workspace = CASE WHEN instr(name, '@') > 0 "
+        "THEN substr(name, instr(name, '@') + 1) ELSE '' END "
+        "WHERE harness = ''"
+    )
+    columns = {r["name"] for r in conn.execute("PRAGMA table_info(presence)")}
+    if "model" not in columns:
+        conn.execute("ALTER TABLE presence ADD COLUMN model TEXT NOT NULL DEFAULT ''")
 
 
 def _log_event(
@@ -209,24 +324,128 @@ def _log_event(
     )
 
 
-def register_agent(name: str, description: str = "") -> str:
+def register_agent(
+    name: str, description: str = "", cwd: str = "", model: str | None = None
+) -> str:
+    """Declare an agent instance (creates its queue). `name` is
+    `harness@workspace` or a bare harness; `cwd` records where it works and
+    `model` which model carries it right now (session state, kept in the
+    presence row)."""
     name = name.strip().lower()
     if not name:
         return "ERROR: empty agent name."
+    if not _NAME_RE.match(name):
+        return (
+            f"ERROR: invalid agent name '{name}' — expected harness[@workspace], "
+            "each component [a-z0-9][a-z0-9._-]{0,39}."
+        )
+    harness, workspace = split_name(name)
     with connect() as conn:
         known = conn.execute("SELECT 1 FROM agents WHERE name=?", (name,)).fetchone()
         conn.execute(
-            "INSERT INTO agents(name, description, registered_at) VALUES(?,?,?) "
-            "ON CONFLICT(name) DO UPDATE SET description=excluded.description",
-            (name, description, _now()),
+            "INSERT INTO agents(name, description, registered_at, harness, workspace, cwd) "
+            "VALUES(?,?,?,?,?,?) ON CONFLICT(name) DO UPDATE SET "
+            "description=excluded.description, harness=excluded.harness, "
+            "workspace=excluded.workspace, "
+            "cwd=CASE WHEN excluded.cwd='' THEN agents.cwd ELSE excluded.cwd END",
+            (name, description, _now(), harness, workspace, cwd or ""),
         )
         if known is None:
             _log_event(conn, "register", agent=name, detail=description)
+        if model:
+            _set_model(conn, name, model.strip(), force=True)
     return f"OK: agent '{name}' registered."
+
+
+def rename_agent(old: str, new: str) -> str:
+    """Move an identity — queue, results, notifications, cursors, presence,
+    journal — to a new name in one transaction (migration of a legacy bare
+    name to `harness@workspace`). Refused when `new` already exists."""
+    old = old.strip().lower()
+    new = new.strip().lower()
+    if not old or not new:
+        return "ERROR: empty agent name."
+    if not _NAME_RE.match(new):
+        return f"ERROR: invalid agent name '{new}' — expected harness[@workspace]."
+    harness, workspace = split_name(new)
+    with connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            if conn.execute("SELECT 1 FROM agents WHERE name=?", (old,)).fetchone() is None:
+                conn.execute("COMMIT")
+                return f"ERROR: agent '{old}' not registered."
+            if conn.execute("SELECT 1 FROM agents WHERE name=?", (new,)).fetchone():
+                conn.execute("COMMIT")
+                return f"ERROR: agent '{new}' already exists — rename refused."
+            conn.execute(
+                "UPDATE agents SET name=?, harness=?, workspace=? WHERE name=?",
+                (new, harness, workspace, old),
+            )
+            for table, column in (
+                ("tasks", "agent"), ("results", "author"), ("events", "agent"),
+                ("notifications", "target"), ("notifications", "author"),
+                ("notification_cursor", "target"), ("channel", "author"),
+                ("channel_cursor", "agent"),
+            ):
+                conn.execute(f"UPDATE {table} SET {column}=? WHERE {column}=?", (new, old))
+            if conn.execute("SELECT 1 FROM presence WHERE agent=?", (new,)).fetchone():
+                conn.execute("DELETE FROM presence WHERE agent=?", (old,))
+            else:
+                conn.execute("UPDATE presence SET agent=? WHERE agent=?", (new, old))
+            _log_event(conn, "rename", agent=new, detail=f"was {old}")
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+    return f"OK: agent '{old}' renamed to '{new}'."
 
 
 def _known_agents(conn: sqlite3.Connection) -> list[str]:
     return [r["name"] for r in conn.execute("SELECT name FROM agents ORDER BY name")]
+
+
+def _resolve_target(conn: sqlite3.Connection, text: str) -> tuple[str | None, str | None]:
+    """Turn an address into one registered instance: an exact name, or a
+    bare harness that designates exactly one registered instance (a legacy
+    bare name counts). Ambiguity is refused with the candidates — a message
+    or a task routed at random is worse than a refusal. Wildcards are
+    reserved to broadcast. Returns (name, None) or (None, "ERROR: …")."""
+    target = text.strip().lower()
+    if not target:
+        return None, "ERROR: empty agent name."
+    if _PATTERN_RE.search(target):
+        return None, (
+            f"ERROR: '{text}' is a pattern — reserved to broadcast, not a valid target."
+        )
+    if "@" in target:
+        if conn.execute("SELECT 1 FROM agents WHERE name=?", (target,)).fetchone():
+            return target, None
+    else:
+        # A bare harness names the set of its instances; a legacy bare row
+        # (harness = name) is one of them, never a silent default — that
+        # was the bug: replies addressed to a shared name, read by nobody.
+        candidates = [
+            r["name"] for r in conn.execute(
+                "SELECT name FROM agents WHERE harness=? ORDER BY name", (target,)
+            )
+        ]
+        if len(candidates) == 1:
+            return candidates[0], None
+        if candidates:
+            hint = (
+                f" The legacy bare name '{target}' is one of them: rename_agent it "
+                "to harness@workspace to lift the ambiguity."
+                if target in candidates else ""
+            )
+            return None, (
+                f"ERROR: '{text}' is ambiguous — instances: {', '.join(candidates)}. "
+                f"Address one of them.{hint}"
+            )
+    known = _known_agents(conn)
+    return None, (
+        f"ERROR: agent '{text}' not registered. "
+        f"Known agents: {known or 'none — call register_agent first'}."
+    )
 
 
 def push_task(
@@ -239,16 +458,13 @@ def push_task(
     the agent. The notification is a hint for claim_task, not a delivery
     channel: at-least-once still rules, and a woken worker may find an empty
     queue (lease expiry, cancellation) and must tolerate it."""
-    target = target_agent.strip().lower()
     with connect() as conn:
-        known = _known_agents(conn)
-        # Explicit refusal of an unregistered agent: keeps the typo detection
-        # that hard-coded queues provided, without freezing the cast.
-        if target not in known:
-            return (
-                f"ERROR: agent '{target_agent}' not registered. "
-                f"Known agents: {known or 'none — call register_agent first'}."
-            )
+        # Explicit refusal of an unregistered or ambiguous agent: keeps the
+        # typo detection that hard-coded queues provided, without freezing
+        # the cast.
+        target, error = _resolve_target(conn, target_agent)
+        if error:
+            return error
         try:
             conn.execute(
                 "INSERT INTO tasks(task_id, agent, payload, priority, created_at, "
@@ -280,24 +496,29 @@ def wait_for_task(agent: str, timeout_s: float = 300.0, interval_s: float = 2.0)
     the CLI `iab watch` and the MCP tool wait_task wrap, so a supervisor
     (systemd user timer, cron, or an agent background task) can wake a worker
     without a hand-rolled SQLite watcher that dies with its session."""
-    target = agent.strip().lower()
-    if not target:
+    if not agent.strip():
         return "ERROR: empty agent."
     interval_s = max(0.2, float(interval_s))
     deadline = time.monotonic() + max(0.0, float(timeout_s))
-    while True:
-        with connect() as conn:
+    conn = connect()  # one connection for the whole wait, not one per round
+    try:
+        target, error = _resolve_target(conn, agent)
+        if error:
+            return error
+        while True:
             _requeue_expired(conn)
             rows = conn.execute(
                 "SELECT task_id FROM tasks WHERE agent=? AND status='queued' "
                 "ORDER BY priority DESC, created_at ASC",
                 (target,),
             ).fetchall()
-        if rows:
-            return json.dumps([r["task_id"] for r in rows], ensure_ascii=False)
-        if time.monotonic() >= deadline:
-            return "[]"
-        time.sleep(min(interval_s, max(0.0, deadline - time.monotonic())))
+            if rows:
+                return json.dumps([r["task_id"] for r in rows], ensure_ascii=False)
+            if time.monotonic() >= deadline:
+                return "[]"
+            time.sleep(min(interval_s, max(0.0, deadline - time.monotonic())))
+    finally:
+        conn.close()
 
 
 def _requeue_expired(conn: sqlite3.Connection) -> None:
@@ -330,11 +551,14 @@ def claim_task(agent_name: str, lease_seconds: int = 900, task_id: str | None = 
     """Atomically claim the highest-priority queued task of one's queue,
     under lease — or one specific queued task of one's own queue when
     task_id is given (logged escape hatch; no cross-queue poaching)."""
-    target = agent_name.strip().lower()
     deadline = (datetime.now(timezone.utc) + timedelta(seconds=lease_seconds)).isoformat()
     with connect() as conn:
         conn.execute("BEGIN IMMEDIATE")
         try:
+            target, error = _resolve_target(conn, agent_name)
+            if error:
+                conn.execute("COMMIT")
+                return error
             _requeue_expired(conn)
             if task_id is None:
                 row = conn.execute(
@@ -577,18 +801,40 @@ def _parse_capabilities(capabilities: str | None) -> dict | str:
     return parsed
 
 
-def heartbeat(agent: str, ttl_seconds: int = 120, capabilities: str | None = None) -> str:
-    """Post or refresh a presence heartbeat with a capability card.
-    Upserts the presence row; absent capabilities keep the existing card."""
-    agent = agent.strip().lower()
-    if not agent:
-        return "ERROR: empty agent name."
+def _set_model(conn: sqlite3.Connection, agent: str, model: str, force: bool) -> None:
+    """Record the model carrying an instance in its presence row (created
+    at default TTL if absent). `force` overwrites a stored value — an
+    explicit declaration; without it (environment echo) a declared model
+    is kept."""
+    row = conn.execute("SELECT model FROM presence WHERE agent=?", (agent,)).fetchone()
+    if row is None:
+        conn.execute(
+            "INSERT INTO presence(agent, last_seen, ttl_seconds, capabilities, model) "
+            "VALUES(?,?,?,?,?)",
+            (agent, _now(), DEFAULT_PRESENCE_TTL, "{}", model),
+        )
+    elif force or not row["model"]:
+        conn.execute("UPDATE presence SET model=? WHERE agent=?", (model, agent))
+
+
+def heartbeat(
+    agent: str, ttl_seconds: int = 120, capabilities: str | None = None,
+    model: str | None = None,
+) -> str:
+    """Post or refresh a presence heartbeat with a capability card and, when
+    given, the model carrying the instance. Upserts the presence row; absent
+    capabilities keep the existing card, absent model keeps the stored one.
+    The agent must be registered (an instance declares itself after
+    register_agent)."""
     parsed = _parse_capabilities(capabilities)
     if isinstance(parsed, str):
         return parsed
     with connect() as conn:
+        agent, error = _resolve_target(conn, agent)
+        if error:
+            return error
         row = conn.execute(
-            "SELECT ttl_seconds, capabilities FROM presence WHERE agent=?", (agent,)
+            "SELECT ttl_seconds, capabilities, model FROM presence WHERE agent=?", (agent,)
         ).fetchone()
         if capabilities is None:
             if row is None:
@@ -597,41 +843,69 @@ def heartbeat(agent: str, ttl_seconds: int = 120, capabilities: str | None = Non
                 stored_capabilities = row["capabilities"]
         else:
             stored_capabilities = json.dumps(parsed, ensure_ascii=False)
+        stored_model = (model or "").strip() or (row["model"] if row else "")
         alive_until = datetime.fromisoformat(_now()) + timedelta(seconds=ttl_seconds)
         conn.execute(
-            "INSERT INTO presence(agent, last_seen, ttl_seconds, capabilities) "
-            "VALUES(?,?,?,?) ON CONFLICT(agent) DO UPDATE SET "
+            "INSERT INTO presence(agent, last_seen, ttl_seconds, capabilities, model) "
+            "VALUES(?,?,?,?,?) ON CONFLICT(agent) DO UPDATE SET "
             "last_seen=excluded.last_seen, ttl_seconds=excluded.ttl_seconds, "
-            "capabilities=excluded.capabilities",
-            (agent, _now(), ttl_seconds, stored_capabilities),
+            "capabilities=excluded.capabilities, model=excluded.model",
+            (agent, _now(), ttl_seconds, stored_capabilities, stored_model),
         )
     return json.dumps(
-        {"agent": agent, "alive_until": alive_until.isoformat()}, ensure_ascii=False
+        {"agent": agent, "alive_until": alive_until.isoformat(),
+         "model": stored_model or None}, ensure_ascii=False
     )
 
 
-def touch_presence(agent: str) -> None:
+def touch_presence(agent: str, model: str | None = None) -> None:
     """Refresh last_seen only, keeping the declared TTL and capability card.
     Creates a default-TTL row for a previously absent agent; a blank name is
-    a silent no-op so the piggyback cannot fail."""
+    a silent no-op so the piggyback cannot fail. A `model` fills an empty
+    slot only (environment echo never overrides a declaration)."""
     agent = agent.strip().lower()
     if not agent:
         return
     with connect() as conn:
         row = conn.execute(
-            "SELECT ttl_seconds, capabilities FROM presence WHERE agent=?", (agent,)
+            "SELECT ttl_seconds, capabilities, model FROM presence WHERE agent=?", (agent,)
         ).fetchone()
         if row is None:
-            ttl = DEFAULT_PRESENCE_TTL
-            capabilities = "{}"
+            ttl, capabilities, stored_model = DEFAULT_PRESENCE_TTL, "{}", ""
         else:
-            ttl = row["ttl_seconds"]
-            capabilities = row["capabilities"]
+            ttl, capabilities, stored_model = row["ttl_seconds"], row["capabilities"], row["model"]
+        if model and not stored_model:
+            stored_model = model.strip()
         conn.execute(
-            "INSERT INTO presence(agent, last_seen, ttl_seconds, capabilities) "
-            "VALUES(?,?,?,?) ON CONFLICT(agent) DO UPDATE SET last_seen=excluded.last_seen",
-            (agent, _now(), ttl, capabilities),
+            "INSERT INTO presence(agent, last_seen, ttl_seconds, capabilities, model) "
+            "VALUES(?,?,?,?,?) ON CONFLICT(agent) DO UPDATE SET "
+            "last_seen=excluded.last_seen, model=excluded.model",
+            (agent, _now(), ttl, capabilities, stored_model),
         )
+
+
+def touch_identity(identity: dict) -> None:
+    """Piggyback of the MCP server: the resolved identity of a connected
+    client is a present instance. Registers it on first sight (empty
+    description, launch directory recorded) so its queue, cursors and
+    presence exist under its own composed name — a client named by its
+    environment never has to call register_agent — then refreshes its
+    presence. Failures must not break the tool call: callers swallow them."""
+    name = identity.get("agent_name")
+    if not name or not _NAME_RE.match(name):
+        return
+    with connect() as conn:
+        if conn.execute("SELECT 1 FROM agents WHERE name=?", (name,)).fetchone() is None:
+            harness, workspace = split_name(name)
+            conn.execute(
+                "INSERT OR IGNORE INTO agents(name, description, registered_at, harness, "
+                "workspace, cwd) VALUES(?,?,?,?,?,?)",
+                (name, "", _now(), harness, workspace, identity.get("cwd") or ""),
+            )
+            _log_event(conn, "register", agent=name, detail="auto (connected client)")
+        elif identity.get("cwd"):
+            conn.execute("UPDATE agents SET cwd=? WHERE name=?", (identity["cwd"], name))
+    touch_presence(name, identity.get("model"))
 
 
 def list_presence() -> str:
@@ -639,14 +913,16 @@ def list_presence() -> str:
     with connect() as conn:
         rows = conn.execute(
             """
-            SELECT a.name, a.description, p.last_seen, p.ttl_seconds, p.capabilities
+            SELECT a.name, a.description, a.harness, a.workspace, a.cwd,
+                   p.last_seen, p.ttl_seconds, p.capabilities, p.model
             FROM agents a LEFT JOIN presence p ON a.name = p.agent
             UNION
-            SELECT p.agent AS name, '' AS description, p.last_seen, p.ttl_seconds,
-                   p.capabilities
+            SELECT p.agent AS name, '' AS description, '' AS harness,
+                   '' AS workspace, '' AS cwd,
+                   p.last_seen, p.ttl_seconds, p.capabilities, p.model
             FROM presence p
             WHERE p.agent NOT IN (SELECT name FROM agents)
-            ORDER BY name
+            ORDER BY harness, workspace, name
             """
         ).fetchall()
     now = datetime.fromisoformat(_now())
@@ -660,9 +936,16 @@ def list_presence() -> str:
         else:
             deadline = datetime.fromisoformat(last_seen) + timedelta(seconds=ttl or 0)
             status = "alive" if now < deadline else "asleep"
+        harness, workspace = row["harness"], row["workspace"]
+        if not harness:
+            harness, workspace = split_name(row["name"])
         result.append(
             {
                 "agent": row["name"],
+                "harness": harness,
+                "workspace": workspace or None,
+                "cwd": row["cwd"] or None,
+                "model": row["model"] or None,
                 "status": status,
                 "last_seen": last_seen,
                 "ttl_seconds": ttl,
@@ -680,8 +963,10 @@ def announce(author: str, topic: str, message: str) -> str:
         return "ERROR: topic must match ^[a-z0-9-]{1,64}$."
     if len(message.encode("utf-8")) > 16 * 1024:
         return "ERROR: message exceeds 16 KiB."
-    author = author.strip().lower()
     with connect() as conn:
+        author, error = _resolve_target(conn, author)
+        if error:
+            return error.replace("agent", "author", 1)
         cur = conn.execute(
             "INSERT INTO channel(author, at, topic, message) VALUES(?,?,?,?)",
             (author, _now(), topic, message),
@@ -708,6 +993,10 @@ def read_channel(
     if agent is not None and since_seq is None and topic is not None:
         return "ERROR: topic filter is not allowed with a cursor read."
     with connect() as conn:
+        if agent is not None and since_seq is None:
+            agent, error = _resolve_target(conn, agent)
+            if error:
+                return error
         if since_seq is not None:
             if topic is not None:
                 rows = conn.execute(
@@ -752,21 +1041,19 @@ def notify(author: str, target_agent: str, message: str) -> str:
     broadcast channel; the recipient picks it up with poll(). The target must
     be a registered agent (typo detection, same as push_task); the message is
     a notice, capped like the channel at 16 KiB."""
-    target = target_agent.strip().lower()
-    author = author.strip().lower()
-    if not author:
+    if not author.strip():
         return "ERROR: empty author."
-    if not target:
+    if not target_agent.strip():
         return "ERROR: empty target agent."
     if len(message.encode("utf-8")) > 16 * 1024:
         return "ERROR: message exceeds 16 KiB."
     with connect() as conn:
-        known = _known_agents(conn)
-        if target not in known:
-            return (
-                f"ERROR: agent '{target_agent}' not registered. "
-                f"Known agents: {known or 'none — call register_agent first'}."
-            )
+        author, error = _resolve_target(conn, author)
+        if error:
+            return error.replace("agent", "author", 1)
+        target, error = _resolve_target(conn, target_agent)
+        if error:
+            return error
         cur = conn.execute(
             "INSERT INTO notifications(target, author, at, message) VALUES(?,?,?,?)",
             (target, author, _now(), message),
@@ -779,8 +1066,7 @@ def notify(author: str, target_agent: str, message: str) -> str:
 def poll(agent: str, limit: int = 100) -> str:
     """Read an agent's own directed notifications and advance its cursor to
     the last returned seq (at-least-once); an empty read advances nothing."""
-    target = agent.strip().lower()
-    if not target:
+    if not agent.strip():
         return "ERROR: empty agent."
     if limit < 1:
         limit = 1
@@ -789,6 +1075,10 @@ def poll(agent: str, limit: int = 100) -> str:
     with connect() as conn:
         conn.execute("BEGIN IMMEDIATE")
         try:
+            target, error = _resolve_target(conn, agent)
+            if error:
+                conn.execute("COMMIT")
+                return error
             cursor = conn.execute(
                 "SELECT last_seq FROM notification_cursor WHERE target=?", (target,)
             ).fetchone()
@@ -815,8 +1105,14 @@ def get_system_state() -> str:
     with connect() as conn:
         _requeue_expired(conn)
         agents = {
-            r["name"]: r["description"]
-            for r in conn.execute("SELECT name, description FROM agents ORDER BY name")
+            r["name"]: {
+                "description": r["description"], "harness": r["harness"] or None,
+                "workspace": r["workspace"] or None, "cwd": r["cwd"] or None,
+            }
+            for r in conn.execute(
+                "SELECT name, description, harness, workspace, cwd FROM agents "
+                "ORDER BY harness, workspace, name"
+            )
         }
         queues = {
             name: {
@@ -834,17 +1130,19 @@ def get_system_state() -> str:
         ]
         pres_rows = conn.execute(
             """
-            SELECT a.name, p.last_seen, p.ttl_seconds
+            SELECT a.name, p.last_seen, p.ttl_seconds, p.model
             FROM agents a LEFT JOIN presence p ON a.name = p.agent
             UNION
-            SELECT p.agent AS name, p.last_seen, p.ttl_seconds
+            SELECT p.agent AS name, p.last_seen, p.ttl_seconds, p.model
             FROM presence p
             WHERE p.agent NOT IN (SELECT name FROM agents)
             """
         ).fetchall()
     now = datetime.fromisoformat(_now())
     presence: dict[str, str] = {}
+    models: dict[str, str | None] = {}
     for r in pres_rows:
+        models[r["name"]] = r["model"] or None
         if r["last_seen"] is None:
             presence[r["name"]] = "unknown"
         else:
@@ -853,7 +1151,8 @@ def get_system_state() -> str:
             )
             presence[r["name"]] = "alive" if now < deadline else "asleep"
     return json.dumps(
-        {"agents": agents, "queues": queues, "completed_tasks": done, "presence": presence},
+        {"agents": agents, "queues": queues, "completed_tasks": done,
+         "presence": presence, "models": models},
         indent=2,
         ensure_ascii=False,
     )

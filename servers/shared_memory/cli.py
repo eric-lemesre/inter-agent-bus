@@ -44,11 +44,7 @@ def _content(arg: str | None) -> str:
 
 
 def _whoami() -> str:
-    name = os.environ.get("IAB_AGENT_NAME") or os.environ.get("ORCHESTRATOR_AGENT_NAME")
-    return json.dumps(
-        {"source": "env" if name else "none", "agent_name": name,
-         **json.loads(store.db_info())}
-    )
+    return json.dumps({**store.resolve_identity(), **json.loads(store.db_info())})
 
 
 def _server_config(agent_name: str) -> dict:
@@ -135,9 +131,17 @@ def main(argv: list[str] | None = None) -> int:
                         help="pretty-print JSON output when applicable")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    p = sub.add_parser("register", help="declare an agent (creates its queue)")
+    p = sub.add_parser("register",
+                       help="declare an agent instance `harness[@workspace]` (creates its queue)")
     p.add_argument("name")
     p.add_argument("-d", "--description", default="")
+    p.add_argument("--cwd", default="", help="directory the instance works in")
+    p.add_argument("--model", default=None, help="model carrying the instance right now")
+
+    p = sub.add_parser("rename", help="move an identity to a new name (queue, results, "
+                                      "notifications, cursors, presence, journal follow)")
+    p.add_argument("old")
+    p.add_argument("new")
 
     p = sub.add_parser("push", help="queue a task for a registered agent")
     p.add_argument("agent")
@@ -182,6 +186,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("agent")
     p.add_argument("--ttl", type=int, default=120, metavar="SECONDS")
     p.add_argument("--capabilities", default=None, help="JSON object describing the agent's capabilities")
+    p.add_argument("--model", default=None, help="model carrying the instance right now")
 
     p = sub.add_parser("announce", help="append a message to the global channel")
     p.add_argument("author")
@@ -226,6 +231,8 @@ def main(argv: list[str] | None = None) -> int:
         "on stdin → publish its stdout (ERROR: on failure)",
     )
     p.add_argument("--agent", required=True, help="identity to work as (roster name)")
+    p.add_argument("--model", default=None,
+                   help="model behind the command, declared on the bus (default: IAB_MODEL)")
     p.add_argument("--once", action="store_true", help="one task (or NO_TASK) then exit")
     p.add_argument("--lease", type=int, default=900, metavar="SECONDS",
                    help="lease per claim; extended at every heartbeat while running")
@@ -258,7 +265,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     p.add_argument("--scope", choices=["user", "project", "local"], default="user")
     p.add_argument("--agent-name", default="claude",
-                   help="identity baked into the registration env (default: claude)")
+                   help="harness baked into the registration env (default: claude); the "
+                        "workspace is derived from each session's launch directory — "
+                        "pass harness@workspace to pin both")
     p.add_argument("--print", action="store_true", dest="print_only",
                    help="print the JSON registration instead of applying it")
 
@@ -296,9 +305,12 @@ def main(argv: list[str] | None = None) -> int:
         return worker.run_worker(
             args.agent, cmd, once=args.once, lease_seconds=args.lease,
             poll_seconds=args.poll, task_timeout=args.task_timeout,
+            model=args.model or os.environ.get("IAB_MODEL") or None,
         )
     out = {
-        "register": lambda: store.register_agent(args.name, args.description),
+        "register": lambda: store.register_agent(
+            args.name, args.description, args.cwd, args.model),
+        "rename": lambda: store.rename_agent(args.old, args.new),
         "push": lambda: store.push_task(
             args.agent, args.task_id, _content(args.payload), args.priority,
             args.max_attempts, not args.no_notify,
@@ -313,7 +325,8 @@ def main(argv: list[str] | None = None) -> int:
         "extend": lambda: store.extend_lease(args.task_id, args.lease),
         "result": lambda: store.read_result(args.task_id),
         "state": lambda: store.get_system_state(),
-        "heartbeat": lambda: store.heartbeat(args.agent, args.ttl, args.capabilities),
+        "heartbeat": lambda: store.heartbeat(
+            args.agent, args.ttl, args.capabilities, args.model),
         "announce": lambda: store.announce(args.author, args.topic, _content(args.message)),
         "channel": lambda: store.read_channel(
             args.agent, args.since_seq, args.topic, args.limit

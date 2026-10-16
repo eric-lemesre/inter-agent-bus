@@ -16,6 +16,7 @@ fed to an autonomous agent CLI — see the README's security section.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import time
@@ -79,12 +80,17 @@ def run_worker(
     lease_seconds: int = 900,
     poll_seconds: int = 5,
     task_timeout: int | None = None,
+    model: str | None = None,
 ) -> int:
     agent = agent.strip().lower()
-    _log(store.register_agent(agent, "headless worker (iab worker)"))
+    registered = store.register_agent(
+        agent, "headless worker (iab worker)", cwd=os.getcwd(), model=model)
+    _log(registered)
+    if registered.startswith("ERROR"):
+        return 1
     delay = poll_seconds
     while True:
-        _log(store.heartbeat(agent, ttl_seconds=2 * poll_seconds + 60))
+        _log(store.heartbeat(agent, ttl_seconds=2 * poll_seconds + 60, model=model))
         claimed = store.claim_task(agent, lease_seconds)
         if claimed == "NO_TASK":
             if once:

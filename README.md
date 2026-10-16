@@ -38,7 +38,7 @@ never from a working tree:
 ```bash
 python3 -m venv ~/.local/venvs/inter-agent-bus
 ~/.local/venvs/inter-agent-bus/bin/pip install \
-  'inter-agent-bus[server] @ git+https://github.com/eric-lemesre/inter-agent-bus@v0.10.0'
+  'inter-agent-bus[server] @ git+https://github.com/eric-lemesre/inter-agent-bus@v0.11.0'
 ~/.local/venvs/inter-agent-bus/bin/iab install --scope user
 ```
 
@@ -48,9 +48,41 @@ no repository path involved. A newly added server only loads in the
 **next** session: reopen, then call `whoami()` (it returns the
 identity, the resolved bus database and how it was chosen). To
 upgrade: `pip install -U` with the next tag, then reopen sessions.
-Caveat of a user-scope install: every Claude Code session shares the
-baked identity (`--agent-name` to change it, `--print` to inspect the
-JSON without applying, `--scope project|local` for narrower scopes).
+The baked value is the **harness** (`--agent-name`, default `claude`);
+each session completes it with the workspace it is launched in (see
+*Identity* below), so one user-scope install serves every project
+(`--print` to inspect the JSON without applying, `--scope project|local`
+for narrower scopes, `--agent-name harness@workspace` to pin both).
+
+### Identity: one instance = `harness@workspace`
+
+An agent on the bus is an **instance**: a harness (the client carrying
+the model — `claude`, `kimi`, `codewhale`, `opencode`…) on a workspace
+(the repository or folder it works in — `homelab`, `infra`…), written
+`harness@workspace`. Queue, presence and notification cursors are per
+instance, so two Claude Code sessions on two repositories no longer
+share one mailbox. `whoami()` tells how the name was built:
+
+- harness: `IAB_AGENT_NAME` (legacy `ORCHESTRATOR_AGENT_NAME` honored);
+  a value already holding an `@` is the full name;
+- workspace: `IAB_WORKSPACE` if set, else derived from the server's
+  launch directory — operator alias table first (`IAB_WORKSPACES`, a
+  JSON `{path: name}`, default `<data dir>/workspaces.json`, longest
+  prefix wins), then the name of the enclosing git repository (a
+  submodule yields its own name), else the folder's own name;
+- model: `IAB_MODEL` is echoed; an instance declares the real one with
+  `register_agent(..., model=)` or `heartbeat(..., model=)` — session
+  state, kept in the presence row, never guessed by the plugin.
+
+A connected client named by its environment is **registered on its
+first tool call** (description empty, launch directory recorded). A bare
+harness is accepted as a target only while it designates a single
+instance; otherwise the bus refuses and lists the candidates — a legacy
+bare row counts as one, `rename_agent` (CLI `iab rename`) moves it, with
+its queue, results, mailbox, cursors and journal, to its composed name.
+Authors and readers must be registered: `announce`, `notify`, `poll`,
+`heartbeat` and cursor reads refuse an unknown name instead of returning
+an empty, misleading result.
 
 ### Other agent clients (Kimi, DeepSeek, …)
 
@@ -88,7 +120,7 @@ project key — a mismatch is diagnosable in one call.
 
 ## MCP tools
 
-`whoami` · `register_agent` · `push_task` · `claim_task` (head of
+`whoami` · `register_agent` · `rename_agent` · `push_task` · `claim_task` (head of
 one's queue, or one specific task via `task_id`) · `publish_result`
 (settles the task; pass the claim's `attempt` token — lease fencing) ·
 `cancel_task` · `requeue_task` · `extend_lease` · `read_result` ·
@@ -109,13 +141,14 @@ The `iab` console script mirrors the MCP tools — the bus can be driven
 without MCP and without `python -c`:
 
 ```
-iab register <agent> [-d DESC]          iab result <task_id>
+iab register <agent> [-d DESC] [--cwd DIR] [--model M]
+iab rename <old> <new>                  iab result <task_id>
 iab push <agent> <task_id> [payload|-]  iab state
 iab claim <agent> [--lease S] [--task-id ID]
 iab publish <agent> <task_id> [content|-] [--attempt N] [--force]
 iab cancel|requeue <task_id>            iab log [task_id] [-a AGENT]
 iab extend <task_id> [--lease S]        iab whoami
-iab heartbeat <agent> [--ttl S] [--capabilities JSON]
+iab heartbeat <agent> [--ttl S] [--capabilities JSON] [--model M]
 iab announce <author> <topic> [message|-]
 iab channel [--agent A | --since N] [--topic T] [--limit N]
 iab presence
@@ -183,7 +216,14 @@ cross-reviewing with another agent (router rule).
 
 - `IAB_DB` — bus database path; the rendezvous authority.
 - `IAB_ROSTER` — roster path (default: `roster.json` in the project).
-- `IAB_AGENT_NAME` — identity of the session/registration.
+- `IAB_AGENT_NAME` — harness of the session/registration (or a full
+  `harness@workspace`).
+- `IAB_WORKSPACE` — workspace of the session, when the derivation from
+  the launch directory does not suit.
+- `IAB_WORKSPACES` — path of the operator alias table `{path: workspace}`
+  (default: `workspaces.json` in the data directory).
+- `IAB_MODEL` — model carrying the session, echoed on the bus until the
+  agent declares one itself (`iab worker --model`).
 
 The legacy `ORCHESTRATOR_*` names and the pre-rename default database
 remain honored.

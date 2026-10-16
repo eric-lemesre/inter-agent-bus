@@ -553,7 +553,8 @@ with tempfile.TemporaryDirectory() as tmp:
     # Cross-process: a notification written by another process is polled here.
     env8 = os.environ.copy()
     env8["PYTHONPATH"] = str(HERE)
-    probe8 = "import store; print(store.notify('child', 'delta', 'from-child'))"
+    probe8 = ("import store; store.register_agent('child', 'other process'); "
+              "print(store.notify('child', 'delta', 'from-child'))")
     out = subprocess.run([sys.executable, "-c", probe8], env=env8,
                          capture_output=True, text=True).stdout.strip()
     check("another process can notify", out.startswith("{"))
@@ -598,6 +599,210 @@ with tempfile.TemporaryDirectory() as tmp:
     check("wait_for_task wakes on a push from another process",
           woken == ["wake-3"])
     check("the wake happens before the timeout, not at it", elapsed < 10)
+
+
+    # ---- Phase 8a: composed identity harness@workspace, declared model.
+    # Workspace derivation: enclosing git repository (directory or file, so
+    # a submodule yields its own name), bare folder, alias table, case.
+    ws_root = Path(tmp) / "ws"
+    (ws_root / "Home Lab" / ".git").mkdir(parents=True)
+    (ws_root / "Home Lab" / "infra").mkdir()
+    (ws_root / "Home Lab" / "infra" / ".git").write_text("gitdir: ../.git/modules/infra")
+    (ws_root / "Home Lab" / "docs" / "deep").mkdir(parents=True)
+    (ws_root / "Loose").mkdir()
+    check("workspace = name of the enclosing git repository, slugified",
+          store.derive_workspace(ws_root / "Home Lab" / "docs" / "deep") == ("home-lab", "git"))
+    check("a submodule (.git file) yields its own name, not the superproject's",
+          store.derive_workspace(ws_root / "Home Lab" / "infra") == ("infra", "git"))
+    check("without a repository, the folder's own name",
+          store.derive_workspace(ws_root / "Loose") == ("loose", "cwd"))
+    aliases = Path(tmp) / "workspaces.json"
+    aliases.write_text(json.dumps({str(ws_root / "Home Lab"): "homelab",
+                                   str(ws_root / "Home Lab" / "infra"): "Infra!"}))
+    os.environ["IAB_WORKSPACES"] = str(aliases)
+    check("alias table wins, longest prefix first, value slugified",
+          store.derive_workspace(ws_root / "Home Lab" / "infra" ) == ("infra", "alias")
+          and store.derive_workspace(ws_root / "Home Lab" / "docs") == ("homelab", "alias"))
+    del os.environ["IAB_WORKSPACES"]
+
+    ident = store.resolve_identity({"IAB_AGENT_NAME": "Claude"}, ws_root / "Home Lab" / "docs")
+    check("identity = harness from env + workspace from the launch directory",
+          ident["agent_name"] == "claude@home-lab" and ident["workspace_source"] == "git"
+          and ident["model"] is None, json.dumps(ident))
+    ident = store.resolve_identity({"IAB_AGENT_NAME": "kimi", "IAB_WORKSPACE": "Brother",
+                                    "IAB_MODEL": "kimi-k2"}, ws_root / "Loose")
+    check("IAB_WORKSPACE overrides the derivation; IAB_MODEL is echoed",
+          ident["agent_name"] == "kimi@brother" and ident["workspace_source"] == "env"
+          and ident["model"] == "kimi-k2", json.dumps(ident))
+    ident = store.resolve_identity({"IAB_AGENT_NAME": "claude@conciliateur"}, ws_root / "Loose")
+    check("a full name in the env wins over the directory",
+          ident["agent_name"] == "claude@conciliateur" and ident["workspace_source"] == "name")
+    ident = store.resolve_identity({}, ws_root / "Loose")
+    check("no harness in the env → source none, no name",
+          ident["source"] == "none" and ident["agent_name"] is None)
+
+    # Registration and addressing.
+    check("an invalid composed name is refused",
+          store.register_agent("claude@home lab").startswith("ERROR")
+          and store.register_agent("@homelab").startswith("ERROR"))
+    store.register_agent("claude@homelab", "HomeLab session", cwd="/x/HomeLab",
+                         model="claude-fable-5-1")
+    store.register_agent("claude@leadsage", "LeadSage session")
+    store.register_agent("kimi@brother", "Kimi on Brother")
+    pres = {p["agent"]: p for p in json.loads(store.list_presence())}
+    check("list_presence shows harness, workspace, cwd and declared model",
+          pres["claude@homelab"]["harness"] == "claude"
+          and pres["claude@homelab"]["workspace"] == "homelab"
+          and pres["claude@homelab"]["cwd"] == "/x/HomeLab"
+          and pres["claude@homelab"]["model"] == "claude-fable-5-1"
+          and pres["kimi@brother"]["model"] is None, json.dumps(pres["claude@homelab"]))
+    r = store.notify("kimi@brother", "claude", "which one of you?")
+    check("a bare harness with several instances is refused with the candidates",
+          r.startswith("ERROR") and "claude@homelab" in r and "claude@leadsage" in r, r)
+    r = store.notify("claude@homelab", "kimi", "single instance")
+    check("a bare harness with one instance resolves to it", r.startswith("{"), r)
+    check("…and lands in that instance's mailbox",
+          any(m["message"] == "single instance" for m in json.loads(store.poll("kimi@brother"))))
+    check("poll also accepts the bare harness when unique",
+          store.poll("kimi") == "[]")
+    check("a wildcard is refused as a target (reserved to broadcast)",
+          store.notify("kimi@brother", "claude@*", "x").startswith("ERROR")
+          and store.push_task("*@homelab", "t-bc", "x").startswith("ERROR"))
+    check("push_task resolves a bare harness too",
+          store.push_task("kimi", "t-kimi", "x").startswith("OK")
+          and json.loads(store.claim_task("kimi@brother"))["task_id"] == "t-kimi")
+    check("an unregistered author is refused on announce and notify",
+          store.announce("nobody", "alerts", "x").startswith("ERROR")
+          and store.notify("nobody", "kimi@brother", "x").startswith("ERROR"))
+    check("polling an unregistered name is an error, not an empty list",
+          store.poll("claude-homelab").startswith("ERROR"))
+    check("a cursor read of the channel by an unregistered name is refused",
+          store.read_channel(agent="claude-homelab").startswith("ERROR"))
+    check("claiming for an unregistered name is an error",
+          store.claim_task("claude-homelab").startswith("ERROR"))
+    check("wait_for_task refuses an unregistered name",
+          store.wait_for_task("claude-homelab", timeout_s=0.2).startswith("ERROR"))
+    check("two instances of one harness have separate queues",
+          store.push_task("claude@homelab", "t-hl", "x").startswith("OK")
+          and store.claim_task("claude@leadsage") == "NO_TASK"
+          and json.loads(store.claim_task("claude@homelab"))["task_id"] == "t-hl")
+    store.notify("kimi@brother", "claude@homelab", "for homelab only")
+    check("two instances of one harness have separate notification cursors",
+          json.loads(store.poll("claude@leadsage")) == []
+          and any(m["message"] == "for homelab only"
+                  for m in json.loads(store.poll("claude@homelab"))))
+
+    # Model: session state in the presence row.
+    store.touch_presence("claude@homelab", model="from-env")
+    check("touch_presence never overrides a declared model",
+          json.loads(store.heartbeat("claude@homelab"))["model"] == "claude-fable-5-1")
+    store.touch_presence("claude@leadsage", model="from-env")
+    check("touch_presence fills an empty model slot",
+          json.loads(store.heartbeat("claude@leadsage"))["model"] == "from-env")
+    check("heartbeat changes the declared model",
+          json.loads(store.heartbeat("claude@leadsage", model="claude-opus-5-5"))["model"]
+          == "claude-opus-5-5")
+    check("heartbeat for an unregistered name is refused",
+          store.heartbeat("ghost@nowhere").startswith("ERROR"))
+    state = json.loads(store.get_system_state())
+    check("get_system_state exposes instance fields and models",
+          state["agents"]["claude@homelab"]["workspace"] == "homelab"
+          and state["models"]["claude@leadsage"] == "claude-opus-5-5")
+
+    # Piggyback of a connected client: auto-registration under the composed name.
+    store.touch_identity({"agent_name": "codewhale@leadsage", "cwd": "/x/LeadSage",
+                          "model": "deepseek-v4"})
+    pres = {p["agent"]: p for p in json.loads(store.list_presence())}
+    check("touch_identity registers an unknown instance with cwd and model echo",
+          pres["codewhale@leadsage"]["cwd"] == "/x/LeadSage"
+          and pres["codewhale@leadsage"]["model"] == "deepseek-v4"
+          and pres["codewhale@leadsage"]["status"] == "alive")
+    check("the auto-registration is journaled",
+          any(e["event"] == "register" and "auto" in e["detail"]
+              for e in json.loads(store.get_events(agent="codewhale@leadsage"))))
+
+    # rename_agent: the whole history follows, in one transaction.
+    store.register_agent("legacy", "old bare name")
+    store.push_task("legacy", "t-leg-1", "x")
+    json.loads(store.claim_task("legacy"))
+    store.publish_result("legacy", "t-leg-1", "done")
+    store.push_task("legacy", "t-leg-2", "y")
+    store.notify("kimi@brother", "legacy", "to legacy")
+    store.announce("legacy", "presence", "hello")
+    store.heartbeat("legacy", model="m1")
+    check("rename refuses an invalid or existing new name",
+          store.rename_agent("legacy", "claude@homelab").startswith("ERROR")
+          and store.rename_agent("legacy", "bad name").startswith("ERROR")
+          and store.rename_agent("ghost", "x@y").startswith("ERROR"))
+    check("rename succeeds", store.rename_agent("legacy", "claude@conciliateur").startswith("OK"))
+    check("the old name is gone", store.poll("legacy").startswith("ERROR"))
+    check("the queue followed the rename",
+          json.loads(store.claim_task("claude@conciliateur"))["task_id"] == "t-leg-2")
+    check("the mailbox followed the rename",
+          any(m["message"] == "to legacy" for m in json.loads(store.poll("claude@conciliateur"))))
+    check("results, channel and presence followed the rename",
+          json.loads(store.read_result("t-leg-1"))["author"] == "claude@conciliateur"
+          and any(e["author"] == "claude@conciliateur"
+                  for e in json.loads(store.read_channel(since_seq=0, topic="presence")))
+          and json.loads(store.heartbeat("claude@conciliateur"))["model"] == "m1")
+    check("the rename is journaled",
+          any(e["event"] == "rename" and e["detail"] == "was legacy"
+              for e in json.loads(store.get_events(agent="claude@conciliateur"))))
+
+    # Legacy database (pre-8a schema) opens and migrates additively.
+    legacy_db = Path(tmp) / "legacy.db"
+    raw = sqlite3.connect(legacy_db)
+    raw.executescript(
+        "CREATE TABLE agents(name TEXT PRIMARY KEY, description TEXT NOT NULL DEFAULT '', "
+        "registered_at TEXT NOT NULL);"
+        "INSERT INTO agents VALUES('claude', 'old row', '2026-08-25T05:23:06+00:00');"
+        "INSERT INTO agents VALUES('kimi@brother', 'composed row', '2026-10-01T00:00:00+00:00');"
+        "CREATE TABLE presence(agent TEXT PRIMARY KEY, last_seen TEXT NOT NULL, "
+        "ttl_seconds INTEGER NOT NULL, capabilities TEXT NOT NULL DEFAULT '{}');"
+        "INSERT INTO presence VALUES('claude', '2026-10-16T05:00:00+00:00', 7200, '{}');"
+    )
+    raw.close()
+    saved_db = os.environ["IAB_DB"]
+    os.environ["IAB_DB"] = str(legacy_db)
+    pres = {p["agent"]: p for p in json.loads(store.list_presence())}
+    check("a pre-8a database is migrated: harness backfilled from the name",
+          pres["claude"]["harness"] == "claude" and pres["claude"]["workspace"] is None
+          and pres["kimi@brother"]["harness"] == "kimi"
+          and pres["kimi@brother"]["workspace"] == "brother"
+          and pres["claude"]["model"] is None, json.dumps(pres))
+    check("a legacy bare name stays addressable while it is the only instance",
+          store.notify("kimi@brother", "claude", "still works").startswith("{"))
+    store.register_agent("claude@homelab", "new instance")
+    r = store.notify("kimi@brother", "claude", "now ambiguous")
+    check("…and becomes ambiguous once a composed instance appears",
+          r.startswith("ERROR") and "claude@homelab" in r, r)
+    check("the error names the legacy row and the way out (rename)",
+          "rename_agent" in r and store.poll("claude").startswith("ERROR"))
+    store.rename_agent("claude", "claude@conciliateur")
+    check("after the rename, the legacy mailbox is reachable under its new name",
+          json.loads(store.poll("claude@conciliateur"))[0]["message"] == "still works"
+          and store.notify("kimi@brother", "claude", "x").startswith("ERROR"))
+    os.environ["IAB_DB"] = saved_db
+
+    # CLI: whoami carries the composed identity; register/rename/heartbeat --model.
+    env_cli = os.environ.copy()
+    env_cli.update({"IAB_AGENT_NAME": "opencode", "IAB_MODEL": "qwen3-coder"})
+    out = subprocess.run(cli + ["whoami"], env=env_cli, cwd=ws_root / "Loose",
+                         capture_output=True, text=True)
+    who = json.loads(out.stdout)
+    check("cli whoami composes harness@workspace from env and cwd and echoes the model",
+          who["agent_name"] == "opencode@loose" and who["model"] == "qwen3-coder"
+          and who["workspace_source"] == "cwd", out.stdout + out.stderr)
+    out = subprocess.run(cli + ["register", "opencode@sindri", "--model", "qwen3", "--cwd", "/srv"],
+                         env=os.environ.copy(), capture_output=True, text=True)
+    check("cli register accepts --model and --cwd", out.stdout.startswith("OK"), out.stdout)
+    out = subprocess.run(cli + ["rename", "opencode@sindri", "opencode@vm"],
+                         env=os.environ.copy(), capture_output=True, text=True)
+    check("cli rename works", out.stdout.startswith("OK"), out.stdout + out.stderr)
+    out = subprocess.run(cli + ["heartbeat", "opencode@vm", "--model", "qwen3.6"],
+                         env=os.environ.copy(), capture_output=True, text=True)
+    check("cli heartbeat --model declares the model",
+          json.loads(out.stdout)["model"] == "qwen3.6", out.stdout + out.stderr)
 
     store._now = real_now
     del os.environ["IAB_DB"]

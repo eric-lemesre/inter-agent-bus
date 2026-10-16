@@ -5,7 +5,6 @@ instance of this server; sharing happens through the common SQLite database
 (see store.py, IAB_DB env var). This file holds NO state logic.
 """
 import json
-import os
 
 from mcp.server.mcpserver import Context, MCPServer
 
@@ -16,33 +15,45 @@ except ImportError:  # bare script: python servers/shared_memory/server.py
 
 mcp = MCPServer("InterAgentBus")
 
+# Resolved once: the launch directory of a stdio server never changes, and
+# the identity (harness@workspace, model echo) derives from it and the env.
+_IDENTITY: dict | None = None
+
+
+def _identity() -> dict:
+    global _IDENTITY
+    if _IDENTITY is None:
+        _IDENTITY = store.resolve_identity()
+    return _IDENTITY
+
 
 def _touch() -> None:
-    """Refresh the caller's presence on every tool call when an agent name
-    is set in the environment. Transport-only: failures are swallowed so the
-    actual tool call always proceeds."""
-    name = os.environ.get("IAB_AGENT_NAME") or os.environ.get("ORCHESTRATOR_AGENT_NAME")
-    if name:
-        try:
-            store.touch_presence(name)
-        except Exception:
-            pass
+    """Register on first sight and refresh the caller's presence on every
+    tool call when the environment names the harness. Transport-only:
+    failures are swallowed so the actual tool call always proceeds."""
+    try:
+        identity = _identity()
+        if identity.get("agent_name"):
+            store.touch_identity(identity)
+    except Exception:
+        pass
 
 
 @mcp.tool()
 def whoami(ctx: Context) -> str:
-    """Identity hints of the connected client, so a worker can find its own roster entry: IAB_AGENT_NAME env var when the launcher set one (authoritative; legacy ORCHESTRATOR_AGENT_NAME honored), otherwise the MCP clientInfo sent at the handshake (to match against the roster's client_hints). Also returns the resolved bus database (path, how it was chosen, project key), so a rendezvous mismatch between clients is diagnosable in one call."""
+    """Identity of the connected client as one instance `harness@workspace`: harness from IAB_AGENT_NAME (authoritative; legacy ORCHESTRATOR_AGENT_NAME honored), workspace from IAB_WORKSPACE or derived from the launch directory (alias table, enclosing git repository, folder name — `workspace_source` says which), model echoed from IAB_MODEL; without a harness, the MCP clientInfo sent at the handshake (to match against the roster's client_hints). Also returns the resolved bus database (path, how it was chosen, project key), so a rendezvous mismatch between clients is diagnosable in one call."""
     _touch()
     bus = json.loads(store.db_info())
-    forced = os.environ.get("IAB_AGENT_NAME") or os.environ.get("ORCHESTRATOR_AGENT_NAME")
-    if forced:
-        return json.dumps({"source": "env", "agent_name": forced, **bus})
+    identity = _identity()
+    if identity.get("agent_name"):
+        return json.dumps({**identity, **bus})
     params = ctx.session.client_params
     if params is None or params.client_info is None:
-        return json.dumps({"source": "none", **bus})
+        return json.dumps({**identity, **bus})
     info = params.client_info
     return json.dumps(
         {
+            **identity,
             "source": "client_info",
             "name": info.name,
             "title": info.title,
@@ -53,10 +64,17 @@ def whoami(ctx: Context) -> str:
 
 
 @mcp.tool()
-def register_agent(name: str, description: str = "") -> str:
-    """Declare an agent (creates its queue). The cast comes from the project's roster, never from the plugin."""
+def register_agent(name: str, description: str = "", cwd: str = "", model: str = "") -> str:
+    """Declare an agent instance (creates its queue): `name` is `harness@workspace` (or a bare harness), `cwd` where it works, `model` the model carrying it right now. The cast comes from the project's roster, never from the plugin."""
     _touch()
-    return store.register_agent(name, description)
+    return store.register_agent(name, description, cwd, model or None)
+
+
+@mcp.tool()
+def rename_agent(old: str, new: str) -> str:
+    """Move an identity to a new name — queue, results, notifications, cursors, presence and journal follow in one transaction (migration of a legacy bare name to `harness@workspace`); refused when `new` exists."""
+    _touch()
+    return store.rename_agent(old, new)
 
 
 @mcp.tool()
@@ -128,15 +146,15 @@ def get_events(task_id: str = "", agent: str = "", limit: int = 100) -> str:
 
 
 @mcp.tool()
-def heartbeat(agent: str, ttl_seconds: int = 120, capabilities: str = "") -> str:
-    """Post or refresh a presence heartbeat with a capability card (absent capabilities keep the existing card)."""
+def heartbeat(agent: str, ttl_seconds: int = 120, capabilities: str = "", model: str = "") -> str:
+    """Post or refresh a presence heartbeat with a capability card and the model carrying the instance (absent capabilities keep the existing card, absent model keeps the stored one); the agent must be registered."""
     _touch()
-    return store.heartbeat(agent, ttl_seconds, capabilities or None)
+    return store.heartbeat(agent, ttl_seconds, capabilities or None, model or None)
 
 
 @mcp.tool()
 def list_presence() -> str:
-    """List every known agent with its computed presence status and capability card."""
+    """List every known agent instance (harness, workspace, cwd, declared model) with its computed presence status and capability card."""
     _touch()
     return store.list_presence()
 
@@ -161,7 +179,7 @@ def read_channel(agent: str = "", since_seq: int = -1, topic: str = "", limit: i
 
 @mcp.tool()
 def notify(author: str, target_agent: str, message: str) -> str:
-    """Send a directed signal to one agent (point-to-point); the recipient picks it up with poll()."""
+    """Send a directed signal to one agent instance (point-to-point; a bare harness is accepted only when it designates a single instance); the recipient picks it up with poll(). Author and target must be registered."""
     _touch()
     return store.notify(author, target_agent, message)
 

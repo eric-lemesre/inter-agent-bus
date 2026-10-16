@@ -226,6 +226,59 @@ partagé. Spécification complète, prête à développer par un tiers :
   injectées dans le payload du modèle (l'injection de contexte est hors
   périmètre de cette phase).
 
+## Phase 8 — Identité, diffusion, réveil
+
+Retour de terrain du 2026-10-16 ([`AMELIORATIONS-2026-10-16-identite-broadcast-reveil.fr.md`](AMELIORATIONS-2026-10-16-identite-broadcast-reveil.fr.md)) :
+quatre sessions Claude Code partageaient l'unique identité `claude`
+(une file, une présence, un curseur de notifications), un auteur
+fantôme est passé inaperçu six semaines, une réponse est restée non lue
+vingt heures.
+
+### 8a — identité `harnais@espace` et modèle déclaré — **livrée**
+
+- **Identité composée** : un agent est une instance `harnais@espace` ;
+  le harnais vient de l'environnement, l'espace de `IAB_WORKSPACE` ou du
+  répertoire de lancement (table d'alias, dépôt git englobant — un
+  sous-module garde son propre nom —, nom du dossier).
+  `resolve_identity` / `derive_workspace` dans le cœur, `whoami` rend
+  chaque source. Colonnes additives `agents.harness/workspace/cwd`,
+  remplies pour les lignes héritées.
+- **Adressage** : `resolve_target` — nom exact, ou harnais nu seulement
+  s'il désigne une instance ; ambiguïté refusée avec les candidates (une
+  ligne héritée au nom nu compte) ; jokers réservés à la diffusion.
+  Appliqué à push, claim, notify, poll, wait, heartbeat et lectures à
+  curseur.
+- **Discipline d'enregistrement** : auteurs et lecteurs inconnus refusés
+  (`announce`, `notify`, `poll`, `heartbeat`, `read_channel` à curseur,
+  `claim_task`, `wait_task`) ; un client nommé par son environnement est
+  auto-enregistré au premier appel d'outil (`touch_identity`,
+  journalisé).
+- **`rename_agent`** (`iab rename`) : file, résultats, boîte, curseurs,
+  présence et journal suivent en une transaction — la voie de migration
+  des noms nus hérités.
+- **Modèle déclaré** : `presence.model` (additif), posé par
+  `register_agent(model=)` / `heartbeat(model=)`, repris de `IAB_MODEL`
+  seulement dans une case vide ; montré par `list_presence`,
+  `get_system_state` ; `iab worker --model`. Jamais deviné d'après le
+  harnais (invariant 1).
+- Petites corrections : nom de curseur normalisé dans `read_channel` ;
+  `wait_for_task` garde une connexion pour toute l'attente.
+
+### 8b — diffusion — *à faire*
+
+`broadcast(scope)` par éventail dans la table `notifications` existante
+(`broadcast_id`, `reply_to`, `replies`) ; portées `*`, `harnais@*`,
+`*@espace`, listes ; destinataires endormis signalés. Toujours des
+données, jamais des ordres : le travail passe par `push_task`.
+
+### 8c — réveil — *à faire*
+
+`wait_signal` (tâches et notifications), bloc `launch` au roster,
+`iab wake` avec verrou en base, `iab supervise`, politique de réveil
+(`wake_on`, `max_wakes_per_hour`), skill `worker-wake` réécrite ; une
+session Claude Code ouverte se réveille par `iab watch --on any` lancé
+en tâche de fond.
+
 ## Critère d'acceptation global
 
 Depuis une session Claude Code fraîche, sans configuration projet :

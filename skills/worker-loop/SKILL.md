@@ -25,7 +25,15 @@ otherwise `roster.json` at the project root):
 2. **Ask the bus**: call `whoami()`. A `source: env` answer is
    authoritative — the launcher or the client's MCP registration set
    `IAB_AGENT_NAME` (or the legacy `ORCHESTRATOR_AGENT_NAME`); use that
-   `agent_name` as is.
+   `agent_name` as is. It is an **instance** name `harness@workspace`
+   (`claude@homelab`): the harness from the environment, the workspace
+   from the launch directory (`workspace_source` says how). Sign every
+   announcement and notification with it, poll under it — a bare
+   harness shared by several sessions is exactly the mailbox mix-up the
+   composed name prevents. Your roster entry is keyed by the harness;
+   the bus already registered your instance on your first tool call.
+   Declare your model once with `heartbeat(agent, model=...)` — the bus
+   never guesses it.
 3. **Match the client**: a `source: client_info` answer gives the MCP
    client's name — compare it (case-insensitive substrings) against the
    `client_hints` arrays of the roster entries. Exactly one match → that

@@ -211,6 +211,56 @@ specification, ready for third-party development:
   for observability. Channel entries are **not** injected into the model
   payload (context injection is out of scope for this phase).
 
+## Phase 8 — Identity, broadcast, wake-up
+
+Field report of 2026-10-16 ([`AMELIORATIONS-2026-10-16-identite-broadcast-reveil.md`](AMELIORATIONS-2026-10-16-identite-broadcast-reveil.md)):
+four Claude Code sessions shared the single identity `claude` (one
+queue, one presence, one notification cursor), a ghost author went
+unnoticed for six weeks, and a reply sat unread for twenty hours.
+
+### 8a — `harness@workspace` identity and declared model — **shipped**
+
+- **Composed identity**: an agent is an instance `harness@workspace`;
+  the harness comes from the environment, the workspace from
+  `IAB_WORKSPACE` or the launch directory (alias table, enclosing git
+  repository — a submodule keeps its own name —, folder name).
+  `resolve_identity` / `derive_workspace` in the core, `whoami` reports
+  every source. Additive columns `agents.harness/workspace/cwd`,
+  backfilled for legacy rows.
+- **Addressing**: `resolve_target` — exact name, or a bare harness only
+  while it designates one instance; ambiguity refused with the
+  candidates (a legacy bare row counts); wildcards reserved to
+  broadcast. Applied to push, claim, notify, poll, wait, heartbeat and
+  cursor reads.
+- **Registration discipline**: unknown authors and readers refused
+  (`announce`, `notify`, `poll`, `heartbeat`, cursor `read_channel`,
+  `claim_task`, `wait_task`); a client named by its environment is
+  auto-registered on first tool call (`touch_identity`, journaled).
+- **`rename_agent`** (`iab rename`): queue, results, mailbox, cursors,
+  presence and journal follow in one transaction — the migration path
+  for legacy bare names.
+- **Declared model**: `presence.model` (additive), set by
+  `register_agent(model=)` / `heartbeat(model=)`, echoed from `IAB_MODEL`
+  only into an empty slot; shown by `list_presence`, `get_system_state`;
+  `iab worker --model`. Never guessed from the harness (invariant 1).
+- Small fixes: `read_channel` cursor name normalized; `wait_for_task`
+  keeps one connection for the whole wait.
+
+### 8b — broadcast — *planned*
+
+`broadcast(scope)` fanned out into the existing `notifications` table
+(`broadcast_id`, `reply_to`, `replies`); scopes `*`, `harness@*`,
+`*@workspace`, lists; `asleep` recipients reported. Still data, never
+orders: work goes through `push_task`.
+
+### 8c — wake-up — *planned*
+
+`wait_signal` (tasks and notifications), roster `launch` block,
+`iab wake` with a database lock, `iab supervise`, wake policy
+(`wake_on`, `max_wakes_per_hour`), `worker-wake` skill rewritten; an
+open Claude Code session wakes through `iab watch --on any` run as a
+background task.
+
 ## Global acceptance criterion
 
 From a fresh Claude Code session, with no project configuration: push a

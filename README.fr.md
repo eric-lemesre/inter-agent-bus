@@ -40,7 +40,7 @@ taguée**, jamais depuis un arbre de travail :
 ```bash
 python3 -m venv ~/.local/venvs/inter-agent-bus
 ~/.local/venvs/inter-agent-bus/bin/pip install \
-  'inter-agent-bus[server] @ git+https://github.com/eric-lemesre/inter-agent-bus@v0.10.0'
+  'inter-agent-bus[server] @ git+https://github.com/eric-lemesre/inter-agent-bus@v0.11.0'
 ~/.local/venvs/inter-agent-bus/bin/iab install --scope user
 ```
 
@@ -50,10 +50,46 @@ ce venv — aucun chemin de dépôt. Un serveur ajouté ne se charge qu'à
 la **prochaine** session : rouvrir, puis appeler `whoami()` (il
 renvoie l'identité, la base de bus résolue et la façon dont elle a été
 choisie). Mise à jour : `pip install -U` avec le tag suivant, puis
-rouvrir les sessions. Réserve du scope user : toutes les sessions
-Claude Code partagent l'identité gravée (`--agent-name` pour la
-changer, `--print` pour inspecter le JSON sans l'appliquer, `--scope
-project|local` pour des portées plus étroites).
+rouvrir les sessions. La valeur gravée est le **harnais**
+(`--agent-name`, défaut `claude`) ; chaque session la complète par
+l'espace de travail où elle est lancée (voir *Identité* ci-dessous), si
+bien qu'une seule installation user sert tous les projets (`--print`
+pour inspecter le JSON sans l'appliquer, `--scope project|local` pour
+des portées plus étroites, `--agent-name harnais@espace` pour figer les
+deux).
+
+### Identité : une instance = `harnais@espace`
+
+Un agent du bus est une **instance** : un harnais (le client qui porte
+le modèle — `claude`, `kimi`, `codewhale`, `opencode`…) posé sur un
+espace de travail (le dépôt ou dossier où il œuvre — `homelab`,
+`infra`…), écrit `harnais@espace`. File, présence et curseurs de
+notifications sont par instance : deux sessions Claude Code sur deux
+dépôts ne partagent plus une boîte. `whoami()` dit comment le nom a été
+construit :
+
+- harnais : `IAB_AGENT_NAME` (l'hérité `ORCHESTRATOR_AGENT_NAME` reste
+  honoré) ; une valeur contenant déjà un `@` est le nom complet ;
+- espace : `IAB_WORKSPACE` s'il est posé, sinon dérivé du répertoire de
+  lancement du serveur — table d'alias de l'opérateur d'abord
+  (`IAB_WORKSPACES`, un JSON `{chemin: nom}`, défaut
+  `<dossier de données>/workspaces.json`, le plus long préfixe gagne),
+  puis le nom du dépôt git englobant (un sous-module donne son propre
+  nom), sinon le nom du dossier ;
+- modèle : `IAB_MODEL` est repris ; l'instance déclare le vrai avec
+  `register_agent(..., model=)` ou `heartbeat(..., model=)` — état de
+  session, tenu dans la ligne de présence, jamais deviné par le plugin.
+
+Un client connecté nommé par son environnement est **enregistré à son
+premier appel d'outil** (description vide, répertoire de lancement
+noté). Un harnais nu n'est accepté comme cible que s'il désigne une
+seule instance ; sinon le bus refuse et liste les candidates — une ligne
+héritée au nom nu compte pour une, `rename_agent` (CLI `iab rename`) la
+déplace, avec sa file, ses résultats, sa boîte, ses curseurs et son
+journal, vers son nom composé. Auteurs et lecteurs doivent être
+enregistrés : `announce`, `notify`, `poll`, `heartbeat` et les lectures
+à curseur refusent un nom inconnu au lieu de rendre un résultat vide et
+trompeur.
 
 ### Autres clients d'agents (Kimi, DeepSeek, …)
 
@@ -92,7 +128,7 @@ source et la clé de projet — un désaccord se diagnostique en un appel.
 
 ## Outils MCP
 
-`whoami` · `register_agent` · `push_task` · `claim_task` (tête de sa
+`whoami` · `register_agent` · `rename_agent` · `push_task` · `claim_task` (tête de sa
 file, ou une tâche précise via `task_id`) · `publish_result` (solde la
 tâche ; passer le jeton `attempt` du claim — clôture de bail) ·
 `cancel_task` · `requeue_task` · `extend_lease` · `read_result` ·
@@ -115,13 +151,14 @@ Le point d'entrée console `iab` reflète les outils MCP — le bus se
 pilote sans MCP et sans `python -c` :
 
 ```
-iab register <agent> [-d DESC]          iab result <task_id>
+iab register <agent> [-d DESC] [--cwd DIR] [--model M]
+iab rename <old> <new>                  iab result <task_id>
 iab push <agent> <task_id> [payload|-]  iab state
 iab claim <agent> [--lease S] [--task-id ID]
 iab publish <agent> <task_id> [contenu|-] [--attempt N] [--force]
 iab cancel|requeue <task_id>            iab log [task_id] [-a AGENT]
 iab extend <task_id> [--lease S]        iab whoami
-iab heartbeat <agent> [--ttl S] [--capabilities JSON]
+iab heartbeat <agent> [--ttl S] [--capabilities JSON] [--model M]
 iab announce <auteur> <topic> [message|-]
 iab channel [--agent A | --since N] [--topic T] [--limit N]
 iab presence
@@ -193,7 +230,14 @@ autre agent (règle du routeur).
 
 - `IAB_DB` — chemin de la base du bus ; l'autorité du rendez-vous.
 - `IAB_ROSTER` — chemin du roster (défaut : `roster.json` du projet).
-- `IAB_AGENT_NAME` — identité de la session/de l'enregistrement.
+- `IAB_AGENT_NAME` — harnais de la session/de l'enregistrement (ou un
+  `harnais@espace` complet).
+- `IAB_WORKSPACE` — espace de la session, quand la dérivation depuis le
+  répertoire de lancement ne convient pas.
+- `IAB_WORKSPACES` — chemin de la table d'alias de l'opérateur
+  `{chemin: espace}` (défaut : `workspaces.json` du dossier de données).
+- `IAB_MODEL` — modèle porté par la session, repris sur le bus tant que
+  l'agent n'en déclare pas un lui-même (`iab worker --model`).
 
 Les anciens noms `ORCHESTRATOR_*` et la base par défaut antérieure au
 renommage restent honorés.
