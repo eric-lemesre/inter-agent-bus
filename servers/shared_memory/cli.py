@@ -21,10 +21,11 @@ import sys
 from pathlib import Path
 
 try:  # installed package: `iab` maps to this directory (pyproject.toml)
-    from . import review, store, worker
+    from . import review, store, wake, worker
 except ImportError:  # bare script: python servers/shared_memory/cli.py
     import review
     import store
+    import wake
     import worker
 
 
@@ -44,11 +45,7 @@ def _content(arg: str | None) -> str:
 
 
 def _whoami() -> str:
-    name = os.environ.get("IAB_AGENT_NAME") or os.environ.get("ORCHESTRATOR_AGENT_NAME")
-    return json.dumps(
-        {"source": "env" if name else "none", "agent_name": name,
-         **json.loads(store.db_info())}
-    )
+    return json.dumps({**store.resolve_identity(), **json.loads(store.db_info())})
 
 
 def _server_config(agent_name: str) -> dict:
@@ -113,15 +110,18 @@ def _install(scope: str, agent_name: str, print_only: bool) -> str:
     )
 
 
-def _watch(agent: str, timeout: float, interval: float) -> str:
-    """Supervisor primitive: task_ids one per line so a shell/timer unit can
-    consume them without a JSON parser; silent empty output on timeout, exit
-    0 either way (the supervisor distinguishes by output, not by rc)."""
-    out = store.wait_for_task(agent, timeout, interval)
-    if out.startswith("ERROR"):
-        return out
-    ids = json.loads(out)
-    return "\n".join(ids)
+def _watch(agent: str, timeout: float, interval: float, on: str) -> str:
+    """Supervisor primitive. `--on task` (default): task_ids one per line so
+    a shell/timer unit can consume them without a JSON parser; silent empty
+    output on timeout, exit 0 either way. `--on notification|any`: the
+    signal snapshot as JSON (`signalled` tells timeout from arrival) — the
+    wake-up of an open interactive session run as a background task."""
+    if on == "task":
+        out = store.wait_for_task(agent, timeout, interval)
+        if out.startswith("ERROR"):
+            return out
+        return "\n".join(json.loads(out))
+    return store.wait_signal(agent, on, timeout, interval)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -135,9 +135,17 @@ def main(argv: list[str] | None = None) -> int:
                         help="pretty-print JSON output when applicable")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    p = sub.add_parser("register", help="declare an agent (creates its queue)")
+    p = sub.add_parser("register",
+                       help="declare an agent instance `harness[@workspace]` (creates its queue)")
     p.add_argument("name")
     p.add_argument("-d", "--description", default="")
+    p.add_argument("--cwd", default="", help="directory the instance works in")
+    p.add_argument("--model", default=None, help="model carrying the instance right now")
+
+    p = sub.add_parser("rename", help="move an identity to a new name (queue, results, "
+                                      "notifications, cursors, presence, journal follow)")
+    p.add_argument("old")
+    p.add_argument("new")
 
     p = sub.add_parser("push", help="queue a task for a registered agent")
     p.add_argument("agent")
@@ -182,6 +190,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("agent")
     p.add_argument("--ttl", type=int, default=120, metavar="SECONDS")
     p.add_argument("--capabilities", default=None, help="JSON object describing the agent's capabilities")
+    p.add_argument("--model", default=None, help="model carrying the instance right now")
 
     p = sub.add_parser("announce", help="append a message to the global channel")
     p.add_argument("author")
@@ -199,17 +208,53 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("author")
     p.add_argument("agent")
     p.add_argument("message", nargs="?", help="omit or use '-' to read from stdin")
+    p.add_argument("--reply-to", type=int, default=None, metavar="BROADCAST_ID",
+                   help="answer a broadcast (collected by `iab replies`)")
+    p.add_argument("--wake", action="store_true",
+                   help="ask a supervisor to launch the recipient if asleep (roster permitting)")
+
+    p = sub.add_parser("broadcast", help="ask or tell several agents at once "
+                                         "(scope: '*', 'harness@*', '*@workspace', "
+                                         "'model:<glob>' or a comma-separated list)")
+    p.add_argument("author")
+    p.add_argument("scope")
+    p.add_argument("message", nargs="?", help="omit or use '-' to read from stdin")
+    p.add_argument("--alive-only", action="store_true", help="skip asleep recipients")
+    p.add_argument("--wake", action="store_true",
+                   help="ask a supervisor to launch asleep recipients (roster permitting)")
+
+    p = sub.add_parser("replies", help="answers received to a broadcast")
+    p.add_argument("broadcast_id", type=int)
 
     p = sub.add_parser("poll", help="read an agent's own directed notifications (at-least-once)")
     p.add_argument("agent")
     p.add_argument("--limit", type=int, default=100)
 
     p = sub.add_parser("watch",
-                       help="block until a task lands in the agent's queue "
-                            "(prints queued task_ids, one per line; exits 0 either way)")
+                       help="block until a signal lands for the agent: --on task (default) "
+                            "prints queued task_ids one per line; --on notification|any "
+                            "prints the signal snapshot as JSON; exits 0 either way")
     p.add_argument("agent")
+    p.add_argument("--on", choices=["task", "notification", "any"], default="task",
+                   help="which signal ends the wait (default: task)")
     p.add_argument("--timeout", type=float, default=300.0, metavar="SECONDS")
     p.add_argument("--interval", type=float, default=2.0, metavar="SECONDS")
+
+    p = sub.add_parser("signals", help="what waits for an agent (tasks, unread "
+                                       "notifications, broadcasts) — read only")
+    p.add_argument("agent")
+
+    p = sub.add_parser("wake", help="launch an asleep agent if a signal waits for it, "
+                                    "from the roster's `launch` block (one decision, synchronous)")
+    p.add_argument("agent")
+    p.add_argument("--dry-run", action="store_true",
+                   help="print the decision and the command, launch nothing")
+
+    p = sub.add_parser("supervise", help="the single watcher: wake every roster agent "
+                                         "with a `launch` block when a signal waits")
+    p.add_argument("--interval", type=float, default=60.0, metavar="SECONDS")
+    p.add_argument("--once", action="store_true", help="one pass, then exit")
+    p.add_argument("--dry-run", action="store_true")
 
     sub.add_parser("presence", help="list all known agents and their presence status")
 
@@ -226,6 +271,8 @@ def main(argv: list[str] | None = None) -> int:
         "on stdin → publish its stdout (ERROR: on failure)",
     )
     p.add_argument("--agent", required=True, help="identity to work as (roster name)")
+    p.add_argument("--model", default=None,
+                   help="model behind the command, declared on the bus (default: IAB_MODEL)")
     p.add_argument("--once", action="store_true", help="one task (or NO_TASK) then exit")
     p.add_argument("--lease", type=int, default=900, metavar="SECONDS",
                    help="lease per claim; extended at every heartbeat while running")
@@ -258,11 +305,15 @@ def main(argv: list[str] | None = None) -> int:
     )
     p.add_argument("--scope", choices=["user", "project", "local"], default="user")
     p.add_argument("--agent-name", default="claude",
-                   help="identity baked into the registration env (default: claude)")
+                   help="harness baked into the registration env (default: claude); the "
+                        "workspace is derived from each session's launch directory — "
+                        "pass harness@workspace to pin both")
     p.add_argument("--print", action="store_true", dest="print_only",
                    help="print the JSON registration instead of applying it")
 
     args = parser.parse_args(argv)
+    if args.command == "supervise":
+        return wake.supervise(args.interval, args.once, args.dry_run)
     if args.command == "review":
         cmd = args.review_cmd
         if cmd and cmd[0] == "--":
@@ -296,14 +347,19 @@ def main(argv: list[str] | None = None) -> int:
         return worker.run_worker(
             args.agent, cmd, once=args.once, lease_seconds=args.lease,
             poll_seconds=args.poll, task_timeout=args.task_timeout,
+            model=args.model or os.environ.get("IAB_MODEL") or None,
         )
     out = {
-        "register": lambda: store.register_agent(args.name, args.description),
+        "register": lambda: store.register_agent(
+            args.name, args.description, args.cwd, args.model),
+        "rename": lambda: store.rename_agent(args.old, args.new),
         "push": lambda: store.push_task(
             args.agent, args.task_id, _content(args.payload), args.priority,
             args.max_attempts, not args.no_notify,
         ),
-        "watch": lambda: _watch(args.agent, args.timeout, args.interval),
+        "watch": lambda: _watch(args.agent, args.timeout, args.interval, args.on),
+        "signals": lambda: store.pending_signals(args.agent),
+        "wake": lambda: wake.wake_agent(args.agent, dry_run=args.dry_run),
         "claim": lambda: store.claim_task(args.agent, args.lease, args.task_id),
         "publish": lambda: store.publish_result(
             args.agent, args.task_id, _content(args.content), args.attempt, args.force
@@ -313,12 +369,17 @@ def main(argv: list[str] | None = None) -> int:
         "extend": lambda: store.extend_lease(args.task_id, args.lease),
         "result": lambda: store.read_result(args.task_id),
         "state": lambda: store.get_system_state(),
-        "heartbeat": lambda: store.heartbeat(args.agent, args.ttl, args.capabilities),
+        "heartbeat": lambda: store.heartbeat(
+            args.agent, args.ttl, args.capabilities, args.model),
         "announce": lambda: store.announce(args.author, args.topic, _content(args.message)),
         "channel": lambda: store.read_channel(
             args.agent, args.since_seq, args.topic, args.limit
         ),
-        "notify": lambda: store.notify(args.author, args.agent, _content(args.message)),
+        "notify": lambda: store.notify(args.author, args.agent, _content(args.message),
+                                       args.reply_to, args.wake),
+        "broadcast": lambda: store.broadcast(args.author, _content(args.message), args.scope,
+                                             args.alive_only, args.wake),
+        "replies": lambda: store.replies(args.broadcast_id),
         "poll": lambda: store.poll(args.agent, args.limit),
         "presence": lambda: store.list_presence(),
         "log": lambda: store.get_events(args.task_id, args.agent, args.limit),

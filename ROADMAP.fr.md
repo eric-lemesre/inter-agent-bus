@@ -226,6 +226,81 @@ partagé. Spécification complète, prête à développer par un tiers :
   injectées dans le payload du modèle (l'injection de contexte est hors
   périmètre de cette phase).
 
+## Phase 8 — Identité, diffusion, réveil
+
+Retour de terrain du 2026-10-16 ([`AMELIORATIONS-2026-10-16-identite-broadcast-reveil.fr.md`](AMELIORATIONS-2026-10-16-identite-broadcast-reveil.fr.md)) :
+quatre sessions Claude Code partageaient l'unique identité `claude`
+(une file, une présence, un curseur de notifications), un auteur
+fantôme est passé inaperçu six semaines, une réponse est restée non lue
+vingt heures.
+
+### 8a — identité `harnais@espace` et modèle déclaré — **livrée**
+
+- **Identité composée** : un agent est une instance `harnais@espace` ;
+  le harnais vient de l'environnement, l'espace de `IAB_WORKSPACE` ou du
+  répertoire de lancement (table d'alias, dépôt git englobant — un
+  sous-module garde son propre nom —, nom du dossier).
+  `resolve_identity` / `derive_workspace` dans le cœur, `whoami` rend
+  chaque source. Colonnes additives `agents.harness/workspace/cwd`,
+  remplies pour les lignes héritées.
+- **Adressage** : `resolve_target` — nom exact, ou harnais nu seulement
+  s'il désigne une instance ; ambiguïté refusée avec les candidates (une
+  ligne héritée au nom nu compte) ; jokers réservés à la diffusion.
+  Appliqué à push, claim, notify, poll, wait, heartbeat et lectures à
+  curseur.
+- **Discipline d'enregistrement** : auteurs et lecteurs inconnus refusés
+  (`announce`, `notify`, `poll`, `heartbeat`, `read_channel` à curseur,
+  `claim_task`, `wait_task`) ; un client nommé par son environnement est
+  auto-enregistré au premier appel d'outil (`touch_identity`,
+  journalisé).
+- **`rename_agent`** (`iab rename`) : file, résultats, boîte, curseurs,
+  présence et journal suivent en une transaction — la voie de migration
+  des noms nus hérités.
+- **Modèle déclaré** : `presence.model` (additif), posé par
+  `register_agent(model=)` / `heartbeat(model=)`, repris de `IAB_MODEL`
+  seulement dans une case vide ; montré par `list_presence`,
+  `get_system_state` ; `iab worker --model`. Jamais deviné d'après le
+  harnais (invariant 1).
+- Petites corrections : nom de curseur normalisé dans `read_channel` ;
+  `wait_for_task` garde une connexion pour toute l'attente.
+
+### 8b — diffusion — **livrée**
+
+- `broadcast(author, message, scope, alive_only, wake)` : une entrée de
+  canal (sujet `broadcast`, seq = identifiant) plus une notification par
+  destinataire dans la même transaction (colonnes additives
+  `notifications.broadcast_id/reply_to/wake`) ; les destinataires lisent
+  avec leur `poll()` habituel. Portées `*`, `harnais@*`, `*@espace`,
+  `model:<motif>`, liste séparée par des virgules ou JSON — une entrée
+  irrésoluble refuse tout l'éventail. Réponse : `recipients`,
+  `delivered` (vivants), `asleep`, `to_wake`.
+- `notify(reply_to=, wake=)` et `replies(broadcast_id)` (lecture pure) ;
+  `iab broadcast`, `iab replies`, `iab notify --reply-to --wake`.
+- Toujours des données, jamais des ordres : les skills le disent ; le
+  travail passe par `push_task`.
+
+### 8c — réveil — **livrée**
+
+- **Cœur** : `pending_signals` (tâches en file, notifications non lues,
+  drapeaux de réveil, identifiants de diffusion — aucun curseur
+  déplacé), `wait_signal(kinds)` qui généralise `wait_for_task`, table
+  `wake_locks` avec `acquire/renew/release_wake_lock` à bail,
+  `record_wake` / `wake_count` (budget horaire d'après les événements
+  `wake`).
+- **Driver** `wake.py` : `iab wake <agent> [--dry-run]` lit le bloc
+  `launch` de l'entrée de roster de l'instance (ou de son harnais),
+  décide selon la politique (tâche toujours ; notification/diffusion
+  seulement si marquées par l'émetteur et permises par `wake_on`),
+  vérifie `max_wakes_per_hour`, prend le verrou en base, lance la
+  commande dans `cwd` avec le prompt sur stdin (ou `{prompt_file}`), tue
+  au `timeout`, journalise début/fin. `iab supervise [--interval]
+  [--once]` : un veilleur, un fil par agent. Le dry-run ne journalise
+  jamais.
+- **MCP** : `wait_signal`, `pending_signals` ; **CLI** : `iab watch --on
+  task|notification|any`, `iab signals`, `iab wake`, `iab supervise`.
+- **Skill** `worker-wake` réécrite autour du lanceur au roster et de la
+  voie « session ouverte » (`iab watch --on any` en tâche de fond).
+
 ## Critère d'acceptation global
 
 Depuis une session Claude Code fraîche, sans configuration projet :

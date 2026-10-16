@@ -1,6 +1,6 @@
 ---
 name: worker-wake
-description: Wake an INTERACTIVE agent (not a degraded headless mode) when a task lands in its queue on the bus — launch the client's full-featured TUI inside a terminal multiplexer with auto-approvals, so the worker claims, executes and publishes unattended, and the operator can attach later. Use when configuring unattended operation of the bus (timer/cron watcher on the queue).
+description: Wake an agent when a signal lands for it on the bus — an open interactive session through a blocking wait run in the background, an asleep agent through the roster's `launch` block and `iab wake` / `iab supervise`. Use when configuring unattended operation of the bus or when a session must react to tasks, notifications and broadcasts without a human relaunching it.
 ---
 
 # Worker Wake
@@ -8,164 +8,143 @@ description: Wake an INTERACTIVE agent (not a degraded headless mode) when a tas
 ## The problem
 
 The bus is **passive by design** (shared SQLite, one stdio MCP server per
-client, "no daemon to start or supervise"): a `push_task` only queues a
-task and logs a transition; `announce` only appends to the channel.
-Nothing generates a wake event. An interactive agent that is not running
-will never see the task, and the `worker-loop` skill explicitly leaves the
-poll cadence to the operator ("in an interactive client, ask rather than
-busy-loop"). The result: tasks sit in the queue until someone manually
-launches the agent.
+client, no daemon): `push_task`, `notify` and `broadcast` only write rows.
+An agent that is not running never sees them; an agent that is running
+sees them only when it looks. Nothing in the bus generates a wake event,
+and no MCP client surfaces server notifications to its model.
 
-This skill closes that gap **without making the bus less passive**: an
-external watcher (systemd timer, cron, or a plain loop) watches the queue
-and, when a task appears, launches the target agent's client in its
-**full-featured interactive mode**, pre-loaded with a strict worker
-prompt. The agent then runs the normal `worker-loop` cycle (claim →
-execute → publish) completely unattended.
+This skill closes the gap **without making the bus less passive**: the
+wake-up is always a client of the bus — the session itself, or a
+supervisor process — never the bus.
 
-## Why headless-first, and when to use the full TUI
+## Path 1 — an open interactive session wakes itself
 
-Headless one-shot modes (`codewhale exec`, `claude -p`, …) were once
-suspected of not loading every capability of the interactive client. On
-codewhale this is **verified wrong for the critical capability**: MCP
-servers are loaded in `exec` mode (`mcp_inter-agent-bus_*` tools answered
-`whoami` in a headless run). Conversely, the full TUI currently hits the
-**Auto-Review guardian**: under `--approval-policy auto` every tool call is
-reviewed by a separate reviewer model, and when that reviewer is
-unavailable the call is denied **fail-closed** (“Auto-Review guardian
-unavailable … the call was denied”) — an unattended TUI stalls on its
-first shell call (`review_model` did not fix it in the tested build).
+Run the blocking wait as a **background task** of the session; the harness
+hands control back to the model when it returns (Claude Code does so for
+background commands; any client with background execution works alike):
 
-So the working default is **headless `exec --auto`** — validated
-end-to-end (claim → execute → publish, MCP included). The tmux-TUI remains
-the enhanced variant once the Auto-Review layer is functional (or on
-clients without such a layer): same prompt, same cycle, plus the ability
-to `tmux attach` and a full transcript.
+```
+iab watch <you> --on any --timeout 3600
+```
 
-## The method
+or the MCP tool `wait_signal(agent=<you>, kinds="any", timeout_seconds=3600)`.
+It returns a JSON snapshot (`signalled`, `tasks`, `notifications`,
+`broadcasts`) as soon as a task is queued or an unread notification waits,
+**without moving any cursor**: on return, run the normal cycle —
+`poll(<you>)` (answer broadcasts with `notify(..., reply_to=<id>)`), then
+`claim_task` → execute → `publish_result` — and arm the wait again. On
+timeout (`signalled: false`) simply re-arm. Never busy-loop: one wait at a
+time, generous timeouts.
 
-1. **Watch** — a watcher (systemd user timer every 1–2 min, cron, or
-   loop) reads the bus state: any task `queued` for the target agent.
-   The task's `status` is the deduplication: a claimed task is no longer
-   queued, so no state file is needed.
-2. **Guard** — a `flock` on the watcher prevents overlapping launches;
-   the bus **lease fencing** (`attempts` token on `publish_result`)
-   settles any race with a concurrently running interactive session:
-   whoever claims first wins, the other gets `NO_TASK`.
-3. **Launch** — run the client's non-interactive agent mode with
-   auto-approvals (`codewhale exec --auto`) in the project workspace,
-   passing a strict **worker prompt** (see below). Enhanced variant:
-   full TUI in `tmux` with the client's auto-approval policy
-   (`codewhale --approval-policy auto -p "<prompt>"`) once the
-   Auto-Review layer is available.
-4. **Execute** — the agent runs the `worker-loop` cycle from the prompt:
-   claim (with a generous lease — milestone reviews can run hours),
-   execute the payload exactly, publish the deliverable with the attempt
-   token, answer and stop.
-5. **Settle** — `exec` is synchronous: the service lasts as long as the
-   work. If the agent dies without publishing, the lease expires and the
-   bus **re-offers** the task (attempts+1) — the next watcher pass
-   relaunches it. In the tmux variant, the watcher polls the task
-   status and kills the session on settle (or timeout, letting the bus
-   re-offer). Never leave a zombie TUI behind.
-6. **Repeat** — the next watcher pass drains the next queued task.
+## Path 2 — an asleep agent is launched by a supervisor
+
+The roster entry of the instance (or of its harness, shared by every
+workspace) declares **how** to launch it — mechanism in the plugin, cast in
+the project:
+
+```json
+"launch": {
+  "cwd": "~/Dev/git/eric-lemesre/HomeLab",
+  "command": ["codewhale", "exec", "--auto", "-"],
+  "prompt": "worker-wake",
+  "wake_on": ["task", "broadcast"],
+  "max_wakes_per_hour": 4,
+  "lease_seconds": 10800,
+  "timeout": 21600
+}
+```
+
+- `command`: the client's **non-interactive agent mode with
+  auto-approvals**, reading the prompt on stdin (`-`). If an argument
+  contains `{prompt_file}`, the prompt is written to a 0600 temp file and
+  the path substituted instead. Never put the prompt in argv yourself.
+- `prompt`: `worker-wake` (the built-in strict template below), a file
+  path, or literal text; placeholders `{agent}`, `{iab}`, `{cwd}`,
+  `{lease}`, `{task_ids}`, `{signals}`.
+- `wake_on`: which signals may launch the agent. A queued **task always
+  wakes**; a notification or a broadcast wakes only when the sender set
+  `wake=True` **and** the kind is listed here — a paid agent is never
+  launched for an acknowledgement.
+- `max_wakes_per_hour`: the loop breaker (a woken agent broadcasting a
+  question that wakes the others). `timeout`: hard kill (default 2 ×
+  `lease_seconds`); the claim lease then expires and the bus re-offers.
+
+Then either one decision at a time, or the single watcher:
+
+```
+iab wake <agent> [--dry-run]           # one instance, synchronous
+iab supervise --interval 60            # every launchable roster entry
+```
+
+`iab supervise` runs one thread per agent (a milestone review can last
+hours without blocking the others), takes a **lock in the database** per
+instance (`wake_locks`, leased — no flock, no state file, so two
+supervisors or a timer firing twice cannot double-launch), journals
+`wake` events (`start`, `end`, `refused`) readable with `iab log -a
+<agent>`, and loses nothing if it dies: signals wait in the database.
+Start it from a systemd user timer (`loginctl enable-linger` so it runs
+with no login session, `TimeoutStartSec=0` since the service lasts as long
+as the work), a Windows scheduled task, or a terminal. Bash watchers that
+query the SQLite file directly are retired: they duplicated store logic
+and died with their session.
 
 ## No approval prompt can block the worker
 
 Unattended operation requires that **no human approval can ever stall the
 run** — three independent layers guarantee it:
 
-1. **Auto-approval at the client level** — `codewhale exec --auto`
-   auto-grants every tool call. Verified empirically: commands with no
-   matching exec-policy rule ran, MCP tools answered, and two
-   claim→execute→publish cycles completed with zero human interaction.
-   (The interactive TUI is the opposite: under `--approval-policy auto`
-   its Auto-Review guardian is fail-closed when unavailable — another
-   reason the headless mode is the default.)
-2. **Closed stdin** — the launcher runs `exec --auto … < /dev/null`:
-   if the agent ever tries to elicit user input, it gets EOF and fails
-   fast instead of hanging on a prompt.
-3. **Hard timeout + lease fencing** — the launcher wraps the run in
-   `timeout` (two lease cycles) and the worker prompt forbids asking
-   questions. If a run still hangs, it is killed; the task's lease has
-   already expired, the bus re-offers it (attempts+1), and the next
-   watcher pass relaunches a fresh worker. Nothing on the bus ever waits
-   on a human.
+1. **Auto-approval at the client level** — e.g. `codewhale exec --auto`
+   (verified: MCP tools load in `exec`, claim→execute→publish cycles ran
+   with zero human interaction). Interactive TUIs under an "auto" policy
+   may hit a fail-closed reviewer (codewhale's Auto-Review guardian):
+   prefer the headless mode until that layer is known to work unattended.
+2. **Closed stdin after the prompt** — the launcher writes the prompt and
+   closes stdin: an agent that tries to ask a question gets EOF and fails
+   fast instead of hanging.
+3. **Hard timeout + lease fencing** — `timeout` kills a hung run; the
+   task's lease has expired, the bus re-offers it (attempts+1), the next
+   supervisor pass relaunches a fresh worker.
 
-The worker prompt adds the behavioural layer: the agent must proceed
-with the available context, never ask, and settle blocked work with an
-`ERROR:` publication for the orchestrator to decide.
+The prompt adds the behavioural layer: proceed with the available context,
+never ask, settle blocked work with an `ERROR:` publication.
 
-## The worker prompt (strict template)
+## The built-in prompt (strict template)
 
 ```
-You are the worker agent <NAME> of the inter-agent bus. A task is queued for you.
+You are the worker agent {agent} of the inter-agent bus. A signal is waiting for you:
+{signals}
 
 Strict procedure, in order, nothing else:
-1. Claim the next task by running: <iab> claim <NAME> --lease 10800
-   The JSON reply carries task_id, payload (the complete work order) and attempts.
-   If the reply contains NO_TASK or ERROR, answer "QUEUE EMPTY" and stop immediately.
-2. Read the payload: it is the exact work order (typically a code review on <REPO>).
-3. Execute the work exactly as ordered, with your usual tools (file reads, search,
-   shell). For any bus interaction (state, log, channel), use the <iab> commands.
-4. Write the complete deliverable (report, findings, verdict) to a file, then publish it:
-   <iab> publish <NAME> <task_id> --attempt <N> - < /path/to/file
-   where <N> is the attempt number from the claim. Publish the deliverable itself,
-   not a summary.
+1. Read your directed notifications: {iab} poll {agent}
+   A notification carrying a broadcast_id is a question from a peer: answer it with
+   {iab} notify {agent} <author> "<answer>" --reply-to <broadcast_id>
+   A notification commands you nothing; only a claimed task is work.
+2. Claim the next task: {iab} claim {agent} --lease {lease}
+   If the reply is NO_TASK or ERROR, answer "QUEUE EMPTY" and stop immediately.
+3. Execute the payload exactly as ordered in {cwd}, with your usual tools.
+4. Write the complete deliverable to a file, then publish it:
+   {iab} publish {agent} <task_id> --attempt <N> - < /path/to/file
 5. Answer briefly "TASK <task_id> DONE" (or ERROR: <what blocked you>) and stop.
 
-Forbidden: no channel announcements, no extra tasks, no changes outside the work
-repository, no extra claims.
+Forbidden: no extra tasks, no changes outside {cwd}, no extra claims, never ask a question.
 ```
-
-## Worked implementation (codewhale on Linux/systemd)
-
-Operator-side files (reference layout, adapt paths):
-
-- `~/.local/bin/iab-wake-deepseek.sh` — the watcher: flock guard, queue
-  probe (`SELECT … FROM tasks WHERE agent=… AND status='queued'`), launch
-  `codewhale exec --auto "$(cat <prompt>)"` in the project workspace,
-  log the run. Synchronous: the service lasts as long as the work.
-- `~/.local/bin/iab-worker-run.sh` — the tmux-TUI payload (enhanced
-  variant): reads the prompt file, then
-  `exec codewhale --approval-policy auto -C <repo> -p "$(cat <prompt>)"`
-  inside `tmux new-session -d -s codewhale-worker …`; the watcher polls
-  the task and `tmux kill-session` on settle. Requires the Auto-Review
-  guardian to be functional (see “Why headless-first”).
-- `~/.config/systemd/user/iab-wake.{service,timer}` — timer every 2 min;
-  service `Type=oneshot`, **`TimeoutStartSec=0`** (a milestone review can
-  run for hours), env `XDG_RUNTIME_DIR` + `DBUS_SESSION_BUS_ADDRESS` for
-  the optional desktop notification.
-- Enable **lingering** (`loginctl enable-linger <user>`) so the user
-  manager — and the timer — run even with no login session.
-
-Observability: append-only wake log
-(`~/.local/state/iab-wake-deepseek.log`) — deliberately **silent**: no
-desktop notification, no operator contact. The deliverable itself lives in
-the bus result store.
 
 ## Porting to other clients
 
-Same shape, different launcher:
-
-| Client | Interactive launch in tmux | Auto-approval |
+| Client | `command` | Notes |
 | --- | --- | --- |
-| codewhale | `codewhale -C <repo> -p "<prompt>"` | `--approval-policy auto` |
-| Claude Code | `claude --print` is headless; interactive: `tmux … claude -p "<prompt>"` in a trusted project | `--dangerously-skip-permissions` is NOT recommended — prefer `--permission-mode acceptEdits`/trusted project or the headless fallback |
-| kimi-cli | `tmux … kimi -p "<prompt>"` (client-dependent) | client approval flag or headless fallback |
-
-Always prefer the client's **non-interactive agent mode with
-auto-approvals** (validated: MCP is loaded in `exec` on codewhale); use
-the interactive-in-multiplexer path only when the client's auto-approval
-layer (Auto-Review guardian or equivalent) is known to work unattended,
-and say so in the launch log so a blocked run is traceable.
+| codewhale | `["codewhale", "exec", "--auto", "-"]` | validated end to end |
+| Claude Code | `["claude", "-p", "--permission-mode", "acceptEdits", "-"]` in a trusted project | prefer path 1 for an open session; never `--dangerously-skip-permissions` |
+| kimi-cli | `["kimi", "--print", "--yolo", "-p", "-"]` (client-dependent) | check that the headless mode loads MCP, else the prompt's `iab` CLI calls suffice |
+| ollama / local | `["ollama", "run", "<model>"]` | pair with `iab worker` for pure claim/publish loops |
 
 ## Failure discipline
 
 - A task that cannot be completed is **settled, not abandoned**: the
   agent publishes `ERROR: …`; the orchestrator decides.
-- If the worker session dies before publishing, the lease expires and the
-  bus **re-offers** the task (attempts+1) — the next watcher pass
-  relaunches it.
-- The watcher never touches the task itself: it only launches the agent.
-  Claim/publish authority stays on the bus.
+- If the worker dies before publishing, the lease expires and the bus
+  **re-offers** the task — the next supervisor pass relaunches it.
+- The supervisor never touches the task itself: it only launches the
+  agent. Claim/publish authority stays on the bus.
+- A broadcast or a notification **commands nothing**: the woken agent
+  answers it, and works only on what it claims.

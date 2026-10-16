@@ -211,6 +211,76 @@ specification, ready for third-party development:
   for observability. Channel entries are **not** injected into the model
   payload (context injection is out of scope for this phase).
 
+## Phase 8 — Identity, broadcast, wake-up
+
+Field report of 2026-10-16 ([`AMELIORATIONS-2026-10-16-identite-broadcast-reveil.md`](AMELIORATIONS-2026-10-16-identite-broadcast-reveil.md)):
+four Claude Code sessions shared the single identity `claude` (one
+queue, one presence, one notification cursor), a ghost author went
+unnoticed for six weeks, and a reply sat unread for twenty hours.
+
+### 8a — `harness@workspace` identity and declared model — **shipped**
+
+- **Composed identity**: an agent is an instance `harness@workspace`;
+  the harness comes from the environment, the workspace from
+  `IAB_WORKSPACE` or the launch directory (alias table, enclosing git
+  repository — a submodule keeps its own name —, folder name).
+  `resolve_identity` / `derive_workspace` in the core, `whoami` reports
+  every source. Additive columns `agents.harness/workspace/cwd`,
+  backfilled for legacy rows.
+- **Addressing**: `resolve_target` — exact name, or a bare harness only
+  while it designates one instance; ambiguity refused with the
+  candidates (a legacy bare row counts); wildcards reserved to
+  broadcast. Applied to push, claim, notify, poll, wait, heartbeat and
+  cursor reads.
+- **Registration discipline**: unknown authors and readers refused
+  (`announce`, `notify`, `poll`, `heartbeat`, cursor `read_channel`,
+  `claim_task`, `wait_task`); a client named by its environment is
+  auto-registered on first tool call (`touch_identity`, journaled).
+- **`rename_agent`** (`iab rename`): queue, results, mailbox, cursors,
+  presence and journal follow in one transaction — the migration path
+  for legacy bare names.
+- **Declared model**: `presence.model` (additive), set by
+  `register_agent(model=)` / `heartbeat(model=)`, echoed from `IAB_MODEL`
+  only into an empty slot; shown by `list_presence`, `get_system_state`;
+  `iab worker --model`. Never guessed from the harness (invariant 1).
+- Small fixes: `read_channel` cursor name normalized; `wait_for_task`
+  keeps one connection for the whole wait.
+
+### 8b — broadcast — **shipped**
+
+- `broadcast(author, message, scope, alive_only, wake)`: one channel
+  entry (topic `broadcast`, seq = id) plus one notification per
+  recipient in the same transaction (additive columns
+  `notifications.broadcast_id/reply_to/wake`); recipients read with
+  their usual `poll()`. Scopes `*`, `harness@*`, `*@workspace`,
+  `model:<glob>`, comma-separated or JSON list — one unresolvable entry
+  refuses the whole fan-out. Answer: `recipients`, `delivered` (alive),
+  `asleep`, `to_wake`.
+- `notify(reply_to=, wake=)` and `replies(broadcast_id)` (pure read);
+  `iab broadcast`, `iab replies`, `iab notify --reply-to --wake`.
+- Still data, never orders: the skills say so; work goes through
+  `push_task`.
+
+### 8c — wake-up — **shipped**
+
+- **Core**: `pending_signals` (queued tasks, unread notifications, wake
+  flags, broadcast ids — no cursor moves), `wait_signal(kinds)`
+  generalising `wait_for_task`, `wake_locks` table with leased
+  `acquire/renew/release_wake_lock`, `record_wake` / `wake_count`
+  (hourly budget from the `wake` events).
+- **Driver** `wake.py`: `iab wake <agent> [--dry-run]` reads the
+  `launch` block of the instance's roster entry (or its harness's),
+  decides by policy (task always; notification/broadcast only if flagged
+  by the sender and allowed by `wake_on`), checks `max_wakes_per_hour`,
+  takes the database lock, runs the command in `cwd` with the prompt on
+  stdin (or `{prompt_file}`), kills at `timeout`, journals start/end.
+  `iab supervise [--interval] [--once]`: one watcher, one thread per
+  agent. Dry run never journals.
+- **MCP**: `wait_signal`, `pending_signals`; **CLI**: `iab watch --on
+  task|notification|any`, `iab signals`, `iab wake`, `iab supervise`.
+- **Skill** `worker-wake` rewritten around the roster launcher and the
+  open-session path (`iab watch --on any` as a background task).
+
 ## Global acceptance criterion
 
 From a fresh Claude Code session, with no project configuration: push a

@@ -360,6 +360,7 @@ with tempfile.TemporaryDirectory() as tmp:
     # Naming migration: legacy ORCHESTRATOR_DB honored, IAB_DB wins over it.
     os.environ["ORCHESTRATOR_DB"] = str(Path(tmp) / "legacy.db")
     check("IAB_DB wins over the legacy variable", store.db_path().name == "bus.db")
+
     del os.environ["IAB_DB"]
     check("legacy ORCHESTRATOR_DB honored when IAB_DB is unset",
           store.db_path().name == "legacy.db")
@@ -553,7 +554,8 @@ with tempfile.TemporaryDirectory() as tmp:
     # Cross-process: a notification written by another process is polled here.
     env8 = os.environ.copy()
     env8["PYTHONPATH"] = str(HERE)
-    probe8 = "import store; print(store.notify('child', 'delta', 'from-child'))"
+    probe8 = ("import store; store.register_agent('child', 'other process'); "
+              "print(store.notify('child', 'delta', 'from-child'))")
     out = subprocess.run([sys.executable, "-c", probe8], env=env8,
                          capture_output=True, text=True).stdout.strip()
     check("another process can notify", out.startswith("{"))
@@ -599,7 +601,453 @@ with tempfile.TemporaryDirectory() as tmp:
           woken == ["wake-3"])
     check("the wake happens before the timeout, not at it", elapsed < 10)
 
+
+    # ---- Phase 8a: composed identity harness@workspace, declared model.
+    # Workspace derivation: enclosing git repository (directory or file, so
+    # a submodule yields its own name), bare folder, alias table, case.
+    ws_root = Path(tmp) / "ws"
+    (ws_root / "Home Lab" / ".git").mkdir(parents=True)
+    (ws_root / "Home Lab" / "infra").mkdir()
+    (ws_root / "Home Lab" / "infra" / ".git").write_text("gitdir: ../.git/modules/infra")
+    (ws_root / "Home Lab" / "docs" / "deep").mkdir(parents=True)
+    (ws_root / "Loose").mkdir()
+    check("workspace = name of the enclosing git repository, slugified",
+          store.derive_workspace(ws_root / "Home Lab" / "docs" / "deep") == ("home-lab", "git"))
+    check("a submodule (.git file) yields its own name, not the superproject's",
+          store.derive_workspace(ws_root / "Home Lab" / "infra") == ("infra", "git"))
+    check("without a repository, the folder's own name",
+          store.derive_workspace(ws_root / "Loose") == ("loose", "cwd"))
+    aliases = Path(tmp) / "workspaces.json"
+    aliases.write_text(json.dumps({str(ws_root / "Home Lab"): "homelab",
+                                   str(ws_root / "Home Lab" / "infra"): "Infra!",
+                                   str(ws_root): "poste"}))
+    os.environ["IAB_WORKSPACES"] = str(aliases)
+    check("alias table wins, longest prefix first, value slugified",
+          store.derive_workspace(ws_root / "Home Lab" / "infra" ) == ("infra", "alias")
+          and store.derive_workspace(ws_root / "Home Lab" / "docs") == ("homelab", "alias"))
+    check("an alias on a parent folder applies to loose folders beneath it",
+          store.derive_workspace(ws_root / "Loose") == ("poste", "alias"))
+    (ws_root / "Other Repo" / ".git").mkdir(parents=True)
+    check("…but never swallows a repository beneath it",
+          store.derive_workspace(ws_root / "Other Repo") == ("other-repo", "git"))
+    aliases.write_text(json.dumps({str(ws_root / "Home Lab"): "homelab"}))
+    check("a repository alias stops at a submodule boundary",
+          store.derive_workspace(ws_root / "Home Lab" / "infra") == ("infra", "git"))
+    del os.environ["IAB_WORKSPACES"]
+
+    ident = store.resolve_identity({"IAB_AGENT_NAME": "Claude"}, ws_root / "Home Lab" / "docs")
+    check("identity = harness from env + workspace from the launch directory",
+          ident["agent_name"] == "claude@home-lab" and ident["workspace_source"] == "git"
+          and ident["model"] is None, json.dumps(ident))
+    ident = store.resolve_identity({"IAB_AGENT_NAME": "kimi", "IAB_WORKSPACE": "Brother",
+                                    "IAB_MODEL": "kimi-k2"}, ws_root / "Loose")
+    check("IAB_WORKSPACE overrides the derivation; IAB_MODEL is echoed",
+          ident["agent_name"] == "kimi@brother" and ident["workspace_source"] == "env"
+          and ident["model"] == "kimi-k2", json.dumps(ident))
+    ident = store.resolve_identity({"IAB_AGENT_NAME": "claude@conciliateur"}, ws_root / "Loose")
+    check("a full name in the env wins over the directory",
+          ident["agent_name"] == "claude@conciliateur" and ident["workspace_source"] == "name")
+    ident = store.resolve_identity({}, ws_root / "Loose")
+    check("no harness in the env → source none, no name",
+          ident["source"] == "none" and ident["agent_name"] is None)
+
+    # Registration and addressing.
+    check("an invalid composed name is refused",
+          store.register_agent("claude@home lab").startswith("ERROR")
+          and store.register_agent("@homelab").startswith("ERROR"))
+    store.register_agent("claude@homelab", "HomeLab session", cwd="/x/HomeLab",
+                         model="claude-fable-5-1")
+    store.register_agent("claude@leadsage", "LeadSage session")
+    store.register_agent("kimi@brother", "Kimi on Brother")
+    pres = {p["agent"]: p for p in json.loads(store.list_presence())}
+    check("list_presence shows harness, workspace, cwd and declared model",
+          pres["claude@homelab"]["harness"] == "claude"
+          and pres["claude@homelab"]["workspace"] == "homelab"
+          and pres["claude@homelab"]["cwd"] == "/x/HomeLab"
+          and pres["claude@homelab"]["model"] == "claude-fable-5-1"
+          and pres["kimi@brother"]["model"] is None, json.dumps(pres["claude@homelab"]))
+    r = store.notify("kimi@brother", "claude", "which one of you?")
+    check("a bare harness with several instances is refused with the candidates",
+          r.startswith("ERROR") and "claude@homelab" in r and "claude@leadsage" in r, r)
+    r = store.notify("claude@homelab", "kimi", "single instance")
+    check("a bare harness with one instance resolves to it", r.startswith("{"), r)
+    check("…and lands in that instance's mailbox",
+          any(m["message"] == "single instance" for m in json.loads(store.poll("kimi@brother"))))
+    check("poll also accepts the bare harness when unique",
+          store.poll("kimi") == "[]")
+    check("a wildcard is refused as a target (reserved to broadcast)",
+          store.notify("kimi@brother", "claude@*", "x").startswith("ERROR")
+          and store.push_task("*@homelab", "t-bc", "x").startswith("ERROR"))
+    check("push_task resolves a bare harness too",
+          store.push_task("kimi", "t-kimi", "x").startswith("OK")
+          and json.loads(store.claim_task("kimi@brother"))["task_id"] == "t-kimi")
+    check("an unregistered author is refused on announce and notify",
+          store.announce("nobody", "alerts", "x").startswith("ERROR")
+          and store.notify("nobody", "kimi@brother", "x").startswith("ERROR"))
+    check("polling an unregistered name is an error, not an empty list",
+          store.poll("claude-homelab").startswith("ERROR"))
+    check("a cursor read of the channel by an unregistered name is refused",
+          store.read_channel(agent="claude-homelab").startswith("ERROR"))
+    check("claiming for an unregistered name is an error",
+          store.claim_task("claude-homelab").startswith("ERROR"))
+    check("wait_for_task refuses an unregistered name",
+          store.wait_for_task("claude-homelab", timeout_s=0.2).startswith("ERROR"))
+    check("two instances of one harness have separate queues",
+          store.push_task("claude@homelab", "t-hl", "x").startswith("OK")
+          and store.claim_task("claude@leadsage") == "NO_TASK"
+          and json.loads(store.claim_task("claude@homelab"))["task_id"] == "t-hl")
+    store.notify("kimi@brother", "claude@homelab", "for homelab only")
+    check("two instances of one harness have separate notification cursors",
+          json.loads(store.poll("claude@leadsage")) == []
+          and any(m["message"] == "for homelab only"
+                  for m in json.loads(store.poll("claude@homelab"))))
+
+    # Model: session state in the presence row.
+    store.touch_presence("claude@homelab", model="from-env")
+    check("touch_presence never overrides a declared model",
+          json.loads(store.heartbeat("claude@homelab"))["model"] == "claude-fable-5-1")
+    store.touch_presence("claude@leadsage", model="from-env")
+    check("touch_presence fills an empty model slot",
+          json.loads(store.heartbeat("claude@leadsage"))["model"] == "from-env")
+    check("heartbeat changes the declared model",
+          json.loads(store.heartbeat("claude@leadsage", model="claude-opus-5-5"))["model"]
+          == "claude-opus-5-5")
+    check("heartbeat for an unregistered name is refused",
+          store.heartbeat("ghost@nowhere").startswith("ERROR"))
+    state = json.loads(store.get_system_state())
+    check("get_system_state exposes instance fields and models",
+          state["agents"]["claude@homelab"]["workspace"] == "homelab"
+          and state["models"]["claude@leadsage"] == "claude-opus-5-5")
+
+    # Piggyback of a connected client: auto-registration under the composed name.
+    store.touch_identity({"agent_name": "codewhale@leadsage", "cwd": "/x/LeadSage",
+                          "model": "deepseek-v4"})
+    pres = {p["agent"]: p for p in json.loads(store.list_presence())}
+    check("touch_identity registers an unknown instance with cwd and model echo",
+          pres["codewhale@leadsage"]["cwd"] == "/x/LeadSage"
+          and pres["codewhale@leadsage"]["model"] == "deepseek-v4"
+          and pres["codewhale@leadsage"]["status"] == "alive")
+    check("the auto-registration is journaled",
+          any(e["event"] == "register" and "auto" in e["detail"]
+              for e in json.loads(store.get_events(agent="codewhale@leadsage"))))
+
+    # rename_agent: the whole history follows, in one transaction.
+    store.register_agent("legacy", "old bare name")
+    store.push_task("legacy", "t-leg-1", "x")
+    json.loads(store.claim_task("legacy"))
+    store.publish_result("legacy", "t-leg-1", "done")
+    store.push_task("legacy", "t-leg-2", "y")
+    store.notify("kimi@brother", "legacy", "to legacy")
+    store.announce("legacy", "presence", "hello")
+    store.heartbeat("legacy", model="m1")
+    check("rename refuses an invalid or existing new name",
+          store.rename_agent("legacy", "claude@homelab").startswith("ERROR")
+          and store.rename_agent("legacy", "bad name").startswith("ERROR")
+          and store.rename_agent("ghost", "x@y").startswith("ERROR"))
+    check("rename succeeds", store.rename_agent("legacy", "claude@conciliateur").startswith("OK"))
+    check("the old name is gone", store.poll("legacy").startswith("ERROR"))
+    check("the queue followed the rename",
+          json.loads(store.claim_task("claude@conciliateur"))["task_id"] == "t-leg-2")
+    check("the mailbox followed the rename",
+          any(m["message"] == "to legacy" for m in json.loads(store.poll("claude@conciliateur"))))
+    check("results, channel and presence followed the rename",
+          json.loads(store.read_result("t-leg-1"))["author"] == "claude@conciliateur"
+          and any(e["author"] == "claude@conciliateur"
+                  for e in json.loads(store.read_channel(since_seq=0, topic="presence")))
+          and json.loads(store.heartbeat("claude@conciliateur"))["model"] == "m1")
+    check("the rename is journaled",
+          any(e["event"] == "rename" and e["detail"] == "was legacy"
+              for e in json.loads(store.get_events(agent="claude@conciliateur"))))
+
+    # Legacy database (pre-8a schema) opens and migrates additively.
+    legacy_db = Path(tmp) / "legacy.db"
+    raw = sqlite3.connect(legacy_db)
+    raw.executescript(
+        "CREATE TABLE agents(name TEXT PRIMARY KEY, description TEXT NOT NULL DEFAULT '', "
+        "registered_at TEXT NOT NULL);"
+        "INSERT INTO agents VALUES('claude', 'old row', '2026-08-25T05:23:06+00:00');"
+        "INSERT INTO agents VALUES('kimi@brother', 'composed row', '2026-10-01T00:00:00+00:00');"
+        "CREATE TABLE presence(agent TEXT PRIMARY KEY, last_seen TEXT NOT NULL, "
+        "ttl_seconds INTEGER NOT NULL, capabilities TEXT NOT NULL DEFAULT '{}');"
+        "INSERT INTO presence VALUES('claude', '2026-10-16T05:00:00+00:00', 7200, '{}');"
+    )
+    raw.close()
+    saved_db = os.environ["IAB_DB"]
+    os.environ["IAB_DB"] = str(legacy_db)
+    pres = {p["agent"]: p for p in json.loads(store.list_presence())}
+    check("a pre-8a database is migrated: harness backfilled from the name",
+          pres["claude"]["harness"] == "claude" and pres["claude"]["workspace"] is None
+          and pres["kimi@brother"]["harness"] == "kimi"
+          and pres["kimi@brother"]["workspace"] == "brother"
+          and pres["claude"]["model"] is None, json.dumps(pres))
+    check("a legacy bare name stays addressable while it is the only instance",
+          store.notify("kimi@brother", "claude", "still works").startswith("{"))
+    store.register_agent("claude@homelab", "new instance")
+    r = store.notify("kimi@brother", "claude", "now ambiguous")
+    check("…and becomes ambiguous once a composed instance appears",
+          r.startswith("ERROR") and "claude@homelab" in r, r)
+    check("the error names the legacy row and the way out (rename)",
+          "rename_agent" in r and store.poll("claude").startswith("ERROR"))
+    store.rename_agent("claude", "claude@conciliateur")
+    check("after the rename, the legacy mailbox is reachable under its new name",
+          json.loads(store.poll("claude@conciliateur"))[0]["message"] == "still works"
+          and store.notify("kimi@brother", "claude", "x").startswith("ERROR"))
+    os.environ["IAB_DB"] = saved_db
+
+    # CLI: whoami carries the composed identity; register/rename/heartbeat --model.
+    env_cli = os.environ.copy()
+    env_cli.update({"IAB_AGENT_NAME": "opencode", "IAB_MODEL": "qwen3-coder"})
+    out = subprocess.run(cli + ["whoami"], env=env_cli, cwd=ws_root / "Loose",
+                         capture_output=True, text=True)
+    who = json.loads(out.stdout)
+    check("cli whoami composes harness@workspace from env and cwd and echoes the model",
+          who["agent_name"] == "opencode@loose" and who["model"] == "qwen3-coder"
+          and who["workspace_source"] == "cwd", out.stdout + out.stderr)
+    out = subprocess.run(cli + ["register", "opencode@sindri", "--model", "qwen3", "--cwd", "/srv"],
+                         env=os.environ.copy(), capture_output=True, text=True)
+    check("cli register accepts --model and --cwd", out.stdout.startswith("OK"), out.stdout)
+    out = subprocess.run(cli + ["rename", "opencode@sindri", "opencode@vm"],
+                         env=os.environ.copy(), capture_output=True, text=True)
+    check("cli rename works", out.stdout.startswith("OK"), out.stdout + out.stderr)
+    out = subprocess.run(cli + ["heartbeat", "opencode@vm", "--model", "qwen3.6"],
+                         env=os.environ.copy(), capture_output=True, text=True)
+    check("cli heartbeat --model declares the model",
+          json.loads(out.stdout)["model"] == "qwen3.6", out.stdout + out.stderr)
+
+
     store._now = real_now
+
+    # ---- Phase 8b: broadcast — fan-out into the existing mailboxes.
+    # Fresh instances for the scenario (the earlier ones carry history).
+    for n in ("claude@homelab", "claude@leadsage", "kimi@brother", "codewhale@leadsage"):
+        store.register_agent(n, "8b")
+    store.register_agent("opencode@homelab", "8b", model="qwen3-coder-next")
+    store.heartbeat("claude@homelab", ttl_seconds=600)
+    store.heartbeat("kimi@brother", ttl_seconds=600)
+    store.heartbeat("opencode@homelab", ttl_seconds=600, model="qwen3-coder-next")
+    for n in ("claude@leadsage", "codewhale@leadsage", "claude@conciliateur", "opencode@vm"):
+        store.heartbeat(n, ttl_seconds=0)  # seen, but already expired: asleep
+    # drain the mailboxes so the scenario reads only its own messages
+    for n in ("claude@homelab", "claude@leadsage", "kimi@brother", "codewhale@leadsage",
+              "opencode@homelab"):
+        store.poll(n)
+
+    r = store.broadcast("nobody", "x")
+    check("broadcast refuses an unregistered author", r.startswith("ERROR"), r)
+    r = store.broadcast("kimi@brother", "x", scope="*@nowhere")
+    check("broadcast refuses an empty scope", r.startswith("ERROR"), r)
+    r = store.broadcast("kimi@brother", "x", scope="claude@homelab,ghost@x")
+    check("one unresolvable entry refuses the whole broadcast (atomic)",
+          r.startswith("ERROR")
+          and not any("x" == m["message"] for m in json.loads(store.poll("claude@homelab"))), r)
+
+    b = json.loads(store.broadcast("kimi@brother", "who touched roles/mail_print?",
+                                   scope="claude@*"))
+    check("harness scope reaches every instance of the harness",
+          set(b["recipients"]) == {"claude@homelab", "claude@leadsage", "claude@conciliateur"},
+          json.dumps(b))
+    check("delivered/asleep split follows presence",
+          "claude@homelab" in b["delivered"] and "claude@leadsage" in b["asleep"]
+          and b["to_wake"] == [], json.dumps(b))
+    inbox = json.loads(store.poll("claude@homelab"))
+    check("the recipient reads the broadcast with its usual poll, tagged with the id",
+          any(m["broadcast_id"] == b["broadcast_id"]
+              and m["message"] == "who touched roles/mail_print?" for m in inbox),
+          json.dumps(inbox))
+    chan = json.loads(store.read_channel(since_seq=b["broadcast_id"] - 1, topic="broadcast"))
+    check("the broadcast leaves a public trace on the channel under its id",
+          chan and chan[0]["seq"] == b["broadcast_id"] and chan[0]["author"] == "kimi@brother")
+    check("…and is journaled", any(e["event"] == "broadcast" and f"id {b['broadcast_id']}" in e["detail"]
+                                   for e in json.loads(store.get_events(agent="kimi@brother"))))
+
+    r = store.notify("claude@homelab", "kimi@brother", "me, on 10/15", reply_to=999999)
+    check("a reply to a non-broadcast id is refused", r.startswith("ERROR"), r)
+    store.notify("claude@homelab", "kimi@brother", "me, on 10/15", reply_to=b["broadcast_id"])
+    store.notify("claude@leadsage", "kimi@brother", "not me", reply_to=b["broadcast_id"])
+    store.notify("claude@leadsage", "kimi@brother", "unrelated note")
+    rep = json.loads(store.replies(b["broadcast_id"]))
+    check("replies collects only the answers to that broadcast, oldest first",
+          [m["message"] for m in rep] == ["me, on 10/15", "not me"], json.dumps(rep))
+    kimi_inbox = json.loads(store.poll("kimi@brother"))
+    check("replies also arrive in the asker's mailbox with reply_to set",
+          sum(1 for m in kimi_inbox if m["reply_to"] == b["broadcast_id"]) == 2)
+    check("replies refuses a non-broadcast id", store.replies(1).startswith("ERROR"))
+
+    b2 = json.loads(store.broadcast("claude@homelab", "freeze at 07:45", scope="*@homelab"))
+    check("workspace scope reaches every agent of the workspace, author included",
+          set(b2["recipients"]) == {"claude@homelab", "opencode@homelab"}, json.dumps(b2))
+    b3 = json.loads(store.broadcast("claude@homelab", "local models only", scope="model:qwen3-coder*"))
+    check("model scope matches declared models by glob",
+          b3["recipients"] == ["opencode@homelab"], json.dumps(b3))
+    b4 = json.loads(store.broadcast("claude@homelab", "alive?", scope="*", alive_only=True))
+    check("alive_only drops asleep recipients",
+          set(b4["recipients"]) <= {"claude@homelab", "kimi@brother", "opencode@homelab"}
+          and "claude@leadsage" not in b4["recipients"], json.dumps(b4))
+    b5 = json.loads(store.broadcast("claude@homelab", "wake up", scope="claude@leadsage,codewhale",
+                                    wake=True))
+    check("list scope resolves bare harnesses and marks asleep recipients to wake",
+          set(b5["recipients"]) == {"claude@leadsage", "codewhale@leadsage"}
+          and set(b5["to_wake"]) == {"claude@leadsage", "codewhale@leadsage"}, json.dumps(b5))
+    check("the wake flag travels with the notification",
+          any(m["wake"] and m["broadcast_id"] == b5["broadcast_id"]
+              for m in json.loads(store.poll("codewhale@leadsage"))))
+    check("a JSON list scope is accepted too",
+          json.loads(store.broadcast("kimi@brother", "x", scope='["claude@homelab"]'))["recipients"]
+          == ["claude@homelab"])
+    check("broadcast caps the message at 16 KiB",
+          store.broadcast("kimi@brother", "x" * (16 * 1024 + 1)).startswith("ERROR"))
+
+    out = subprocess.run(cli + ["broadcast", "kimi@brother", "claude@*", "-"],
+                         input="via cli", env=os.environ.copy(), capture_output=True, text=True)
+    check("cli broadcast reads the message from stdin and returns the id",
+          "broadcast_id" in out.stdout, out.stdout + out.stderr)
+    bid = json.loads(out.stdout)["broadcast_id"]
+    out = subprocess.run(cli + ["notify", "claude@homelab", "kimi@brother", "cli reply",
+                                "--reply-to", str(bid)],
+                         env=os.environ.copy(), capture_output=True, text=True)
+    out2 = subprocess.run(cli + ["replies", str(bid)], env=os.environ.copy(),
+                          capture_output=True, text=True)
+    check("cli notify --reply-to and cli replies round-trip",
+          out.stdout.startswith("{") and json.loads(out2.stdout)[0]["message"] == "cli reply",
+          out.stdout + out2.stdout + out.stderr + out2.stderr)
+
+    # ---- Phase 8c: signals, generalised wait, wake locks, wake driver.
+    import wake
+    store.register_agent("zz@wake", "8c")
+    store.register_agent("yy@wake", "8c peer")
+    store.poll("zz@wake")
+    sig = json.loads(store.pending_signals("zz@wake"))
+    check("pending_signals of a quiet instance is empty",
+          sig["tasks"] == [] and sig["notifications"] == 0 and sig["broadcasts"] == [], json.dumps(sig))
+    check("pending_signals refuses an unregistered name",
+          store.pending_signals("nobody@here").startswith("ERROR"))
+    store.notify("yy@wake", "zz@wake", "ping")
+    bw = json.loads(store.broadcast("yy@wake", "all hands", scope="zz@wake", wake=True))
+    sig = json.loads(store.pending_signals("zz@wake"))
+    check("pending_signals counts unread notifications, flags and broadcast ids without moving the cursor",
+          sig["notifications"] == 2 and sig["wake_notifications"] == 0
+          and sig["wake_broadcasts"] == [bw["broadcast_id"]]
+          and json.loads(store.pending_signals("zz@wake"))["notifications"] == 2, json.dumps(sig))
+    w = json.loads(store.wait_signal("zz@wake", "notification", timeout_s=5))
+    check("wait_signal returns at once when a notification waits",
+          w["signalled"] and w["notifications"] == 2, json.dumps(w))
+    w = json.loads(store.wait_signal("zz@wake", "task", timeout_s=0.3, interval_s=0.1))
+    check("wait_signal on tasks only ignores the notifications and times out",
+          w["signalled"] is False and w["tasks"] == [], json.dumps(w))
+    check("wait_signal refuses an unknown kind",
+          store.wait_signal("zz@wake", "carrier-pigeon", timeout_s=0.1).startswith("ERROR"))
+    store.poll("zz@wake")  # drain
+    child = subprocess.Popen(
+        [sys.executable, "-c",
+         "import time, store; time.sleep(1.0); print(store.notify('yy@wake', 'zz@wake', 'late'))"],
+        env=env9, stdout=subprocess.PIPE, text=True)
+    t0 = time.monotonic()
+    w = json.loads(store.wait_signal("zz@wake", "any", timeout_s=15, interval_s=0.2))
+    child.wait(timeout=15)
+    check("wait_signal wakes on a notification from another process, before the timeout",
+          w["signalled"] and w["notifications"] == 1 and time.monotonic() - t0 < 10, json.dumps(w))
+
+    lock = store.acquire_wake_lock("zz@wake", lease_seconds=60, holder="test")
+    check("wake lock acquired", lock.startswith("{"), lock)
+    token = json.loads(lock)["token"]
+    check("a second acquisition is BUSY while the lease holds",
+          store.acquire_wake_lock("zz@wake", lease_seconds=60) == "BUSY")
+    check("renew with a wrong token is refused",
+          store.renew_wake_lock("zz@wake", "nope").startswith("ERROR")
+          and store.renew_wake_lock("zz@wake", token) == "OK")
+    check("release frees the lock", store.release_wake_lock("zz@wake", token) == "OK"
+          and store.acquire_wake_lock("zz@wake", lease_seconds=0).startswith("{"))
+    lock = store.acquire_wake_lock("zz@wake", lease_seconds=60)
+    check("an expired lock is free for the taker", lock.startswith("{"), lock)
+    store.release_wake_lock("zz@wake", json.loads(lock)["token"])
+
+    # Wake driver against a dummy launcher that records the prompt it got.
+    got = Path(tmp) / "prompt-received.txt"
+    recorder = ("import sys; d = sys.stdin.read(); open(sys.argv[1], 'w', encoding='utf-8')"
+                ".write(d); print('launched')")
+    roster_w = Path(tmp) / "roster-wake.json"
+    roster_w.write_text(json.dumps({"agents": [
+        {"name": "zz@wake", "launch": {
+            "cwd": tmp, "command": [sys.executable, "-c", recorder, str(got)],
+            "wake_on": ["task", "broadcast"], "max_wakes_per_hour": 2, "lease_seconds": 300}},
+        {"name": "yy", "launch": {"cwd": tmp, "command": [sys.executable, "-c", "raise SystemExit(3)"]}},
+        {"name": "nolaunch@wake"},
+    ]}), encoding="utf-8")
+    roster_list = json.loads(roster_w.read_text())["agents"]
+    store.poll("zz@wake")
+    check("no signal → NO_SIGNAL, nothing launched",
+          wake.wake_agent("zz@wake", roster_list) == "NO_SIGNAL" and not got.exists())
+    store.register_agent("nolaunch@wake", "8c")
+    store.push_task("nolaunch@wake", "t-nl", "x")
+    check("an instance without a launch block is refused loudly",
+          wake.wake_agent("nolaunch@wake", roster_list).startswith("ERROR"))
+    store.push_task("zz@wake", "t-wake-1", "do it")
+    r = wake.wake_agent("zz@wake", roster_list, dry_run=True)
+    check("dry run states the decision and launches nothing",
+          r.startswith("DRY_RUN") and "t-wake-1" in r and not got.exists(), r)
+    r = wake.wake_agent("zz@wake", roster_list)
+    check("a queued task wakes the agent", r.startswith("OK"), r)
+    prompt = got.read_text(encoding="utf-8")
+    check("the prompt reached the launcher on stdin, instantiated for the instance",
+          "claim zz@wake --lease 300" in prompt and "t-wake-1" in prompt and tmp in prompt,
+          prompt[:200])
+    ev = [e["detail"] for e in json.loads(store.get_events(agent="zz@wake")) if e["event"] == "wake"]
+    check("start and end are journaled",
+          any(d.startswith("start: 1 queued task") for d in ev)
+          and any(d.startswith("end: exit 0") for d in ev), str(ev))
+    store.cancel_task("t-wake-1")
+    got.unlink()
+    store.notify("yy@wake", "zz@wake", "fyi")
+    check("a notification without the wake flag does not wake", wake.wake_agent("zz@wake", roster_list) == "NO_SIGNAL")
+    store.notify("yy@wake", "zz@wake", "please wake", wake=True)
+    check("a flagged notification does not wake when the roster does not allow notifications",
+          wake.wake_agent("zz@wake", roster_list) == "NO_SIGNAL")
+    store.broadcast("yy@wake", "status?", scope="zz@wake", wake=True)
+    r = wake.wake_agent("zz@wake", roster_list)
+    check("a flagged broadcast wakes when the roster allows broadcasts",
+          r.startswith("OK") and got.exists(), r)
+    store.poll("zz@wake")
+    store.push_task("zz@wake", "t-wake-3", "third")
+    r = wake.wake_agent("zz@wake", roster_list)
+    check("the hourly budget refuses the third wake (loop breaker)", r.startswith("REFUSED"), r)
+    check("the refusal is journaled",
+          any(e["event"] == "wake" and e["detail"].startswith("refused: budget")
+              for e in json.loads(store.get_events(agent="zz@wake"))))
+    store.cancel_task("t-wake-3")
+    store.register_agent("yy@wake", "8c peer")
+    store.push_task("yy@wake", "t-yy", "x")
+    r = wake.wake_agent("yy@wake", roster_list)
+    check("the harness entry serves an instance without its own entry, and a failing launcher is an ERROR",
+          r.startswith("ERROR") and "exited 3" in r, r)
+    held_lock = store.acquire_wake_lock("yy@wake", 60)
+    check("the lock is released after a failed launch", held_lock.startswith("{"), held_lock)
+    held = json.loads(held_lock)["token"]
+    check("a held lock makes wake BUSY", wake.wake_agent("yy@wake", roster_list) == "BUSY")
+    store.release_wake_lock("yy@wake", held)
+    store.cancel_task("t-yy")
+    env_w = os.environ.copy()
+    env_w["IAB_ROSTER"] = str(roster_w)
+    store.push_task("yy@wake", "t-cli", "x")
+    out = subprocess.run(cli + ["wake", "yy@wake", "--dry-run"], env=env_w,
+                         capture_output=True, text=True)
+    check("cli wake --dry-run reads the roster from IAB_ROSTER",
+          out.stdout.startswith("DRY_RUN") and "t-cli" in out.stdout, out.stdout + out.stderr)
+    check("a dry run over an exhausted budget reports it without journaling",
+          wake.wake_agent("zz@wake", roster_list, dry_run=True) == "NO_SIGNAL")
+    out = subprocess.run(cli + ["signals", "yy@wake"], env=env_w, capture_output=True, text=True)
+    check("cli signals shows the queued task", "t-cli" in out.stdout, out.stdout + out.stderr)
+    out = subprocess.run(cli + ["watch", "yy@wake", "--on", "any", "--timeout", "1"],
+                         env=env_w, capture_output=True, text=True)
+    check("cli watch --on any prints the JSON snapshot",
+          json.loads(out.stdout)["signalled"] is True, out.stdout + out.stderr)
+    out = subprocess.run(cli + ["supervise", "--once", "--dry-run"], env=env_w,
+                         capture_output=True, text=True)
+    check("cli supervise --once --dry-run covers every launchable entry",
+          out.returncode == 0 and "supervising zz@wake, yy" in out.stderr
+          and "yy: DRY_RUN" in out.stderr, out.stdout + out.stderr)
+    store.cancel_task("t-cli")
+
+
     del os.environ["IAB_DB"]
 
 if fail:

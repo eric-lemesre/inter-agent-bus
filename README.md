@@ -38,7 +38,7 @@ never from a working tree:
 ```bash
 python3 -m venv ~/.local/venvs/inter-agent-bus
 ~/.local/venvs/inter-agent-bus/bin/pip install \
-  'inter-agent-bus[server] @ git+https://github.com/eric-lemesre/inter-agent-bus@v0.10.0'
+  'inter-agent-bus[server] @ git+https://github.com/eric-lemesre/inter-agent-bus@v0.12.0'
 ~/.local/venvs/inter-agent-bus/bin/iab install --scope user
 ```
 
@@ -48,9 +48,41 @@ no repository path involved. A newly added server only loads in the
 **next** session: reopen, then call `whoami()` (it returns the
 identity, the resolved bus database and how it was chosen). To
 upgrade: `pip install -U` with the next tag, then reopen sessions.
-Caveat of a user-scope install: every Claude Code session shares the
-baked identity (`--agent-name` to change it, `--print` to inspect the
-JSON without applying, `--scope project|local` for narrower scopes).
+The baked value is the **harness** (`--agent-name`, default `claude`);
+each session completes it with the workspace it is launched in (see
+*Identity* below), so one user-scope install serves every project
+(`--print` to inspect the JSON without applying, `--scope project|local`
+for narrower scopes, `--agent-name harness@workspace` to pin both).
+
+### Identity: one instance = `harness@workspace`
+
+An agent on the bus is an **instance**: a harness (the client carrying
+the model — `claude`, `kimi`, `codewhale`, `opencode`…) on a workspace
+(the repository or folder it works in — `homelab`, `infra`…), written
+`harness@workspace`. Queue, presence and notification cursors are per
+instance, so two Claude Code sessions on two repositories no longer
+share one mailbox. `whoami()` tells how the name was built:
+
+- harness: `IAB_AGENT_NAME` (legacy `ORCHESTRATOR_AGENT_NAME` honored);
+  a value already holding an `@` is the full name;
+- workspace: `IAB_WORKSPACE` if set, else derived from the server's
+  launch directory — operator alias table first (`IAB_WORKSPACES`, a
+  JSON `{path: name}`, default `<data dir>/workspaces.json`, longest
+  prefix wins), then the name of the enclosing git repository (a
+  submodule yields its own name), else the folder's own name;
+- model: `IAB_MODEL` is echoed; an instance declares the real one with
+  `register_agent(..., model=)` or `heartbeat(..., model=)` — session
+  state, kept in the presence row, never guessed by the plugin.
+
+A connected client named by its environment is **registered on its
+first tool call** (description empty, launch directory recorded). A bare
+harness is accepted as a target only while it designates a single
+instance; otherwise the bus refuses and lists the candidates — a legacy
+bare row counts as one, `rename_agent` (CLI `iab rename`) moves it, with
+its queue, results, mailbox, cursors and journal, to its composed name.
+Authors and readers must be registered: `announce`, `notify`, `poll`,
+`heartbeat` and cursor reads refuse an unknown name instead of returning
+an empty, misleading result.
 
 ### Other agent clients (Kimi, DeepSeek, …)
 
@@ -88,14 +120,84 @@ project key — a mismatch is diagnosable in one call.
 
 ## MCP tools
 
-`whoami` · `register_agent` · `push_task` · `claim_task` (head of
+`whoami` · `register_agent` · `rename_agent` · `push_task` · `claim_task` (head of
 one's queue, or one specific task via `task_id`) · `publish_result`
 (settles the task; pass the claim's `attempt` token — lease fencing) ·
 `cancel_task` · `requeue_task` · `extend_lease` · `read_result` ·
 `get_system_state` · `get_events` (transition journal, filterable by
 task and/or agent) · `heartbeat` · `list_presence` · `announce` ·
-`read_channel` · `notify` / `poll` (directed signals, point-to-point) ·
-`wait_task` (blocking wait until a task lands in one's queue).
+`read_channel` · `notify` / `poll` (directed signals, point-to-point;
+`reply_to` answers a broadcast) · `broadcast` / `replies` (one question
+or signal to many, see below) · `wait_task` (blocking wait until a task
+lands in one's queue) · `wait_signal` / `pending_signals` (tasks and
+notifications, see *Wake-up*).
+
+### Broadcast: one question, many mailboxes
+
+`broadcast(author, message, scope)` writes one channel entry (topic
+`broadcast`, its seq is the broadcast id) **and** one directed
+notification per recipient in the same transaction: recipients read it
+with the `poll()` they already have (field `broadcast_id`) and answer
+with `notify(..., reply_to=<id>)`; the asker collects with
+`replies(<id>)`. Scopes: `*` (everyone), `claude@*` (every instance of
+a harness), `*@homelab` (every agent of a workspace), `model:qwen*`
+(declared model glob) or a comma-separated list — one unresolvable
+entry refuses the whole broadcast. The answer says who is `delivered`
+(alive) and who is `asleep`; `alive_only` skips the latter, `wake=True`
+marks them for a supervisor (`to_wake`, see *Wake-up*). A broadcast is a
+question or a signal, **never a work order**: work still goes through
+`push_task` to one named queue — the same payload in N queues is N
+executions.
+
+### Wake-up: open sessions and asleep agents
+
+The bus stays passive — nothing in it generates a wake event. Two paths
+close the gap, both clients of the bus:
+
+- **An open interactive session** wakes itself: `wait_signal(agent,
+  kinds="any")` (CLI `iab watch <agent> --on any`) blocks until a task
+  is queued or an unread notification/broadcast waits, without moving
+  any cursor. Run it as a **background task** of the session: the
+  harness hands control back to the model when it returns (Claude Code
+  does; any client with background commands works the same), the
+  session then polls and claims as usual.
+- **An asleep agent** is launched by `iab wake <agent>` from the
+  `launch` block of its roster entry (or of its harness's entry):
+
+  ```json
+  "launch": {
+    "cwd": "~/Dev/git/eric-lemesre/HomeLab",
+    "command": ["codewhale", "exec", "--auto", "-"],
+    "prompt": "worker-wake",
+    "wake_on": ["task", "broadcast"],
+    "max_wakes_per_hour": 4,
+    "lease_seconds": 10800,
+    "timeout": 21600
+  }
+  ```
+
+  The prompt (built-in strict template, a file path, or literal text with
+  `{agent}`, `{iab}`, `{cwd}`, `{lease}`, `{task_ids}`, `{signals}`
+  placeholders) goes to the command **on stdin** — or to a 0600 temp
+  file when an argument contains `{prompt_file}` — never in argv. A lock
+  **in the database** (`wake_locks`, leased like tasks: no flock, no
+  state file) keeps two supervisors from launching the same instance;
+  start, end and refusals are journaled as `wake` events (`iab log -a
+  <agent>`). `iab supervise [--interval 60]` is the single watcher that
+  replaces one timer per agent: it loops over every roster entry with a
+  `launch` block and wakes in a thread per agent (a review can run for
+  hours without blocking the others); start it from a systemd user
+  timer, a Windows scheduled task or a terminal — its death loses
+  nothing, signals wait in the database.
+
+  **Wake policy**: a queued task always wakes; a notification or a
+  broadcast wakes only when the sender set `wake=True` **and** the
+  roster lists `notification` / `broadcast` in `wake_on` — a paid agent
+  is never launched for an acknowledgement. `max_wakes_per_hour` breaks
+  loops (a woken agent broadcasting a question that wakes the others),
+  `timeout` kills a hung worker (its claim lease then expires and the
+  bus re-offers the task). `--dry-run` prints the decision and launches
+  nothing.
 
 `push_task` also drops a directed notification in the target's mailbox
 ("task queued") unless called with `notify=False` — so a watcher or a
@@ -109,18 +211,23 @@ The `iab` console script mirrors the MCP tools — the bus can be driven
 without MCP and without `python -c`:
 
 ```
-iab register <agent> [-d DESC]          iab result <task_id>
+iab register <agent> [-d DESC] [--cwd DIR] [--model M]
+iab rename <old> <new>                  iab result <task_id>
 iab push <agent> <task_id> [payload|-]  iab state
 iab claim <agent> [--lease S] [--task-id ID]
 iab publish <agent> <task_id> [content|-] [--attempt N] [--force]
 iab cancel|requeue <task_id>            iab log [task_id] [-a AGENT]
 iab extend <task_id> [--lease S]        iab whoami
-iab heartbeat <agent> [--ttl S] [--capabilities JSON]
+iab heartbeat <agent> [--ttl S] [--capabilities JSON] [--model M]
 iab announce <author> <topic> [message|-]
 iab channel [--agent A | --since N] [--topic T] [--limit N]
 iab presence
-iab notify <author> <agent> [message|-] iab poll <agent> [--limit N]
-iab watch <agent> [--timeout S] [--interval S]
+iab notify <author> <agent> [message|-] [--reply-to ID] [--wake]
+iab broadcast <author> <scope> [message|-] [--alive-only] [--wake]
+iab replies <broadcast_id>              iab poll <agent> [--limit N]
+iab watch <agent> [--on task|notification|any] [--timeout S] [--interval S]
+iab signals <agent>                     iab wake <agent> [--dry-run]
+iab supervise [--interval S] [--once] [--dry-run]
 ```
 
 `iab watch` is the supervisor primitive (systemd user timer, cron, or a
@@ -183,7 +290,14 @@ cross-reviewing with another agent (router rule).
 
 - `IAB_DB` — bus database path; the rendezvous authority.
 - `IAB_ROSTER` — roster path (default: `roster.json` in the project).
-- `IAB_AGENT_NAME` — identity of the session/registration.
+- `IAB_AGENT_NAME` — harness of the session/registration (or a full
+  `harness@workspace`).
+- `IAB_WORKSPACE` — workspace of the session, when the derivation from
+  the launch directory does not suit.
+- `IAB_WORKSPACES` — path of the operator alias table `{path: workspace}`
+  (default: `workspaces.json` in the data directory).
+- `IAB_MODEL` — model carrying the session, echoed on the bus until the
+  agent declares one itself (`iab worker --model`).
 
 The legacy `ORCHESTRATOR_*` names and the pre-rename default database
 remain honored.
