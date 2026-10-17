@@ -45,13 +45,13 @@ def _touch() -> None:
 def whoami(ctx: Context) -> str:
     """Identity of the connected client as one instance `harness@workspace`: harness from IAB_AGENT_NAME (authoritative; legacy ORCHESTRATOR_AGENT_NAME honored), workspace from IAB_WORKSPACE or derived from the launch directory (alias table, enclosing git repository, folder name — `workspace_source` says which), model echoed from IAB_MODEL; without a harness, the MCP clientInfo sent at the handshake (to match against the roster's client_hints). Also returns the resolved bus database (path, how it was chosen, project key), so a rendezvous mismatch between clients is diagnosable in one call."""
     _touch()
-    bus = json.loads(bus.db_info())
+    rendezvous = json.loads(bus.db_info())
     identity = _identity()
     if identity.get("agent_name"):
-        return json.dumps({**identity, **bus})
+        return json.dumps({**identity, **rendezvous})
     params = ctx.session.client_params
     if params is None or params.client_info is None:
-        return json.dumps({**identity, **bus})
+        return json.dumps({**identity, **rendezvous})
     info = params.client_info
     return json.dumps(
         {
@@ -60,7 +60,7 @@ def whoami(ctx: Context) -> str:
             "name": info.name,
             "title": info.title,
             "version": info.version,
-            **bus,
+            **rendezvous,
         }
     )
 

@@ -26,10 +26,10 @@ every state (signals, locks, budget, journal) lives in store.py.
 
 Several machines (hub mode, IAB_HUB set): `iab supervise` runs on EACH
 machine and wakes only the entries whose `host` is that machine — the
-launcher, its `cwd` and its CLI live there. An entry without `host` may
-be woken by any supervisor (the wake lock still lets only one launch).
-The hub enforces the same rule from its side: a machine cannot take the
-wake lock of an instance bound to another one.
+launcher, its `cwd` and its CLI live there. Give every entry a `host` in
+hub mode: the hub lets only the machine an instance is bound to take its
+wake lock, so an entry without `host` is woken by its own machine's
+supervisor and refused (an ERROR line each round) on the others.
 
 Wake policy (rule 5, fail loud and cheap): a queued TASK always wakes (it
 is commanded work); a notification or a broadcast wakes only when the
@@ -194,7 +194,18 @@ def wake_agent(agent: str, roster: list[dict] | None = None, dry_run: bool = Fal
                host: str | None = None) -> str:
     """One decision for one instance. Returns a status line: NO_SIGNAL,
     NOT_HERE: … (its `host` is another machine), BUSY, REFUSED: …,
-    DRY_RUN: …, OK: … or ERROR: …."""
+    DRY_RUN: …, OK: … or ERROR: … — never raises for a bus failure: in hub
+    mode the non-string operations (wake_count, record_wake) raise when the
+    hub refuses or is unreachable, and a supervisor thread must survive."""
+    try:
+        return _wake_agent(agent, roster, dry_run, host)
+    except RuntimeError as exc:  # remote.HubError, without importing remote
+        text = str(exc)
+        return text if text.startswith("ERROR") else f"ERROR: {text}"
+
+
+def _wake_agent(agent: str, roster: list[dict] | None, dry_run: bool,
+                host: str | None) -> str:
     agent = agent.strip().lower()
     try:
         roster = roster if roster is not None else load_roster()

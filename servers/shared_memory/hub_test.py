@@ -506,6 +506,48 @@ with tempfile.TemporaryDirectory() as tmp:
     check("machines list the instances bound to them",
           {"kimi@lab", "worker@gamma"} <= set(listed["gamma"]), listed)
 
+    # Review fixes: rename onto a name already bound here, the admin's pin
+    # does not follow a member's rename, unresolvable addresses fail
+    # closed, a malformed policy is refused, wake survives hub refusals.
+    os.environ["IAB_MACHINE_DIR"] = alpha_dir
+    admin.call("bind", {"agent": "moved@gamma", "machine": "gamma"})
+    server.authz = authz.Authz({"orchestrators": ["machine:gamma"]})
+    os.environ["IAB_MACHINE_DIR"] = str(gamma_dir)
+    bus.register_agent("old@gamma", "to rename")
+    r = bus.rename_agent("old@gamma", "moved@gamma")
+    check("a rename onto a name already bound to the same machine succeeds",
+          r.startswith("OK") and registry.bound_machine("old@gamma") is None
+          and registry.bound_machine("moved@gamma") == "gamma", r)
+    r = bus.rename_agent("worker@gamma", "renamed@gamma")
+    check("an admin's pin does not follow a rename made by a member",
+          r.startswith("OK") and registry.bound_machine("renamed@gamma") == "gamma"
+          and registry.pinned_machine("renamed@gamma") is None, r)
+    bus.register_agent("dup@one", "ambiguity")
+    os.environ["IAB_MACHINE_DIR"] = alpha_dir
+    bus.register_agent("dup@two", "ambiguity")
+    os.environ["IAB_MACHINE_DIR"] = str(gamma_dir)
+    r = bus.poll("dup")
+    check("an ambiguous bare harness is refused before the core is reached",
+          r.startswith("ERROR") and "ambiguous" in r, r)
+    server.authz = authz.Authz(None)
+    try:
+        authz.Authz({"accepts_from": {"kimi@*": "machine:alpha"}})
+        refused = False
+    except ValueError:
+        refused = True
+    check("a malformed policy (a string instead of a list) is refused", refused)
+    import wake
+    roster_g = [{"name": "kimi@lab", "launch": {"command": [sys.executable, "-c", "pass"]}}]
+    os.environ["IAB_MACHINE_DIR"] = alpha_dir  # kimi@lab now belongs to gamma
+    bus.push_task("kimi@lab", "w1", "x")
+    saved_budget = wake.DEFAULT_MAX_WAKES_PER_HOUR
+    wake.DEFAULT_MAX_WAKES_PER_HOUR = 0  # budget exhausted → record_wake, refused by the hub
+    r = wake.wake_agent("kimi@lab", roster_g, host="alpha")
+    wake.DEFAULT_MAX_WAKES_PER_HOUR = saved_budget
+    check("a hub refusal during a wake is an ERROR line, never an exception",
+          r.startswith("ERROR") and "belongs to machine" in r, r)
+    bus.cancel_task("w1")
+
     server.rate, server.burst = 0.001, 2
     server._buckets.clear()
     burst = [bus.list_presence() for _ in range(3)]

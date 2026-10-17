@@ -153,8 +153,10 @@ session's workspace is still derived from its local directory.
 The roster's `launch` block gains a `host` field: the machine that
 launches the agent (its CLI and `cwd` live there). Run `iab supervise` on
 **each** machine: it wakes only the entries whose `host` is its paired
-name. An entry without `host` may be woken by any supervisor; the wake
-lock, on the hub, lets only one launch. An open interactive session wakes
+name. Give every entry a `host`: the hub lets only the machine an
+instance is bound to take its wake lock, so an entry without `host` is
+woken by its own machine and refused (an `ERROR` line each round) on the
+others. An open interactive session wakes
 up with `iab watch --on any` in the background, long-polling the hub.
 
 ## Administer
@@ -206,7 +208,19 @@ Principals of a request: `machine:<name>`, `role:<role>` (proven by the
 certificate), and the instance the client declares or acts as, **only
 when an admin bound it** to that same machine (`iab bind`): a binding
 made on first use proves precedence, not trust. Prefer `machine:<name>`
-in the policy. Reads (state, results, journal, presence) stay open
+in the policy.
+
+Details:
+
+- a `kimi@*` pattern does not cover a legacy bare name `kimi`: rename it
+  (`iab rename kimi kimi@<workspace>`) — if no machine owns it yet, an
+  admin binds it first (`iab bind kimi <machine>`);
+- an admin's binding follows a rename made by an admin machine, not one
+  made by a member machine;
+- an ambiguous or unknown address is refused by the hub before it
+  reaches the core;
+- a malformed policy (a string instead of a list) keeps the hub from
+  starting rather than being applied wrongly. Reads (state, results, journal, presence) stay open
 to every paired machine. The journal names the machine of every event
 (`iab log`).
 

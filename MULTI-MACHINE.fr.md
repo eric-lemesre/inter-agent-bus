@@ -156,9 +156,10 @@ local.
 Le bloc `launch` du roster gagne un champ `host` : la machine qui lance
 l'agent (son CLI et son `cwd` y vivent). Lancer `iab supervise` sur
 **chaque** machine : il ne réveille que les entrées dont `host` est son
-nom d'appairage. Une entrée sans `host` peut être réveillée par
-n'importe quel superviseur ; le verrou de réveil, sur le moyeu, n'en
-laisse lancer qu'un. Une session interactive ouverte se réveille par
+nom d'appairage. Donnez un `host` à chaque entrée : le moyeu ne laisse
+prendre le verrou de réveil d'une instance qu'à la machine à laquelle
+elle est rattachée, si bien qu'une entrée sans `host` est réveillée par
+sa machine et refusée (une ligne `ERROR` à chaque tour) sur les autres. Une session interactive ouverte se réveille par
 `iab watch --on any` en tâche de fond, en long-poll vers le moyeu.
 
 ## Administrer
@@ -212,7 +213,19 @@ Principaux d'une requête : `machine:<nom>`, `role:<rôle>` (prouvés par le
 certificat), et l'instance que le client déclare ou au nom de laquelle
 il agit, **seulement si un admin l'a rattachée** à cette même machine
 (`iab bind`) : un rattachement au premier usage prouve l'antériorité,
-pas la confiance. Préférez `machine:<nom>` dans la politique. Les lectures (état, résultats, journal, présence)
+pas la confiance. Préférez `machine:<nom>` dans la politique.
+
+Précisions :
+
+- un motif `kimi@*` ne couvre pas un nom nu hérité `kimi` : renommez-le
+  (`iab rename kimi kimi@<espace>`) — s'il n'appartient encore à aucune
+  machine, un admin le rattache d'abord (`iab bind kimi <machine>`) ;
+- le rattachement d'un admin suit un renommage fait par une machine
+  admin, pas celui d'une machine membre ;
+- une adresse ambiguë ou inconnue est refusée par le moyeu avant
+  d'atteindre le cœur ;
+- une politique mal formée (une chaîne au lieu d'une liste) empêche le
+  moyeu de démarrer, plutôt que de s'appliquer de travers. Les lectures (état, résultats, journal, présence)
 restent ouvertes à toute machine appairée. Le journal nomme la machine
 de chaque événement (`iab log`).
 

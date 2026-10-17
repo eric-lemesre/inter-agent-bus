@@ -543,10 +543,17 @@ def pin(agent: str, machine: str, admin: str) -> str:
     return f"OK: agent '{agent}' bound to machine '{machine}'."
 
 
-def rename_binding(old: str, new: str) -> None:
+def rename_binding(old: str, new: str, keep_pin: bool) -> None:
+    """Move a binding with its renamed instance. When `new` is already
+    bound (necessarily to the same machine, authz checked it), that binding
+    stays and the old one goes. The pin follows only if `keep_pin`."""
+    old, new = old.strip().lower(), new.strip().lower()
     with closing(_connect()) as conn, store._write(conn):
-        conn.execute("UPDATE agent_machines SET agent=? WHERE agent=?",
-                     (new.strip().lower(), old.strip().lower()))
+        if conn.execute("SELECT 1 FROM agent_machines WHERE agent=?", (new,)).fetchone():
+            conn.execute("DELETE FROM agent_machines WHERE agent=?", (old,))
+            return
+        conn.execute("UPDATE agent_machines SET agent=?, pinned=CASE WHEN ? THEN pinned "
+                     "ELSE 0 END WHERE agent=?", (new, bool(keep_pin), old))
 
 
 def bindings() -> dict[str, str]:

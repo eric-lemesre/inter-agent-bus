@@ -1181,6 +1181,17 @@ with tempfile.TemporaryDirectory() as tmp:
         check("the database URL is shown without any credential",
               shown == "postgresql://u@h:5433/db", shown)
 
+    # The MCP whoami tool answers (it shadowed `bus` once): checked when the
+    # MCP SDK is installed — the core suite itself never needs it.
+    import importlib.util
+    if importlib.util.find_spec("mcp") is not None:
+        os.environ["IAB_AGENT_NAME"] = "probe@whoami"
+        import server
+        answer = json.loads(server.whoami(None))
+        check("the MCP whoami tool returns the identity and the bus",
+              answer["agent_name"] == "probe@whoami" and "db" in answer, answer)
+        del os.environ["IAB_AGENT_NAME"]
+
     # 9a — access layer: every exposed operation is a core function, and a
     # local helper cannot be reached through `bus` (it would bypass a hub).
     import access

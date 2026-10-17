@@ -62,6 +62,10 @@ def _is_pattern_scope(scope) -> bool:
     return text == "*" or "@*" in text or text.startswith("*@") or text.startswith("model:")
 
 
+def _strings(value) -> bool:
+    return isinstance(value, list) and all(isinstance(v, str) for v in value)
+
+
 def _matches(principals: list[str], patterns) -> bool:
     return any(fnmatch.fnmatchcase(p, str(pattern).lower())
                for p in principals for pattern in patterns)
@@ -69,10 +73,21 @@ def _matches(principals: list[str], patterns) -> bool:
 
 class Authz:
     def __init__(self, policy: dict | None = None) -> None:
+        """Refuses a malformed policy (ValueError) — a hub must not start on
+        rules it would apply wrongly (a string instead of a list would be
+        matched character by character)."""
         policy = policy or {}
-        self.orchestrators = tuple(policy.get("orchestrators") or DEFAULT_ORCHESTRATORS)
+        if not isinstance(policy, dict):
+            raise ValueError("hub policy must be an object")
+        orchestrators = policy.get("orchestrators") or list(DEFAULT_ORCHESTRATORS)
+        if not _strings(orchestrators):
+            raise ValueError("policy.orchestrators must be a list of patterns")
         accepts = policy.get("accepts_from") or {}
-        self.accepts_from = {str(k).lower(): list(v) for k, v in accepts.items()}
+        if not isinstance(accepts, dict) or not all(
+                isinstance(k, str) and _strings(v) for k, v in accepts.items()):
+            raise ValueError("policy.accepts_from must map a pattern to a list of patterns")
+        self.orchestrators = tuple(orchestrators)
+        self.accepts_from = {k.lower(): list(v) for k, v in accepts.items()}
 
     # -- principals --------------------------------------------------------
 
@@ -89,31 +104,29 @@ class Authz:
 
     # -- the three rules ---------------------------------------------------
 
-    def _acting(self, op: str, arguments: dict) -> str | None:
-        """The instance an operation acts as, resolved like the core does;
-        None when the operation acts as nobody (or names no instance the
-        core would accept — the core then refuses it on its own)."""
+    def _acting(self, op: str, arguments: dict) -> tuple[str | None, str | None]:
+        """(instance the operation acts as, None), (None, None) when it acts
+        as nobody, or (None, ERROR) when it names an address that does not
+        resolve — refused HERE, fail closed: the core resolves again later,
+        and the address may resolve by then (a rename in between)."""
         if op == "touch_identity":
             identity = arguments.get("identity") or {}
-            return str(identity.get("agent_name") or "").strip().lower() or None
+            return str(identity.get("agent_name") or "").strip().lower() or None, None
         if op == "read_channel":
             if arguments.get("agent") is None or arguments.get("since_seq") is not None:
-                return None
+                return None, None
             name = arguments["agent"]
         elif op == "extend_lease":
-            return store.task_agent(str(arguments.get("task_id", "")))
+            return store.task_agent(str(arguments.get("task_id", ""))), None
         else:
             key = ACTING.get(op)
             if key is None or not arguments.get(key):
-                return None
+                return None, None
             name = arguments[key]
         name = str(name)
         if op in _LITERAL:
-            return name.strip().lower() or None
-        # The core resolves this address itself and refuses what it cannot
-        # resolve: an unresolvable one acts as nobody here.
-        resolved, error = store.resolve_agent(name)
-        return resolved if error is None else None
+            return name.strip().lower() or None, None
+        return store.resolve_agent(name)
 
     def _orchestrator_op(self, op: str, arguments: dict) -> bool:
         if op in ("cancel_task", "requeue_task", "rename_agent"):
@@ -122,19 +135,16 @@ class Authz:
             return True
         return op == "broadcast" and _is_pattern_scope(arguments.get("scope", "*"))
 
-    def _recipients(self, op: str, arguments: dict) -> list[str]:
-        """Who receives work or a message from this operation (resolved like
-        the core; an address it would refuse yields nobody here)."""
-        if op == "push_task":
+    def _recipients(self, op: str, arguments: dict) -> tuple[list[str], str | None]:
+        """Who receives work or a message from this operation, resolved like
+        the core — or the ERROR of an address that does not resolve (refused
+        here, fail closed, for the same reason as _acting)."""
+        if op in ("push_task", "notify"):
             target, error = store.resolve_agent(str(arguments.get("target_agent", "")))
-            return [target] if error is None else []
-        if op == "notify":
-            target, error = store.resolve_agent(str(arguments.get("target_agent", "")))
-            return [target] if error is None else []
+            return ([target], None) if error is None else ([], error)
         if op == "broadcast":
-            names, error = store.broadcast_recipients(arguments.get("scope", "*"))
-            return names if error is None else []
-        return []
+            return store.broadcast_recipients(arguments.get("scope", "*"))
+        return [], None
 
     def check(self, op: str, arguments: dict, machine: dict,
               caller: str) -> tuple[str | None, str | None]:
@@ -147,7 +157,9 @@ class Authz:
                                                                  self.orchestrators):
             return (f"ERROR: '{op}' is an orchestrator operation — not allowed for "
                     f"{', '.join(principals)} (hub policy: orchestrators)."), None
-        acting = self._acting(op, arguments)
+        acting, unresolved = self._acting(op, arguments)
+        if unresolved:
+            return unresolved, None
         owner = registry.bound_machine(acting) if acting else None
         if owner and owner != machine["name"]:
             return (f"ERROR: agent '{acting}' belongs to machine '{owner}' — refused from "
@@ -158,7 +170,10 @@ class Authz:
             principals.append(acting)
         # accepts_from applies to every recipient of work OR of a message: a
         # message reaches an agent's context too, and a wake launches it.
-        for target in self._recipients(op, arguments):
+        recipients, unresolved = self._recipients(op, arguments)
+        if unresolved:
+            return unresolved, None
+        for target in recipients:
             allowed = [senders for pattern, senders in self.accepts_from.items()
                        if fnmatch.fnmatchcase(target, pattern)]
             if allowed and not any(_matches(principals, senders) for senders in allowed):
@@ -196,4 +211,7 @@ class Authz:
         if failed and reserved:
             registry.release(reserved, machine["name"])
         if op == "rename_agent" and not failed:
-            registry.rename_binding(str(arguments["old"]), str(arguments["new"]))
+            # An admin's binding vouches for a NAME: it follows a rename
+            # only when an admin machine renames.
+            registry.rename_binding(str(arguments["old"]), str(arguments["new"]),
+                                    keep_pin=machine["role"] == "admin")
