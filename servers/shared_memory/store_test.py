@@ -1047,6 +1047,41 @@ with tempfile.TemporaryDirectory() as tmp:
           and "yy: DRY_RUN" in out.stderr, out.stdout + out.stderr)
     store.cancel_task("t-cli")
 
+    # Expiry sweep race: a sweeper whose SELECT saw an expired lease must
+    # not re-offer the task another process re-claimed in between.
+    store.register_agent("race", "sweep race")
+    store.push_task("race", "t-race", "x", notify=False)
+    store.claim_task("race", lease_seconds=1)
+    time.sleep(1.2)
+
+    class _Rows(list):
+        def fetchall(self):
+            return list(self)
+
+    class _Interleaved:
+        def __init__(self, conn):
+            self.conn, self.dialect, self.done = conn, conn.dialect, False
+
+        def execute(self, sql, params=()):
+            cur = self.conn.execute(sql, params)
+            if not self.done and sql.startswith("SELECT task_id, agent, attempts"):
+                self.done = True
+                rows = cur.fetchall()
+                store.claim_task("race", 900)  # another process claims meanwhile
+                return _Rows(rows)
+            return cur
+
+    raw_conn = store.connect()
+    store._requeue_expired(_Interleaved(raw_conn))
+    status = raw_conn.execute(
+        "SELECT status, attempts FROM tasks WHERE task_id='t-race'").fetchone()
+    expires = [e for e in json.loads(store.get_events("t-race")) if e["event"] == "expire"]
+    raw_conn.close()
+    check("a stale expiry sweep leaves a re-claimed task claimed",
+          (status["status"], status["attempts"]) == ("claimed", 2), str(dict(status)))
+    check("the expiry is journaled once", len(expires) == 1, str(expires))
+    store.cancel_task("t-race")
+
     # 9a — access layer: every exposed operation is a core function, and a
     # local helper cannot be reached through `bus` (it would bypass a hub).
     import access

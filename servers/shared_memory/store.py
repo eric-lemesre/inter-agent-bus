@@ -305,7 +305,7 @@ def register_agent(
             "each component [a-z0-9][a-z0-9._-]{0,39}."
         )
     harness, workspace = split_name(name)
-    with _db() as conn:
+    with _db() as conn, _write(conn):
         known = conn.execute("SELECT 1 FROM agents WHERE name=?", (name,)).fetchone()
         conn.execute(
             "INSERT INTO agents(name, description, registered_at, harness, workspace, cwd) "
@@ -416,21 +416,20 @@ def push_task(
     the agent. The notification is a hint for claim_task, not a delivery
     channel: at-least-once still rules, and a woken worker may find an empty
     queue (lease expiry, cancellation) and must tolerate it."""
-    with _db() as conn:
+    with _db() as conn, _write(conn):
         # Explicit refusal of an unregistered or ambiguous agent: keeps the
         # typo detection that hard-coded queues provided, without freezing
         # the cast.
         target, error = _resolve_target(conn, target_agent)
         if error:
             return error
-        try:
-            conn.execute(
-                "INSERT INTO tasks(task_id, agent, payload, priority, created_at, "
-                "max_attempts) VALUES(?,?,?,?,?,?)",
-                (task_id, target, payload, priority, _now(), max_attempts),
-            )
-        except conn.dialect.integrity_error:
+        if conn.execute("SELECT 1 FROM tasks WHERE task_id=?", (task_id,)).fetchone():
             return f"ERROR: task_id '{task_id}' already exists."
+        conn.execute(
+            "INSERT INTO tasks(task_id, agent, payload, priority, created_at, "
+            "max_attempts) VALUES(?,?,?,?,?,?)",
+            (task_id, target, payload, priority, _now(), max_attempts),
+        )
         _log_event(conn, "push", task_id, target, f"priority {priority}")
         if notify:
             # Same transaction as the insert: a task never exists without its
@@ -480,27 +479,37 @@ def wait_for_task(agent: str, timeout_s: float = 300.0, interval_s: float = 2.0)
 
 
 def _requeue_expired(conn: Connection) -> None:
+    """Re-offer (or dead-letter) the tasks whose lease expired. Callers
+    outside a write transaction race each other: every UPDATE re-checks
+    the row it read (still claimed, still expired, same attempt), so a
+    task claimed again in between is left alone and each transition is
+    journaled once."""
+    now = _now()
     expired = conn.execute(
         "SELECT task_id, agent, attempts, max_attempts FROM tasks "
         "WHERE status='claimed' AND lease_deadline < ?",
-        (_now(),),
+        (now,),
     ).fetchall()
     for row in expired:
         if row["attempts"] >= row["max_attempts"]:
-            conn.execute(
+            if not conn.execute(
                 "UPDATE tasks SET status='dead', claimed_at=NULL, lease_deadline=NULL "
-                "WHERE task_id=?",
-                (row["task_id"],),
-            )
+                "WHERE task_id=? AND status='claimed' AND lease_deadline < ? "
+                "AND attempts=?",
+                (row["task_id"], now, row["attempts"]),
+            ).rowcount:
+                continue
             _log_event(conn, "dead", row["task_id"], row["agent"],
                        f"lease expired after attempt {row['attempts']}/"
                        f"{row['max_attempts']} — dead-lettered (requeue to revive)")
         else:
-            conn.execute(
+            if not conn.execute(
                 "UPDATE tasks SET status='queued', claimed_at=NULL, lease_deadline=NULL "
-                "WHERE task_id=?",
-                (row["task_id"],),
-            )
+                "WHERE task_id=? AND status='claimed' AND lease_deadline < ? "
+                "AND attempts=?",
+                (row["task_id"], now, row["attempts"]),
+            ).rowcount:
+                continue
             _log_event(conn, "expire", row["task_id"], row["agent"],
                        "lease expired — task re-offered")
 
@@ -812,7 +821,7 @@ def touch_identity(identity: dict) -> None:
     name = identity.get("agent_name")
     if not name or not _NAME_RE.match(name):
         return
-    with _db() as conn:
+    with _db() as conn, _write(conn):
         if conn.execute("SELECT 1 FROM agents WHERE name=?", (name,)).fetchone() is None:
             harness, workspace = split_name(name)
             conn.execute(
@@ -881,7 +890,7 @@ def announce(author: str, topic: str, message: str) -> str:
         return "ERROR: topic must match ^[a-z0-9-]{1,64}$."
     if len(message.encode("utf-8")) > 16 * 1024:
         return "ERROR: message exceeds 16 KiB."
-    with _db() as conn:
+    with _db() as conn, _write(conn):
         author, error = _resolve_target(conn, author)
         if error:
             return error.replace("agent", "author", 1)
@@ -966,7 +975,7 @@ def notify(
         return "ERROR: empty target agent."
     if len(message.encode("utf-8")) > 16 * 1024:
         return "ERROR: message exceeds 16 KiB."
-    with _db() as conn:
+    with _db() as conn, _write(conn):
         author, error = _resolve_target(conn, author)
         if error:
             return error.replace("agent", "author", 1)
