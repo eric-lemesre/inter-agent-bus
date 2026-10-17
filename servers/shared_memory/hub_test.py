@@ -487,6 +487,10 @@ with tempfile.TemporaryDirectory() as tmp:
     r = bus.announce("worker@gamma", "news", "hello everyone")
     check("accepts_from covers the global channel (it reaches every agent)",
           r.startswith("ERROR") and "accepts_from" in r, r)
+    server.authz = authz.Authz({"accepts_from": {"nobody-yet@*": ["machine:alpha"]}})
+    r = bus.announce("worker@gamma", "news", "hello everyone")
+    check("…including agents that do not exist yet",
+          r.startswith("ERROR") and "nobody-yet@*" in r, r)
     server.authz = authz.Authz(None)
     os.environ["IAB_MACHINE_DIR"] = alpha_dir
     listed = {m["name"]: m["agents"] for m in admin.call("machines")}

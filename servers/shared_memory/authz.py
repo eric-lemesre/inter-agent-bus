@@ -134,10 +134,6 @@ class Authz:
         if op == "broadcast":
             names, error = store.broadcast_recipients(arguments.get("scope", "*"))
             return names if error is None else []
-        if op == "announce":
-            # The global channel reaches every registered agent.
-            names, error = store.broadcast_recipients("*")
-            return names if error is None else []
         return []
 
     def check(self, op: str, arguments: dict, machine: dict,
@@ -169,6 +165,15 @@ class Authz:
                 return (f"ERROR: agent '{target}' does not accept "
                         f"{'work' if op == 'push_task' else 'messages'} from "
                         f"{', '.join(principals)} (hub policy: accepts_from)."), None
+        if op == "announce":
+            # The global channel reaches every agent, present AND future:
+            # the sender must satisfy every rule of the policy, not just
+            # those of the agents registered right now.
+            for pattern, senders in self.accepts_from.items():
+                if not _matches(principals, senders):
+                    return (f"ERROR: the global channel reaches agents matching '{pattern}', "
+                            f"which do not accept messages from {', '.join(principals)} "
+                            "(hub policy: accepts_from)."), None
         if op == "rename_agent":
             new = str(arguments.get("new", "")).strip().lower()
             new_owner = registry.bound_machine(new)
