@@ -171,7 +171,11 @@ sans lui, elles n'appartiennent à aucune machine et sont refusées tant
 qu'un admin ne les a pas rattachées une à une (`iab bind`). Un nom ou
 un identifiant de tâche présent des deux côtés fait refuser tout
 l'import, sans rien écrire : le renommer d'abord sur la source
-(`IAB_DB=mimir-bus.db iab rename …`). Relancer les agents avec
+(`IAB_DB=mimir-bus.db iab rename …`). Le fichier est traité comme non
+fiable : une ligne qui concerne autre chose que ses propres agents et
+tâches (du travail pour une instance du moyeu, un résultat pour une
+tâche du moyeu, un message à une instance qu'il n'apporte pas, ou signé
+par elle) fait aussi refuser tout l'import. Relancer les agents avec
 `IAB_HUB` posé : ce qui s'écrirait encore dans le fichier local ne
 serait pas repris.
 

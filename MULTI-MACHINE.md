@@ -166,7 +166,11 @@ wake locks stay behind. `--bind` binds the imported instances to the
 machine they come from; without it they belong to no machine and are
 refused until an admin binds each one (`iab bind`). A name or task id
 present on both sides refuses the whole import, nothing written: rename
-it on the source first (`IAB_DB=mimir-bus.db iab rename …`). Restart
+it on the source first (`IAB_DB=mimir-bus.db iab rename …`). The file
+is treated as untrusted: a row that concerns anything but its own
+agents and tasks (work for a hub instance, a result for a hub task, a
+message to or signed by an instance it does not bring) refuses the
+whole import as well. Restart
 the agents with `IAB_HUB` set: what would still be written to the local
 file is not carried over.
 

@@ -454,6 +454,31 @@ def _insert_row(conn: Connection, known: dict[str, set[str]], table: str, row: d
     return None
 
 
+def _foreign_rows(data: dict[str, list[dict]]) -> list[str]:
+    """Rows of a source that reach beyond it. The file comes from another
+    machine and is untrusted: each row must concern the source's own
+    agents and tasks — else it would queue work for, settle the task of,
+    or speak to or as an instance of the hub (or a name not registered
+    yet, which would inherit it), around accepts_from. The core resolves
+    every author to a registered agent, so an honest bus passes; `bus`
+    authors the mechanism's own notices and events."""
+    agents = {r["name"] for r in data["agents"]}
+    tasks = {r["task_id"] for r in data["tasks"]}
+    problems = [f"agents.name={n}" for n in sorted(agents) if not _NAME_RE.match(str(n))]
+    rules = (("tasks", "agent", agents), ("results", "task_id", tasks),
+             ("results", "author", agents), ("presence", "agent", agents),
+             ("channel", "author", agents), ("channel_cursor", "agent", agents),
+             ("notifications", "target", agents),
+             ("notifications", "author", agents | {"bus"}),
+             ("notification_cursor", "target", agents),
+             ("events", "agent", agents | {"bus", None}),
+             ("events", "task_id", tasks | {None}))
+    for table, column, allowed in rules:
+        problems += sorted({f"{table}.{column}={r.get(column)}" for r in data[table]
+                            if r.get(column) not in allowed})
+    return problems
+
+
 def _remap(mapping: dict[int, int], last_seq: int) -> int:
     """A cursor's new position: the new number of the last row it had read."""
     return max((new for old, new in mapping.items() if old <= last_seq), default=0)
@@ -468,7 +493,8 @@ def import_database(source: str | os.PathLike, dry_run: bool = False, after=None
     that had read anything also counts the target's earlier entries as
     read). Wake locks stay behind: they belong to the old machine's
     supervisor. Refused, nothing written, when a name or task id exists on
-    both sides — rename it first (`IAB_DB=<source> iab rename`).
+    both sides — rename it first (`IAB_DB=<source> iab rename`) — or when
+    a row refers to anything but the source's own agents and tasks.
     `after(conn, agents)` runs inside the transaction and may refuse with
     an `ERROR:` string (the hub binds the imported instances there)."""
     if dialect.is_url(source):
@@ -482,6 +508,11 @@ def import_database(source: str | os.PathLike, dry_run: bool = False, after=None
     data = _read_source(path)
     if isinstance(data, str):
         return data
+    foreign = _foreign_rows(data)
+    if foreign:
+        shown = ", ".join(foreign[:10]) + (" …" if len(foreign) > 10 else "")
+        return (f"ERROR: {len(foreign)} reference(s) outside the source's own agents and "
+                f"tasks: {shown} — import refused, nothing written.")
     agents = sorted(r["name"] for r in data["agents"])
     with _db() as conn:
         try:
@@ -495,11 +526,6 @@ def import_database(source: str | os.PathLike, dry_run: bool = False, after=None
                     shown = ", ".join(clashes[:10]) + (" …" if len(clashes) > 10 else "")
                     return (f"ERROR: {len(clashes)} key(s) exist on both sides: {shown} — "
                             "rename on the source first (IAB_DB=<source> iab rename).")
-                known = set(agents) | {r["name"] for r in conn.execute("SELECT name FROM agents")}
-                orphans = sorted({r["agent"] for r in data["tasks"]} - known)
-                if orphans:
-                    return (f"ERROR: tasks of unregistered agent(s) {', '.join(orphans)} — "
-                            "the source is inconsistent.")
                 known: dict[str, set[str]] = {}
                 for row in data["agents"]:
                     if not row.get("harness"):
