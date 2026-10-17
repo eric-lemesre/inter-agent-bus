@@ -230,12 +230,17 @@ def _json_object(body: bytes) -> dict | None:
     return value if isinstance(value, dict) else None
 
 
+# Operations of the access layer the hub does not serve: where the hub
+# keeps its database is none of a client's business.
+_NOT_SERVED = frozenset({"db_info"})
+
+
 def dispatch(name: str, body: bytes, machine: dict, caller: str = "",
              policy: authz.Authz | None = None) -> tuple[int, dict]:
     """Run one bus operation for an authenticated machine, after the
     authorization rules (authz.py) — `caller` is the instance the client
     says it is (checked against the machine's bindings there)."""
-    if name not in OPERATIONS:
+    if name not in OPERATIONS or name in _NOT_SERVED:
         return _bad(404, f"'{name}' is not a bus operation.")
     request = _json_object(body)
     if request is None:

@@ -1115,9 +1115,10 @@ with tempfile.TemporaryDirectory() as tmp:
         check("a PostgreSQL wait wakes at the commit, long before its poll interval",
               snap["signalled"] and waited < 3, f"{waited:.2f}s")
         store.cancel_task("t-pg")
-        check("the database URL is shown without its password",
-              "secret" not in store.dialect.describe("postgresql://u:secret@h/db")
-              and "***" in store.dialect.describe("postgresql://u:secret@h/db"))
+        shown = store.dialect.describe(
+            "postgresql://u:secret@h:5433/db?password=other&sslpassword=x")
+        check("the database URL is shown without any credential",
+              shown == "postgresql://u@h:5433/db", shown)
 
     # 9a — access layer: every exposed operation is a core function, and a
     # local helper cannot be reached through `bus` (it would bypass a hub).

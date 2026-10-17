@@ -300,12 +300,18 @@ class RemoteBackend:
                 return result
 
     def _db_info(self) -> str:
+        """The rendezvous seen from this machine: the hub and this machine's
+        pairing (where the hub keeps its database is not disclosed)."""
+        info = {"db": None, "db_source": "hub", "hub": self.url,
+                "machine": machine_info(self.creds["dir"]).get("name")}
         try:
-            info = json.loads(self._op("db_info", {}))
+            status, answer = self.request("GET", "/v1/ping")
+            if status == 200:
+                info["role"] = answer["result"]["role"]
+            else:
+                info["error"] = str(answer.get("error") or f"ERROR: hub answered HTTP {status}.")
         except HubError as exc:
-            info = {"db": None, "error": str(exc)}
-        info.update({"db_source": "hub", "hub": self.url,
-                     "machine": machine_info(self.creds["dir"]).get("name")})
+            info["error"] = str(exc)
         return json.dumps(info, ensure_ascii=False)
 
 

@@ -92,7 +92,10 @@ with tempfile.TemporaryDirectory() as tmp:
     check("core refusals come back as is", r.startswith("ERROR") and "not registered" in r, r)
     info = json.loads(bus.db_info())
     check("db_info names the hub and the machine",
-          info["db_source"] == "hub" and info["hub"] == url and info["machine"] == "alpha", info)
+          info["db_source"] == "hub" and info["hub"] == url and info["machine"] == "alpha"
+          and info["role"] == "admin" and "error" not in info, info)
+    status, answer = access.backend().request("POST", "/v1/op/db_info", {"args": {}})
+    check("the hub does not disclose where it keeps its database", status == 404, answer)
     check("non-string operations keep their type", bus.wake_count("kimi@lab", 3600) == 0)
     bus.touch_identity({"agent_name": "claude@lab", "cwd": "/home/x/lab", "model": "m"})
     check("touch_identity registers a remote client",

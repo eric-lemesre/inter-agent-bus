@@ -196,14 +196,16 @@ def is_url(target) -> bool:
 
 
 def describe(target) -> str:
-    """A target fit for display: a URL loses its password."""
+    """A target fit for display: a URL is rebuilt from its scheme, user,
+    host, port and database only — no password, no query string (libpq
+    accepts `?password=`, `?sslpassword=`…)."""
     if not is_url(target):
         return str(target)
     parts = urllib.parse.urlsplit(target)
-    if parts.password is None:
-        return target
-    netloc = parts.netloc.replace(f":{parts.password}@", ":***@", 1)
-    return urllib.parse.urlunsplit(parts._replace(netloc=netloc))
+    user = f"{parts.username}@" if parts.username else ""
+    host = parts.hostname or ""
+    port = f":{parts.port}" if parts.port else ""
+    return f"{parts.scheme}://{user}{host}{port}{parts.path}"
 
 
 @lru_cache(maxsize=512)
