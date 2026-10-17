@@ -568,11 +568,12 @@ def import_database(source: str | os.PathLike, dry_run: bool = False, after=None
                 if after is not None:
                     # Who sends what to whom, for the hub's accepts_from:
                     # work has no recorded sender (the source machine sent
-                    # it), the channel reaches everybody, `bus` notices are
-                    # the mechanism's.
+                    # it), the channel reaches everybody. A `bus` author in
+                    # a file proves nothing: such a notice is checked as
+                    # sent by the source machine itself.
                     flows = ([("work", None, r["agent"]) for r in data["tasks"]]
-                             + [("message", r["author"], r["target"])
-                                for r in data["notifications"] if r["author"] != "bus"]
+                             + [("message", None if r["author"] == "bus" else r["author"],
+                                 r["target"]) for r in data["notifications"]]
                              + [("channel", r["author"], None) for r in data["channel"]])
                     refused = after(conn, agents, flows)
                     if refused:
