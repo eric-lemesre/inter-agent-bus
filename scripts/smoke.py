@@ -106,9 +106,31 @@ else:
                     break
                 time.sleep(0.1)
             scenario(Path(tmp), "through the hub")
+
+            # A second machine joins by invitation (the Ansible path: token
+            # on stdin, never in argv) and works a task the first pushed.
+            token = run("invite a second machine", ["invite", "second"]).strip()
+            first = dict(env)
+            env = {**first, "IAB_MACHINE_DIR": str(Path(tmp) / "second")}
+            run("the second machine joins with the invitation",
+                ["join", f"127.0.0.1:{port + 1}", "--name", "second", "--token", "-"],
+                stdin=token + "\n")
+            env = first
+            run("the first machine pushes work for the second",
+                ["push", "kimi", "T2", "-"], stdin="cross-machine")
+            env = {**first, "IAB_MACHINE_DIR": str(Path(tmp) / "second")}
+            run("the second machine's worker executes it",
+                ["worker", "--agent", "kimi", "--once", "--",
+                 sys.executable, "-c", WORKER_STANDIN])
+            env = first
+            out = run("the first machine reads the result", ["result", "T2"])
+            assert json.loads(out)["content"].strip() == "executed: cross-machine", out
+            out = run("the admin lists both machines", ["machines"])
+            assert {m["name"] for m in json.loads(out)} == {"smoke", "second"}, out
         finally:
             hub_proc.terminate()
             hub_proc.wait(timeout=10)
 
 print("smoke: OK — push → worker → result → guarded review → log, "
-      "all through the CLI, on the local bus and through a hub.")
+      "all through the CLI, on the local bus and through a hub; "
+      "a second machine paired by invitation works across machines.")

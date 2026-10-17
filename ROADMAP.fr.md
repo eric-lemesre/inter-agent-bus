@@ -327,7 +327,15 @@ machines admin.
   négociation, rien n'est envoyé ; attentes découpées en long-polls
   bornés ; `hub_test.py`, `smoke.py` rejoué à travers un moyeu.
 - **9c** — appairage : `iab join`, `iab approve`, invitation interne,
-  renouvellement, `iab machines`, `iab revoke`.
+  renouvellement, `iab machines`, `iab revoke` — **livrée**. Port
+  d'appairage distinct (réseaux privés seulement par défaut) ; quatre
+  mots liés à la clé de la machine ET à la CA du moyeu (comparaison
+  numérique façon Bluetooth) ; invitation dont le jeton ne voyage
+  jamais (identifiant + code d'authentification lié à la demande) ;
+  renouvellement sans CSR, l'ancien certificat retiré au premier usage
+  du nouveau ; dernière admin non révocable ; annonces sur le canal
+  `machines` ; rôle admin réservé aux clés TPM (politique). Guide :
+  [`MULTI-MACHINE.fr.md`](MULTI-MACHINE.fr.md).
 - **9d** — autorisation : instance ↔ machine, rôles d'orchestrateur,
   `accepts_from`, limites.
 - **9e** — clés TPM, politique par machine.

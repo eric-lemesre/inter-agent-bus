@@ -25,9 +25,11 @@ import json
 import os
 import socket
 import ssl
+import sys
 import time
 import urllib.parse
 import urllib.request
+from datetime import datetime, timezone
 from functools import partial
 from pathlib import Path
 
@@ -46,6 +48,10 @@ CALL_TIMEOUT = 30  # seconds, any non-waiting call
 # instead of returning an `ERROR:` line their callers would not read.
 _NON_STRING = frozenset({"touch_presence", "touch_identity", "record_wake", "wake_count"})
 _WAITS = frozenset({"wait_signal", "wait_for_task"})
+# A machine certificate (30 days) is renewed when less than this remains;
+# renewal needs the hub, so a machine offline longer must pair again.
+RENEW_BEFORE_SECONDS = 10 * 86400
+_LOCK_STALE_SECONDS = 120
 
 
 class HubError(RuntimeError):
@@ -73,6 +79,22 @@ def machine_info(directory: Path | None = None) -> dict:
         return json.loads(credentials(directory)["info"].read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
+
+
+def write_info(directory: Path, info: dict) -> None:
+    path = credentials(directory)["info"]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(info, indent=2, ensure_ascii=False), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def _replace_file(path: Path, data: bytes) -> None:
+    """Swap a file atomically: a concurrent reader sees the old or the new
+    certificate, never half of one."""
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_bytes(data)
+    os.replace(tmp, path)
 
 
 def parse_hub(url: str) -> tuple[str, int]:
@@ -190,11 +212,61 @@ class RemoteBackend:
 
     # -- operations --------------------------------------------------------
 
+    def renew(self, force: bool = False) -> str:
+        """Renew this machine's certificate when it nears its end (or now,
+        with force). Serialized across processes by a lock file; the new
+        certificate replaces the old one atomically."""
+        info = machine_info(self.creds["dir"])
+        expires = info.get("expires_at")
+        if not force and expires:
+            left = (datetime.fromisoformat(expires) - datetime.now(timezone.utc)).total_seconds()
+            if left > RENEW_BEFORE_SECONDS:
+                return f"OK: certificate valid until {expires} — no renewal needed."
+        lock = self.creds["dir"] / "renew.lock"
+        try:
+            fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except FileExistsError:
+            try:
+                if time.time() - lock.stat().st_mtime > _LOCK_STALE_SECONDS:
+                    lock.unlink()
+            except OSError:
+                pass
+            return "OK: renewal already in progress in another process."
+        os.close(fd)
+        try:
+            if not force and machine_info(self.creds["dir"]).get("expires_at") != expires:
+                return "OK: renewed meanwhile by another process."
+            status, answer = self.request("POST", "/v1/renew", {})
+            if status != 200:
+                return str(answer.get("error") or f"ERROR: hub answered HTTP {status}.")
+            result = answer["result"]
+            _replace_file(self.creds["cert"], result["certificate"].encode("ascii"))
+            write_info(self.creds["dir"], {**info, "expires_at": result["expires_at"]})
+            return f"OK: certificate renewed until {result['expires_at']}."
+        finally:
+            try:
+                lock.unlink()
+            except OSError:
+                pass
+
+    def _maybe_renew(self) -> None:
+        # Opportunistic, never blocking the operation: a failed renewal is
+        # retried at the next call and the current certificate still works.
+        if not self.creds["cert"].is_file():
+            return  # not paired: the operation itself reports it
+        try:
+            outcome = self.renew()
+        except (HubError, OSError):
+            return
+        if outcome.startswith("ERROR"):
+            print(f"[iab] certificate renewal failed: {outcome}", file=sys.stderr)
+
     def _call(self, name: str, *args, **kwargs):
         try:
             arguments = inspect.signature(getattr(store, name)).bind(*args, **kwargs).arguments
         except TypeError as exc:
             raise TypeError(f"{name}: {exc}") from None
+        self._maybe_renew()
         try:
             if name in _WAITS:
                 return self._wait(name, dict(arguments))

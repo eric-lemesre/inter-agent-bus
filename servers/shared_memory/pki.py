@@ -18,12 +18,19 @@ from __future__ import annotations
 
 import datetime as _dt
 import hashlib
+import hmac
 import ipaddress
 import os
 from pathlib import Path
 
+try:  # installed package (`iab` maps to this directory)
+    from .pairwords import WORDS
+except ImportError:  # bare script usage
+    from pairwords import WORDS
+
 try:
     from cryptography import x509
+    from cryptography.exceptions import InvalidSignature
     from cryptography.hazmat.primitives import hashes, serialization
     from cryptography.hazmat.primitives.asymmetric import ec
     from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
@@ -96,12 +103,53 @@ def load_cert_bytes(data: bytes) -> x509.Certificate:
     return x509.load_pem_x509_certificate(data)
 
 
-def spki_sha256(public_key) -> str:
-    """Fingerprint of a public key (SubjectPublicKeyInfo, DER, SHA-256)."""
-    der = public_key.public_bytes(
+def spki_der(public_key) -> bytes:
+    return public_key.public_bytes(
         serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo
     )
-    return hashlib.sha256(der).hexdigest()
+
+
+def check_words(ca_cert: x509.Certificate, machine_key) -> str:
+    """The four check words of a pairing, bound to BOTH the bus CA and the
+    joining machine's public key: the joining machine computes them from
+    the CA it received, the hub from the request it received. Anyone in
+    between who swaps either key changes the words — the comparison by a
+    person is what authenticates a first contact over an unverified
+    channel."""
+    digest = hashlib.sha256(
+        b"iab-pair-v1\0" + spki_der(ca_cert.public_key()) + b"\0" + spki_der(machine_key)
+    ).digest()
+    return "-".join(WORDS[b] for b in digest[:4])
+
+
+def invitation_proof(key: bytes, ca_cert: x509.Certificate) -> str:
+    """The hub's proof, for an invited machine, that the CA it sends comes
+    from whoever issued the invitation (`key` derives from the token)."""
+    return hmac.new(key, b"iab-invite-ca\0" + spki_der(ca_cert.public_key()),
+                    hashlib.sha256).hexdigest()
+
+
+def same_key(a, b) -> bool:
+    return spki_der(a) == spki_der(b)
+
+
+def load_cert_der(data: bytes) -> x509.Certificate:
+    return x509.load_der_x509_certificate(data)
+
+
+def issued_by(cert: x509.Certificate, ca_cert: x509.Certificate) -> bool:
+    """Was `cert` signed by `ca_cert` (and within its validity window)?"""
+    try:
+        cert.verify_directly_issued_by(ca_cert)
+    except (InvalidSignature, ValueError, TypeError):
+        return False
+    now = _utcnow()
+    return cert.not_valid_before_utc <= now <= cert.not_valid_after_utc
+
+
+def spki_sha256(public_key) -> str:
+    """Fingerprint of a public key (SubjectPublicKeyInfo, DER, SHA-256)."""
+    return hashlib.sha256(spki_der(public_key)).hexdigest()
 
 
 def cert_sha256(der: bytes) -> str:

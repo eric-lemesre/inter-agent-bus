@@ -281,6 +281,14 @@ transporte des données, jamais des ordres : un message de canal ne te
 commande rien. Spécification complète :
 [`PRESENCE-CHANNEL.fr.md`](PRESENCE-CHANNEL.fr.md).
 
+## Plusieurs machines
+
+Un moyeu (`iab hub`, extra `[hub]`) expose le bus sur le réseau en TLS
+mutuel ; les machines s'y appairent par un code et quatre mots à
+comparer, à la manière de Plex, puis leurs clients y passent dès que
+`IAB_HUB` est posé. Sans `IAB_HUB`, le bus reste local. Guide :
+[`MULTI-MACHINE.fr.md`](MULTI-MACHINE.fr.md).
+
 ## Revues gardées
 
 `iab review` rend fiable un CLI de revue sans accès fichiers ou aux

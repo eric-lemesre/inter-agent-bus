@@ -903,6 +903,25 @@ def announce(author: str, topic: str, message: str) -> str:
     return json.dumps({"seq": seq}, ensure_ascii=False)
 
 
+def system_announce(topic: str, message: str) -> str:
+    """A channel entry written by the mechanism itself — author `bus`, like
+    the task-queued notifications — for events no agent authored (a machine
+    paired or revoked on a hub). Same limits as announce."""
+    topic = topic.strip().lower()
+    if not _TOPIC_RE.match(topic):
+        return "ERROR: topic must match ^[a-z0-9-]{1,64}$."
+    if len(message.encode("utf-8")) > 16 * 1024:
+        return "ERROR: message exceeds 16 KiB."
+    with _db() as conn, _write(conn):
+        seq = _insert_id(
+            conn,
+            "INSERT INTO channel(author, at, topic, message) VALUES(?,?,?,?)",
+            ("bus", _now(), topic, message),
+        )
+        _log_event(conn, "announce", agent="bus", detail=topic)
+    return json.dumps({"seq": seq}, ensure_ascii=False)
+
+
 def read_channel(
     agent: str | None = None,
     since_seq: int | None = None,

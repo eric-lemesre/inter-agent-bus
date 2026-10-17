@@ -305,7 +305,14 @@ Internet closed at first, TPM mandatory for admin machines.
   sent; waits split into bounded long-polls; `hub_test.py`, `smoke.py`
   replayed through a hub.
 - **9c** — pairing: `iab join`, `iab approve`, internal invitation,
-  renewal, `iab machines`, `iab revoke`.
+  renewal, `iab machines`, `iab revoke` — **shipped**. Separate pairing
+  listener (private networks only by default); four words bound to the
+  machine's key AND the hub's CA (Bluetooth-style numeric comparison);
+  invitation whose token never travels (id + authentication code bound
+  to the request); renewal without CSR, the old certificate retired at
+  the first use of the new one; the last admin cannot be revoked;
+  announcements on the `machines` channel; admin role reserved to TPM
+  keys (policy). Guide: [`MULTI-MACHINE.md`](MULTI-MACHINE.md).
 - **9d** — authorization: instance ↔ machine, orchestrator roles,
   `accepts_from`, limits.
 - **9e** — TPM keys, per-machine policy.

@@ -32,6 +32,10 @@ every change and are summarized below.
   `iab hub serve`): store.py over HTTPS with mutual TLS, one route per
   operation. Thin like the MCP server; machines live in `registry.py`,
   certificates in `pki.py` (needs the `[hub]` extra, `cryptography`).
+- `servers/shared_memory/pairing.py` — the hub's pairing authority
+  (requests, approvals, invitations, renewal → certificates); `join.py`
+  and `admin.py` are the client drivers (`iab join`, `iab approve`,
+  `iab invite`, `iab machines`, `iab revoke`, `iab renew`).
 - `servers/shared_memory/remote.py` — the hub client behind `bus` when
   `IAB_HUB` is set (stdlib `ssl` + `http.client`; trusts the bus CA only).
 - `servers/shared_memory/server.py` — MCP wrapper (SDK >= 2.0,

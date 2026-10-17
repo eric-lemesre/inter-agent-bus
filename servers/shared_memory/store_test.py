@@ -1082,6 +1082,14 @@ with tempfile.TemporaryDirectory() as tmp:
     check("the expiry is journaled once", len(expires) == 1, str(expires))
     store.cancel_task("t-race")
 
+    # System announcements: author `bus`, readable like any channel entry.
+    seq = json.loads(store.system_announce("machines", "machine 'x' paired"))["seq"]
+    entry = json.loads(store.read_channel(since_seq=seq - 1, topic="machines"))
+    check("a system announcement is a channel entry by `bus`",
+          entry and entry[0]["author"] == "bus" and entry[0]["message"] == "machine 'x' paired")
+    check("system announcements keep the topic rule",
+          store.system_announce("Bad Topic", "x").startswith("ERROR"))
+
     # 9a — access layer: every exposed operation is a core function, and a
     # local helper cannot be reached through `bus` (it would bypass a hub).
     import access

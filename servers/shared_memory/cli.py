@@ -133,8 +133,59 @@ def _hub(args) -> int:
                        args.db, args.port)
         print(out)
         return 1 if out.startswith("ERROR") else 0
-    listen = hub.parse_listen(args.listen) if args.listen else None
-    return hub.serve(Path(args.home) if args.home else None, listen)
+    try:
+        listen = hub.parse_listen(args.listen) if args.listen else None
+        if args.pair_listen == "off":
+            pair = False
+        else:
+            pair = hub.parse_listen(args.pair_listen) if args.pair_listen else None
+    except ValueError as exc:
+        print(f"ERROR: {exc}")
+        return 2
+    return hub.serve(Path(args.home) if args.home else None, listen, pair)
+
+
+def _pairing(args) -> int:
+    """join / approve / deny / invite / machines / revoke / renew / ping —
+    the pairing and admin commands (need the [hub] extra)."""
+    _hub_module()  # fail early with the install hint when the extra is missing
+    if __package__:
+        from . import admin, join
+    else:
+        import admin
+        import join
+    if args.command == "join":
+        hub = args.hub or os.environ.get("IAB_HUB", "")
+        if not hub:
+            print("ERROR: give the hub's address: iab join <host>[:port]")
+            return 2
+        if hub.startswith("https://") and args.hub is None:
+            hub = hub.split("://", 1)[1].split("/", 1)[0].rsplit(":", 1)[0]
+        try:
+            token = join.read_token(args.token)
+        except join.JoinError as exc:
+            print(f"ERROR: {exc}")
+            return 2
+        return join.join(hub, args.machine_name, token)
+    if args.command == "approve":
+        return admin.approve(args.code, args.machine_name, args.role)
+    if args.command == "deny":
+        return admin.show(admin.call("pairing/deny", {"user_code": args.code}))
+    if args.command == "invite":
+        result = admin.call("invite", {"name": args.name, "role": args.role,
+                                       "ttl": args.ttl})
+        if isinstance(result, str):
+            print(result)
+            return 1
+        print(result["token"])  # alone on stdout: piped to `iab join --token -`
+        return 0
+    if args.command == "machines":
+        return admin.show(admin.call("machines"))
+    if args.command == "revoke":
+        return admin.show(admin.call("revoke", {"name": args.name}))
+    if args.command == "renew":
+        return admin.renew(args.force)
+    return join.ping()
 
 
 def _watch(agent: str, timeout: float, interval: float, on: str) -> str:
@@ -344,6 +395,39 @@ def main(argv: list[str] | None = None) -> int:
     h.add_argument("--listen", metavar="HOST:PORT",
                    help="listen address (default: 0.0.0.0 and the port given at init)")
 
+    h.add_argument("--pair-listen", metavar="HOST:PORT|off",
+                   help="pairing listener (default: same host, the pair port of hub.json; "
+                        "'off' to close pairing)")
+
+    p = sub.add_parser("join", help="pair this machine with a hub: shows a code and four "
+                                    "check words to confirm on an admin machine")
+    p.add_argument("hub", nargs="?", help="hub address host[:pairing port] "
+                                          "(default: the host of IAB_HUB)")
+    p.add_argument("--name", dest="machine_name", help="name of this machine "
+                                                       "(default: its host name)")
+    p.add_argument("--token", metavar="-",
+                   help="'-' to read an invitation token on stdin (else IAB_INVITE_TOKEN); "
+                        "never pass the token itself as an argument")
+    p = sub.add_parser("approve", help="approve a pairing request (admin machine, "
+                                       "interactive: compare the check words)")
+    p.add_argument("code", nargs="?", help="the code shown by `iab join`")
+    p.add_argument("--name", dest="machine_name", help="pair under this name instead")
+    p.add_argument("--role", choices=["member", "admin"], default="member")
+    p = sub.add_parser("deny", help="deny a pairing request (admin machine)")
+    p.add_argument("code")
+    p = sub.add_parser("invite", help="one-time token pairing NAME without a person "
+                                      "(Ansible); prints the token alone")
+    p.add_argument("name")
+    p.add_argument("--role", choices=["member", "admin"], default="member")
+    p.add_argument("--ttl", type=int, default=900, metavar="SECONDS")
+    sub.add_parser("machines", help="machines paired with the hub (admin machine)")
+    p = sub.add_parser("revoke", help="revoke a machine: refused from its next request")
+    p.add_argument("name")
+    p = sub.add_parser("renew", help="renew this machine's certificate (automatic when "
+                                     "less than 10 days remain)")
+    p.add_argument("--force", action="store_true", help="renew now")
+    sub.add_parser("ping", help="check this machine's pairing with its hub")
+
     p = sub.add_parser(
         "install",
         help="register the MCP server in the client (Claude Code: claude mcp add-json)",
@@ -359,6 +443,9 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.command == "hub":
         return _hub(args)
+    if args.command in ("join", "approve", "deny", "invite", "machines", "revoke",
+                        "renew", "ping"):
+        return _pairing(args)
     if args.command == "supervise":
         return wake.supervise(args.interval, args.once, args.dry_run)
     if args.command == "review":
