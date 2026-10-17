@@ -314,9 +314,18 @@ appairage depuis Internet fermé au départ, TPM obligatoire pour les
 machines admin.
 
 - **9a** — couches d'accès et de dialecte, `LocalBackend` + SQLite, sans
-  changement de comportement.
+  changement de comportement — **livrée**. `dialect.py` (connexion,
+  schéma, transaction d'écriture, identifiants, introspection),
+  `access.py` (`bus.<opération>`). Correctifs trouvés en chemin :
+  écritures multiples désormais atomiques (`push_task` et sa
+  notification…), balayage des baux expirés sans course.
 - **9b** — moyeu : `iab hub init/serve`, mTLS, `RemoteBackend`,
-  long-poll, détection d'inspection TLS.
+  long-poll, détection d'inspection TLS — **livrée**. Une route par
+  opération ; registre des machines (révocation effective à la requête
+  suivante) ; certificat du port du bus émis par la CA du bus, seule
+  ancre de confiance du client : un proxy d'inspection échoue à la
+  négociation, rien n'est envoyé ; attentes découpées en long-polls
+  bornés ; `hub_test.py`, `smoke.py` rejoué à travers un moyeu.
 - **9c** — appairage : `iab join`, `iab approve`, invitation interne,
   renouvellement, `iab machines`, `iab revoke`.
 - **9d** — autorisation : instance ↔ machine, rôles d'orchestrateur,

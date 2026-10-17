@@ -17,6 +17,8 @@ and are called there directly.
 """
 from __future__ import annotations
 
+import os
+
 try:  # installed package: `iab` maps to this directory (pyproject.toml)
     from . import store
 except ImportError:  # bare script usage
@@ -38,8 +40,16 @@ OPERATIONS = frozenset({
 
 
 def backend():
-    """The backend serving this call: store.py (LocalBackend)."""
-    return store
+    """The backend serving this call: a hub client when IAB_HUB names a
+    hub, else store.py (LocalBackend)."""
+    hub = os.environ.get("IAB_HUB", "").strip()
+    if not hub:
+        return store
+    try:  # imported only in hub mode
+        from . import remote
+    except ImportError:
+        import remote
+    return remote.backend_for(hub)
 
 
 class _Bus:

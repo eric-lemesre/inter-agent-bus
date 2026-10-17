@@ -293,9 +293,17 @@ database, `cryptography` in the `[hub]` extra, pairing from the
 Internet closed at first, TPM mandatory for admin machines.
 
 - **9a** — access and dialect layers, `LocalBackend` + SQLite, no
-  behaviour change.
+  behaviour change — **shipped**. `dialect.py` (connection, schema, write
+  transaction, ids, introspection), `access.py` (`bus.<operation>`).
+  Fixes found on the way: multiple writes now atomic (`push_task` and its
+  notification…), expiry sweep without race.
 - **9b** — hub: `iab hub init/serve`, mTLS, `RemoteBackend`, long-poll,
-  TLS inspection detection.
+  TLS inspection detection — **shipped**. One route per operation;
+  machine registry (revocation effective at the next request); the bus
+  listener's certificate is issued by the bus CA, the client's only
+  trust anchor: an inspecting proxy fails the handshake, nothing is
+  sent; waits split into bounded long-polls; `hub_test.py`, `smoke.py`
+  replayed through a hub.
 - **9c** — pairing: `iab join`, `iab approve`, internal invitation,
   renewal, `iab machines`, `iab revoke`.
 - **9d** — authorization: instance ↔ machine, orchestrator roles,

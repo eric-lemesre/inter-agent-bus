@@ -13,6 +13,7 @@ dependencies = []
 
 [project.optional-dependencies]
 server = ["mcp>=2.0"]
+hub = ["cryptography>=42"]
 
 [project.urls]
 Repository = "https://github.com/eric-lemesre/inter-agent-bus"

@@ -189,6 +189,15 @@ apportait est obtenu autrement :
 | filtrer qui peut parler au bus | **mTLS obligatoire** sur toute l'API : sans certificat de machine valide, refus dès la négociation TLS |
 | limiter qui peut demander un appairage | page d'appairage publique par nature (comme plex.tv/link), bornée : débit par IP, demandes en attente plafonnées, expiration 10 min, fail2ban |
 
+**Ajustement à l'implémentation (9b)** : le certificat du **port du bus**
+est émis par la CA du bus elle-même, et le client ne fait confiance qu'à
+elle (reçue à l'appairage), jamais au magasin du système. Un proxy
+d'inspection ne peut pas présenter de certificat chaîné à cette CA : la
+négociation échoue avant tout envoi, sans mécanisme ad hoc. Le
+certificat public (Let's Encrypt) ne sert plus qu'au **port
+d'appairage**, seul premier contact où la machine ne connaît pas encore
+la CA du bus. Le moyeu renouvelle seul son certificat de bus.
+
 **Joignabilité depuis Internet** : le moyeu reste dans le homelab, joint
 par l'edge existant de lemesre.org, sans déchiffrement intermédiaire :
 

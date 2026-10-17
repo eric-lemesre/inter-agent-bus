@@ -15,6 +15,7 @@ import argparse
 import importlib.util
 import json
 import os
+import platform
 import shutil
 import subprocess
 import sys
@@ -110,6 +111,30 @@ def _install(scope: str, agent_name: str, print_only: bool) -> str:
         "that identity, and each project gets its own bus database unless "
         "IAB_DB says otherwise."
     )
+
+
+def _hub_module():
+    """hub.py needs the `[hub]` extra (cryptography): imported on demand so
+    the rest of the CLI works without it."""
+    try:
+        if __package__:
+            from . import hub
+        else:  # bare script: python servers/shared_memory/cli.py
+            import hub
+    except ImportError as exc:  # the extra is missing: say how to get it
+        raise SystemExit(f"ERROR: {exc}")
+    return hub
+
+
+def _hub(args) -> int:
+    hub = _hub_module()
+    if args.hub_command == "init":
+        out = hub.init(args.name, args.machine, Path(args.home) if args.home else None,
+                       args.db, args.port)
+        print(out)
+        return 1 if out.startswith("ERROR") else 0
+    listen = hub.parse_listen(args.listen) if args.listen else None
+    return hub.serve(Path(args.home) if args.home else None, listen)
 
 
 def _watch(agent: str, timeout: float, interval: float, on: str) -> str:
@@ -301,6 +326,24 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("review_cmd", nargs=argparse.REMAINDER, metavar="-- command...",
                    help="the reviewer command, after `--`; receives the prompt on stdin")
 
+    p = sub.add_parser("hub", help="multi-machine hub: create it, serve the bus over "
+                                   "mutual TLS (needs the [hub] extra)")
+    hub_sub = p.add_subparsers(dest="hub_command", required=True)
+    h = hub_sub.add_parser("init", help="create the hub (bus CA, server certificate, "
+                                        "database) and pair this machine as its first admin")
+    h.add_argument("--name", action="append", required=True,
+                   help="DNS name or IP address machines reach the hub by (repeatable; "
+                        "the first one goes into IAB_HUB)")
+    h.add_argument("--machine", default=platform.node().split(".")[0].lower(),
+                   help="name of this machine (default: its host name)")
+    h.add_argument("--home", help="hub directory (default: IAB_HUB_HOME or <data dir>/hub)")
+    h.add_argument("--db", help="bus database of the hub (default: <home>/bus.db)")
+    h.add_argument("--port", type=int, default=7443, help="bus listener port (default: 7443)")
+    h = hub_sub.add_parser("serve", help="run the bus listener (mutual TLS)")
+    h.add_argument("--home", help="hub directory (default: IAB_HUB_HOME or <data dir>/hub)")
+    h.add_argument("--listen", metavar="HOST:PORT",
+                   help="listen address (default: 0.0.0.0 and the port given at init)")
+
     p = sub.add_parser(
         "install",
         help="register the MCP server in the client (Claude Code: claude mcp add-json)",
@@ -314,6 +357,8 @@ def main(argv: list[str] | None = None) -> int:
                    help="print the JSON registration instead of applying it")
 
     args = parser.parse_args(argv)
+    if args.command == "hub":
+        return _hub(args)
     if args.command == "supervise":
         return wake.supervise(args.interval, args.once, args.dry_run)
     if args.command == "review":

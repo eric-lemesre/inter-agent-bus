@@ -183,6 +183,15 @@ is obtained otherwise:
 | filter who can talk to the bus | **mandatory mTLS** on the whole API: no valid machine certificate, refused during the TLS handshake |
 | limit who can request pairing | pairing page public by nature (like plex.tv/link), bounded: per-IP rate, capped pending requests, 10-min expiry, fail2ban |
 
+**Implementation adjustment (9b)**: the certificate of the **bus
+listener** is issued by the bus CA itself, and the client trusts that CA
+only (received at pairing), never the system store. An inspecting proxy
+cannot present a certificate chaining to it: the handshake fails before
+anything is sent, with no ad hoc mechanism. The public certificate
+(Let's Encrypt) now serves only the **pairing listener**, the one first
+contact where the machine does not know the bus CA yet. The hub renews
+its bus certificate by itself.
+
 **Reachability from the Internet**: the hub stays in the homelab,
 reached through the existing lemesre.org edge, with no decryption on the
 way:
