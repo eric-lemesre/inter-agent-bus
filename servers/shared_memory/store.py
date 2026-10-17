@@ -464,7 +464,12 @@ def _foreign_rows(data: dict[str, list[dict]]) -> list[str]:
     authors the mechanism's own notices and events."""
     agents = {r["name"] for r in data["agents"]}
     tasks = {r["task_id"] for r in data["tasks"]}
-    problems = [f"agents.name={n}" for n in sorted(agents) if not _NAME_RE.match(str(n))]
+    # Names exactly as the core writes them (`$` would let a trailing
+    # newline through), keys as text: a value the target would store or
+    # compare differently must not pass the check below.
+    problems = [f"agents.name={n!r}" for n in agents
+                if not (isinstance(n, str) and _NAME_RE.fullmatch(n))]
+    problems += [f"tasks.task_id={t!r}" for t in tasks if not isinstance(t, str)]
     rules = (("tasks", "agent", agents), ("results", "task_id", tasks),
              ("results", "author", agents), ("presence", "agent", agents),
              ("channel", "author", agents), ("channel_cursor", "agent", agents),
@@ -495,8 +500,10 @@ def import_database(source: str | os.PathLike, dry_run: bool = False, after=None
     supervisor. Refused, nothing written, when a name or task id exists on
     both sides — rename it first (`IAB_DB=<source> iab rename`) — or when
     a row refers to anything but the source's own agents and tasks.
-    `after(conn, agents)` runs inside the transaction and may refuse with
-    an `ERROR:` string (the hub binds the imported instances there)."""
+    `after(conn, agents, flows)` runs inside the transaction and may
+    refuse with an `ERROR:` string — the hub checks the flows (kind,
+    sender, recipient) against its policy and binds the imported
+    instances there."""
     if dialect.is_url(source):
         return "ERROR: the source must be a local bus file (SQLite), not a URL."
     path = Path(source).expanduser()
@@ -528,8 +535,10 @@ def import_database(source: str | os.PathLike, dry_run: bool = False, after=None
                             "rename on the source first (IAB_DB=<source> iab rename).")
                 known: dict[str, set[str]] = {}
                 for row in data["agents"]:
-                    if not row.get("harness"):
-                        row["harness"], row["workspace"] = split_name(row["name"])
+                    # Always from the name: bare names and `harness@*` scopes
+                    # resolve through these columns — a forged harness would
+                    # capture what is addressed to another instance.
+                    row["harness"], row["workspace"] = split_name(row["name"])
                     _insert_row(conn, known, "agents", row)
                 for table in ("tasks", "results", "presence"):
                     for row in data[table]:
@@ -557,7 +566,15 @@ def import_database(source: str | os.PathLike, dry_run: bool = False, after=None
                 _log_event(conn, "import", detail=f"from {path.name}: " + ", ".join(
                     f"{n} {t}" for t, n in counts.items()))
                 if after is not None:
-                    refused = after(conn, agents)
+                    # Who sends what to whom, for the hub's accepts_from:
+                    # work has no recorded sender (the source machine sent
+                    # it), the channel reaches everybody, `bus` notices are
+                    # the mechanism's.
+                    flows = ([("work", None, r["agent"]) for r in data["tasks"]]
+                             + [("message", r["author"], r["target"])
+                                for r in data["notifications"] if r["author"] != "bus"]
+                             + [("channel", r["author"], None) for r in data["channel"]])
+                    refused = after(conn, agents, flows)
                     if refused:
                         raise _Abort(refused)
                 answer = json.dumps(

@@ -194,25 +194,33 @@ def import_bus(source: str, bind: str | None = None, dry_run: bool = False,
     local access to its home is the authority, as for init). Imported
     instances belong to no machine — refused until an admin binds them —
     unless `bind` names the machine they come from: they are then bound to
-    it, in the same transaction."""
+    it, in the same transaction. What the import brings obeys the hub's
+    accepts_from as if that machine had sent it live."""
     home = home or hub_home()
     try:
         config = load_config(home)
     except RuntimeError as exc:
         return f"ERROR: {exc}"
     _use_database(config)
-    after = None
+    try:
+        rules = authz.Authz(config.get("policy"))
+    except ValueError as exc:
+        return f"ERROR: {exc}"
+    machine = None
     if bind:
-        machine = bind.strip().lower()
-        if (registry.get(machine) or {}).get("status") != "active":
-            return f"ERROR: no active machine '{machine}' to bind the imported instances to."
+        machine = registry.get(bind.strip().lower())
+        if (machine or {}).get("status") != "active":
+            return f"ERROR: no active machine '{bind}' to bind the imported instances to."
 
-        def after(conn, agents):
-            for agent in agents:
-                refused = registry.pin_in(conn, agent, machine, "hub import")
-                if refused:
-                    return refused
-            return None
+    def after(conn, agents, flows):
+        refused = rules.check_import(machine, flows)
+        if refused:
+            return refused
+        for agent in agents if machine else ():
+            refused = registry.pin_in(conn, agent, machine["name"], "hub import")
+            if refused:
+                return refused
+        return None
     out = store.import_database(source, dry_run=dry_run, after=after)
     if out.startswith("ERROR"):
         return out

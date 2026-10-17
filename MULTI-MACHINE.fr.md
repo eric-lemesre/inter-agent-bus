@@ -175,7 +175,9 @@ l'import, sans rien écrire : le renommer d'abord sur la source
 fiable : une ligne qui concerne autre chose que ses propres agents et
 tâches (du travail pour une instance du moyeu, un résultat pour une
 tâche du moyeu, un message à une instance qu'il n'apporte pas, ou signé
-par elle) fait aussi refuser tout l'import. Relancer les agents avec
+par elle) fait aussi refuser tout l'import, et ce qu'il apporte obéit à
+`accepts_from` comme si la machine de `--bind` l'avait envoyé en direct
+(sans `--bind`, aucune règle n'est satisfaite). Relancer les agents avec
 `IAB_HUB` posé : ce qui s'écrirait encore dans le fichier local ne
 serait pas repris.
 

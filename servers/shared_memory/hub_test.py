@@ -585,6 +585,33 @@ with tempfile.TemporaryDirectory() as tmp:
     check("an imported unbound instance is refused until an admin binds it",
           r.startswith("ERROR") and "no machine owns it" in r, r)
 
+    # What an import brings obeys accepts_from as if its machine sent it.
+    config_path = home / "hub.json"
+    saved = config_path.read_bytes()
+    config = json.loads(saved)
+    config["policy"] = {"accepts_from": {"guarded@*": ["machine:alpha"]}}
+    pki.write_private(config_path, json.dumps(config).encode("utf-8"))
+    source = local_bus(tmp / "guarded-local.db", "guarded@gamma", "imp3")
+    r = hub.import_bus(source, bind="gamma", home=home)
+    check("an import brings no work its recipient would refuse from that machine",
+          r.startswith("ERROR") and "accepts_from" in r
+          and registry.bound_machine("guarded@gamma") is None, r)
+    r = hub.import_bus(source, home=home)
+    check("an import bound to no machine has no principal to satisfy the policy",
+          r.startswith("ERROR") and "no machine" in r, r)
+    r = hub.import_bus(source, bind="alpha", dry_run=True, home=home)
+    check("an import from an accepted machine passes", r.startswith("OK"), r)
+    os.environ.pop("IAB_HUB")
+    os.environ["IAB_DB"] = str(tmp / "chatty-local.db")
+    store.register_agent("chatty@gamma", "test")
+    store.announce("chatty@gamma", "news", "hello everyone")
+    os.environ["IAB_DB"] = hub_db
+    os.environ["IAB_HUB"] = url
+    r = hub.import_bus(str(tmp / "chatty-local.db"), bind="gamma", home=home)
+    check("an imported channel entry obeys every rule of the policy",
+          r.startswith("ERROR") and "global channel" in r, r)
+    config_path.write_bytes(saved)
+
     # accepts_from covers messages and every broadcast recipient too.
     server.authz = authz.Authz({"accepts_from": {"claude@*": ["machine:alpha"]}})
     r = bus.notify("worker@gamma", "claude@lab", "hello")

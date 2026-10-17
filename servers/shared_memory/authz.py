@@ -71,6 +71,10 @@ def _matches(principals: list[str], patterns) -> bool:
                for p in principals for pattern in patterns)
 
 
+def _who(principals: list[str]) -> str:
+    return ", ".join(principals) or "an import bound to no machine (--bind)"
+
+
 class Authz:
     def __init__(self, policy: dict | None = None) -> None:
         """Refuses a malformed policy (ValueError) — a hub must not start on
@@ -174,22 +178,14 @@ class Authz:
         if unresolved:
             return unresolved, None
         for target in recipients:
-            allowed = [senders for pattern, senders in self.accepts_from.items()
-                       if fnmatch.fnmatchcase(target, pattern)]
-            if allowed and not any(_matches(principals, senders) for senders in allowed):
-                return (f"ERROR: agent '{target}' does not accept "
-                        f"{'work' if op == 'push_task' else 'messages'} from "
-                        f"{', '.join(principals)} (hub policy: accepts_from)."), None
+            refused = self._refuses(principals, target,
+                                    "work" if op == "push_task" else "messages")
+            if refused:
+                return refused, None
         if op in ("announce", "broadcast"):
-            # The global channel reaches every agent, present AND future —
-            # a broadcast writes its message there too, whatever its
-            # scope: the sender must satisfy every rule of the policy, not
-            # just those of the agents registered right now.
-            for pattern, senders in self.accepts_from.items():
-                if not _matches(principals, senders):
-                    return (f"ERROR: the global channel reaches agents matching '{pattern}', "
-                            f"which do not accept messages from {', '.join(principals)} "
-                            "(hub policy: accepts_from)."), None
+            refused = self._refuses_channel(principals)
+            if refused:
+                return refused, None
         if op == "rename_agent":
             new = str(arguments.get("new", "")).strip().lower()
             new_owner = registry.bound_machine(new)
@@ -201,6 +197,43 @@ class Authz:
         if refused:
             return refused, None
         return None, acting if reserved else None
+
+    def _refuses(self, principals: list[str], target: str, what: str) -> str | None:
+        allowed = [senders for pattern, senders in self.accepts_from.items()
+                   if fnmatch.fnmatchcase(target, pattern)]
+        if allowed and not any(_matches(principals, senders) for senders in allowed):
+            return (f"ERROR: agent '{target}' does not accept {what} from "
+                    f"{_who(principals)} (hub policy: accepts_from).")
+        return None
+
+    def _refuses_channel(self, principals: list[str]) -> str | None:
+        # The global channel reaches every agent, present AND future — a
+        # broadcast writes its message there too, whatever its scope: the
+        # sender must satisfy every rule of the policy, not just those of
+        # the agents registered right now.
+        for pattern, senders in self.accepts_from.items():
+            if not _matches(principals, senders):
+                return (f"ERROR: the global channel reaches agents matching '{pattern}', "
+                        f"which do not accept messages from {_who(principals)} "
+                        "(hub policy: accepts_from).")
+        return None
+
+    def check_import(self, machine: dict | None, flows) -> str | None:
+        """accepts_from on what an import brings (`iab hub import`), as if
+        its source machine had sent it live: a sender's principals are that
+        machine, its role and the sending instance (the import binds it
+        there) — none when the import names no machine. `flows` are
+        (kind, sender, recipient): work, message or channel. Returns the
+        first refusal, or None."""
+        base = [f"machine:{machine['name']}", f"role:{machine['role']}"] if machine else []
+        for kind, sender, target in flows:
+            principals = base + ([sender] if machine and sender else [])
+            refused = (self._refuses_channel(principals) if kind == "channel"
+                       else self._refuses(principals, target,
+                                          "work" if kind == "work" else "messages"))
+            if refused:
+                return refused
+        return None
 
     def after(self, op: str, arguments: dict, result, machine: dict,
               reserved: str | None) -> None:

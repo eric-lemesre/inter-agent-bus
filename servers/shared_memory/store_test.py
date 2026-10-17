@@ -1318,6 +1318,37 @@ with tempfile.TemporaryDirectory() as tmp:
               and "mallory@src" not in state["agents"]
               and "forged" not in store.read_result("hub-open"), r)
 
+    # Identity and keys exactly as the core would write them: a forged
+    # harness must not capture what is addressed to another instance, a
+    # name with a trailing newline or a key that is not text must not
+    # pass the checks.
+    SPOOF = Path(tmp) / "import-spoof.db"
+    os.environ["IAB_DB"] = str(SPOOF)
+    store.register_agent("mallory@spoof", "test")
+    with sqlite3.connect(SPOOF) as raw:
+        raw.execute("UPDATE agents SET harness='claude', workspace='homelab'")
+    raw.close()
+    os.environ["IAB_DB"] = TARGET
+    store.import_database(str(SPOOF))
+    spoofed = json.loads(store.get_system_state())["agents"].get("mallory@spoof", {})
+    check("an imported identity is recomputed from its name, never taken from the source",
+          spoofed.get("harness") == "mallory" and spoofed.get("workspace") == "spoof", spoofed)
+    for label, sql in (
+            ("a name with a trailing newline",
+             "INSERT INTO agents(name, registered_at) VALUES('eve@src\n', '2026-10-17')"),
+            ("a task id that is not text",
+             "INSERT INTO tasks(task_id, agent, payload, created_at) "
+             "VALUES(X'0102', 'eve@src', 'p', '2026-10-17')")):
+        odd = Path(tmp) / f"import-odd-{len(label)}.db"
+        os.environ["IAB_DB"] = str(odd)
+        store.register_agent("eve@src", "test")
+        with sqlite3.connect(odd) as raw:
+            raw.execute(sql)
+        raw.close()
+        os.environ["IAB_DB"] = TARGET
+        r = store.import_database(str(odd))
+        check(f"an import with {label} is refused", r.startswith("ERROR"), r)
+
     # A source of an older schema: no harness/workspace/max_attempts
     # columns, no notification table — the target's defaults apply.
     OLD = Path(tmp) / "import-old.db"
@@ -1333,7 +1364,8 @@ with tempfile.TemporaryDirectory() as tmp:
             "INSERT INTO tasks(task_id, agent, payload, created_at) VALUES('imp-old',"
             " 'kimi@legacy', 'p', '2026-01-01T00:00:00+00:00');")
     old.close()
-    refused = store.import_database(str(OLD), after=lambda conn, agents: "ERROR: hook says no")
+    refused = store.import_database(str(OLD),
+                                    after=lambda conn, agents, flows: "ERROR: hook says no")
     check("a refusal of the hook rolls the whole import back",
           refused == "ERROR: hook says no"
           and "kimi@legacy" not in json.dumps(json.loads(store.get_system_state())["agents"]))

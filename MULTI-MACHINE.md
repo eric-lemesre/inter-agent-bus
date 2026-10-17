@@ -170,7 +170,9 @@ it on the source first (`IAB_DB=mimir-bus.db iab rename …`). The file
 is treated as untrusted: a row that concerns anything but its own
 agents and tasks (work for a hub instance, a result for a hub task, a
 message to or signed by an instance it does not bring) refuses the
-whole import as well. Restart
+whole import as well, and what it brings obeys `accepts_from` as if the
+`--bind` machine had sent it live (without `--bind`, no rule is
+satisfied). Restart
 the agents with `IAB_HUB` set: what would still be written to the local
 file is not carried over.
 
