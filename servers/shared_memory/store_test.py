@@ -1055,6 +1055,30 @@ with tempfile.TemporaryDirectory() as tmp:
           and "yy: DRY_RUN" in out.stderr, out.stdout + out.stderr)
     store.cancel_task("t-cli")
 
+    # 9g — `host` in launch: each machine's supervisor wakes its own entries.
+    stand_in = [sys.executable, "-c", "pass"]
+    roster_h = [{"name": "far@wake", "launch": {"host": "elsewhere", "command": stand_in}},
+                {"name": "near@wake", "launch": {"host": "thisbox", "command": stand_in}},
+                {"name": "any@wake", "launch": {"command": stand_in}}]
+    store.register_agent("far@wake", "9g")
+    store.push_task("far@wake", "t-far", "x")
+    r = wake.wake_agent("far@wake", roster_h, dry_run=True, host="thisbox")
+    check("an entry launched on another machine is not woken here", r.startswith("NOT_HERE"), r)
+    r = wake.wake_agent("far@wake", roster_h, dry_run=True, host="elsewhere")
+    check("…and is woken by its own machine", r.startswith("DRY_RUN"), r)
+    roster_hf = Path(tmp) / "roster-hosts.json"
+    roster_hf.write_text(json.dumps({"agents": roster_h}), encoding="utf-8")
+    env_h = {**os.environ, "IAB_ROSTER": str(roster_hf)}
+    out = subprocess.run(cli + ["supervise", "--once", "--dry-run", "--host", "thisbox"],
+                         env=env_h, capture_output=True, text=True)
+    check("supervise covers this machine's entries and those without host",
+          "supervising near@wake, any@wake on thisbox" in out.stderr, out.stderr)
+    out = subprocess.run(cli + ["supervise", "--once", "--dry-run", "--host", "nowhere"],
+                         env=env_h, capture_output=True, text=True)
+    check("another machine supervises only the entries without host",
+          out.returncode == 0 and "supervising any@wake on nowhere" in out.stderr, out.stderr)
+    store.cancel_task("t-far")
+
     # Expiry sweep race: a sweeper whose SELECT saw an expired lease must
     # not re-offer the task another process re-claimed in between.
     store.register_agent("race", "sweep race")

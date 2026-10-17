@@ -329,12 +329,15 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("agent")
     p.add_argument("--dry-run", action="store_true",
                    help="print the decision and the command, launch nothing")
+    p.add_argument("--host", help="this machine's name, matched against launch.host")
 
     p = sub.add_parser("supervise", help="the single watcher: wake every roster agent "
                                          "with a `launch` block when a signal waits")
     p.add_argument("--interval", type=float, default=60.0, metavar="SECONDS")
     p.add_argument("--once", action="store_true", help="one pass, then exit")
     p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--host", help="this machine's name, matched against launch.host "
+                                  "(default: its paired name in hub mode, else the host name)")
 
     sub.add_parser("presence", help="list all known agents and their presence status")
 
@@ -453,7 +456,7 @@ def main(argv: list[str] | None = None) -> int:
                         "bind", "renew", "ping"):
         return _pairing(args)
     if args.command == "supervise":
-        return wake.supervise(args.interval, args.once, args.dry_run)
+        return wake.supervise(args.interval, args.once, args.dry_run, args.host)
     if args.command == "review":
         cmd = args.review_cmd
         if cmd and cmd[0] == "--":
@@ -499,7 +502,7 @@ def main(argv: list[str] | None = None) -> int:
         ),
         "watch": lambda: _watch(args.agent, args.timeout, args.interval, args.on),
         "signals": lambda: bus.pending_signals(args.agent),
-        "wake": lambda: wake.wake_agent(args.agent, dry_run=args.dry_run),
+        "wake": lambda: wake.wake_agent(args.agent, dry_run=args.dry_run, host=args.host),
         "claim": lambda: bus.claim_task(args.agent, args.lease, args.task_id),
         "publish": lambda: bus.publish_result(
             args.agent, args.task_id, _content(args.content), args.attempt, args.force

@@ -332,7 +332,13 @@ Internet closed at first, TPM mandatory for admin machines.
   setup once per process and database, waits woken by LISTEN/NOTIFY at
   COMMIT; password masked in `whoami`. `store_test.py` and `hub_test.py`
   run on both engines (`IAB_TEST_POSTGRES`).
-- **9g** — `host` in `launch`, per-machine supervisor.
+- **9g** — `host` in `launch`, per-machine supervisor — **shipped**.
+  `iab supervise` runs on each machine and wakes only the entries whose
+  `host` is that machine (paired name, `--host` to force); `iab wake`
+  answers `NOT_HERE` elsewhere; an entry without `host` stays wakable
+  anywhere, the lock arbitrates. On the hub side, binding forbids taking
+  the wake lock of another machine's instance. An open session wakes up
+  with `iab watch --on any`, long-polling the hub.
 - **9h** — MCP streamable HTTP: **deferred**.
 
 ## Global acceptance criterion

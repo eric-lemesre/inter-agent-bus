@@ -151,6 +151,16 @@ déclaration MCP :
 L'espace de travail de chaque session reste dérivé de son répertoire
 local.
 
+## Réveil sur plusieurs machines
+
+Le bloc `launch` du roster gagne un champ `host` : la machine qui lance
+l'agent (son CLI et son `cwd` y vivent). Lancer `iab supervise` sur
+**chaque** machine : il ne réveille que les entrées dont `host` est son
+nom d'appairage. Une entrée sans `host` peut être réveillée par
+n'importe quel superviseur ; le verrou de réveil, sur le moyeu, n'en
+laisse lancer qu'un. Une session interactive ouverte se réveille par
+`iab watch --on any` en tâche de fond, en long-poll vers le moyeu.
+
 ## Administrer
 
 | Commande | Effet |

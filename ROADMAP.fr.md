@@ -357,7 +357,14 @@ machines admin.
   des attentes par LISTEN/NOTIFY au COMMIT ; mot de passe masqué dans
   `whoami`. `store_test.py` et `hub_test.py` tournent sur les deux
   moteurs (`IAB_TEST_POSTGRES`).
-- **9g** — `host` dans `launch`, superviseur par machine.
+- **9g** — `host` dans `launch`, superviseur par machine — **livrée**.
+  `iab supervise` tourne sur chaque machine et ne réveille que les
+  entrées dont `host` est cette machine (nom d'appairage, `--host` pour
+  forcer) ; `iab wake` répond `NOT_HERE` ailleurs ; une entrée sans
+  `host` reste réveillable partout, le verrou arbitre. Côté moyeu, le
+  rattachement interdit de prendre le verrou de réveil d'une instance
+  d'une autre machine. Une session ouverte se réveille par `iab watch
+  --on any`, en long-poll vers le moyeu.
 - **9h** — MCP streamable HTTP : **reportée**.
 
 ## Critère d'acceptation global

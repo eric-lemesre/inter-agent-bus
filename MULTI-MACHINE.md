@@ -148,6 +148,15 @@ declaration:
 `iab ping` checks the pairing; `whoami` shows `"db_source": "hub"`. Each
 session's workspace is still derived from its local directory.
 
+## Wake-up across machines
+
+The roster's `launch` block gains a `host` field: the machine that
+launches the agent (its CLI and `cwd` live there). Run `iab supervise` on
+**each** machine: it wakes only the entries whose `host` is its paired
+name. An entry without `host` may be woken by any supervisor; the wake
+lock, on the hub, lets only one launch. An open interactive session wakes
+up with `iab watch --on any` in the background, long-polling the hub.
+
 ## Administer
 
 | Command | Effect |

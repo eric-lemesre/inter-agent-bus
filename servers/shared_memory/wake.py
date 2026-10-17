@@ -14,6 +14,7 @@ entry's `launch` block, never from this file. Process orchestration only;
 every state (signals, locks, budget, journal) lives in store.py.
 
     "launch": {
+      "host": "mimir",               # the machine that launches it (hub mode)
       "cwd": "~/Dev/git/eric-lemesre/HomeLab",   # where the agent works
       "command": ["codewhale", "exec", "--auto", "-"],  # prompt on stdin
       "prompt": "worker-wake",       # built-in template, a file, or text
@@ -22,6 +23,13 @@ every state (signals, locks, budget, journal) lives in store.py.
       "lease_seconds": 10800,        # the claim lease the prompt asks for
       "timeout": 21600               # hard kill (default: 2 × lease)
     }
+
+Several machines (hub mode, IAB_HUB set): `iab supervise` runs on EACH
+machine and wakes only the entries whose `host` is that machine — the
+launcher, its `cwd` and its CLI live there. An entry without `host` may
+be woken by any supervisor (the wake lock still lets only one launch).
+The hub enforces the same rule from its side: a machine cannot take the
+wake lock of an instance bound to another one.
 
 Wake policy (rule 5, fail loud and cheap): a queued TASK always wakes (it
 is commanded work); a notification or a broadcast wakes only when the
@@ -34,6 +42,7 @@ from __future__ import annotations
 
 import json
 import os
+import platform
 import subprocess
 import sys
 import tempfile
@@ -120,6 +129,25 @@ def launch_spec(roster: list[dict], agent: str) -> dict | None:
     return None
 
 
+def this_machine() -> str:
+    """The machine this supervisor runs on: its paired name in hub mode,
+    else the host name."""
+    if os.environ.get("IAB_HUB"):
+        try:
+            from . import remote
+        except ImportError:
+            import remote
+        name = remote.machine_info().get("name")
+        if name:
+            return str(name)
+    return platform.node().split(".")[0].lower()
+
+
+def launches_here(spec: dict, host: str) -> bool:
+    wanted = str(spec.get("host") or "").strip().lower()
+    return not wanted or wanted == host
+
+
 def iab_executable() -> str:
     exe = Path(sys.executable).parent / ("iab.exe" if os.name == "nt" else "iab")
     return str(exe) if exe.exists() else "iab"
@@ -162,9 +190,11 @@ def decide(spec: dict, pending: dict) -> str | None:
     return None
 
 
-def wake_agent(agent: str, roster: list[dict] | None = None, dry_run: bool = False) -> str:
+def wake_agent(agent: str, roster: list[dict] | None = None, dry_run: bool = False,
+               host: str | None = None) -> str:
     """One decision for one instance. Returns a status line: NO_SIGNAL,
-    BUSY, REFUSED: …, DRY_RUN: …, OK: … or ERROR: …."""
+    NOT_HERE: … (its `host` is another machine), BUSY, REFUSED: …,
+    DRY_RUN: …, OK: … or ERROR: …."""
     agent = agent.strip().lower()
     try:
         roster = roster if roster is not None else load_roster()
@@ -173,6 +203,9 @@ def wake_agent(agent: str, roster: list[dict] | None = None, dry_run: bool = Fal
     spec = launch_spec(roster, agent)
     if spec is None:
         return f"ERROR: no 'launch' block for '{agent}' (nor for its harness) in the roster."
+    host = host or this_machine()
+    if not launches_here(spec, host):
+        return f"NOT_HERE: '{agent}' is launched on {spec['host']}, this is {host}."
     command = spec.get("command")
     if not isinstance(command, list) or not command or not all(isinstance(c, str) for c in command):
         return f"ERROR: launch.command of '{agent}' must be a non-empty list of strings."
@@ -259,7 +292,8 @@ def wake_agent(agent: str, roster: list[dict] | None = None, dry_run: bool = Fal
     return status
 
 
-def supervise(interval: float = 60.0, once: bool = False, dry_run: bool = False) -> int:
+def supervise(interval: float = 60.0, once: bool = False, dry_run: bool = False,
+              host: str | None = None) -> int:
     """The single watcher: every `interval` seconds, for each roster entry
     with a `launch` block whose instance is not already being woken, decide
     and launch in a thread (a milestone review can run hours; the other
@@ -270,16 +304,21 @@ def supervise(interval: float = 60.0, once: bool = False, dry_run: bool = False)
     except RuntimeError as exc:
         _log(f"ERROR: {exc}")
         return 1
-    names = [str(e["name"]).lower() for e in roster
-             if isinstance(e, dict) and isinstance(e.get("launch"), dict) and e.get("name")]
-    if not names:
+    host = host or this_machine()
+    launchable = [e for e in roster
+                  if isinstance(e, dict) and isinstance(e.get("launch"), dict) and e.get("name")]
+    if not launchable:
         _log(f"ERROR: no roster entry with a 'launch' block in {roster_path()}")
         return 1
-    _log(f"supervising {', '.join(names)} (interval {interval:g}s)")
+    names = [str(e["name"]).lower() for e in launchable if launches_here(e["launch"], host)]
+    if not names:
+        _log(f"no roster entry is launched on {host} — nothing to supervise here")
+        return 0
+    _log(f"supervising {', '.join(names)} on {host} (interval {interval:g}s)")
     running: dict[str, threading.Thread] = {}
 
     def run(name: str) -> None:
-        result = wake_agent(name, roster, dry_run=dry_run)
+        result = wake_agent(name, roster, dry_run=dry_run, host=host)
         if result != "NO_SIGNAL":
             _log(f"{name}: {result}")
 
