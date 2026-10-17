@@ -523,6 +523,26 @@ def reserve(agent: str, machine: str) -> tuple[str | None, bool]:
     return None, True
 
 
+def bind_in(conn, agent: str, machine: str, origin: str) -> str | None:
+    """Bind an instance an import brings to its machine, inside the
+    import's transaction — NOT pinned, like a binding on first use: the
+    names come from a file the admin did not write, so they grant no
+    policy power until an admin vouches for them (`iab bind`). A name
+    another machine already holds is refused. Returns an ERROR line, or
+    None."""
+    row = conn.execute("SELECT machine FROM agent_machines WHERE agent=?",
+                       (agent,)).fetchone()
+    if row is not None and row["machine"] != machine:
+        return (f"ERROR: agent '{agent}' already belongs to machine '{row['machine']}' — "
+                "import refused, nothing written.")
+    if row is None:
+        conn.execute("INSERT INTO agent_machines(agent, machine, bound_at) VALUES(?,?,?)",
+                     (agent, machine, store._now()))
+        store._log_event(conn, "bind", agent=agent,
+                         detail=f"bound to machine {machine} by {origin}")
+    return None
+
+
 def release(agent: str, machine: str) -> None:
     """Undo a reservation whose operation failed (never a pinned binding)."""
     with closing(_connect()) as conn, store._write(conn):
@@ -559,8 +579,8 @@ def pin(agent: str, machine: str, admin: str) -> str:
 
 
 def pin_in(conn, agent: str, machine: str, admin: str) -> str | None:
-    """`pin` inside the caller's write transaction (an import binds what it
-    brings in the same transaction). Returns an ERROR line, or None."""
+    """`pin` inside the caller's write transaction. Returns an ERROR line,
+    or None."""
     row = conn.execute("SELECT status FROM machines WHERE name=?", (machine,)).fetchone()
     if row is None or row["status"] != "active":
         return f"ERROR: no active machine '{machine}'."

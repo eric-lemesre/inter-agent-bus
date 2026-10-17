@@ -162,9 +162,13 @@ iab hub import mimir-bus.db --bind mimir
 
 Everything comes over in one transaction, after the hub's own entries
 (channel and notification ids are renumbered, read cursors follow);
-wake locks stay behind. `--bind` binds the imported instances to the
-machine they come from; without it they belong to no machine and are
-refused until an admin binds each one (`iab bind`). A name or task id
+wake locks stay behind; imported journal entries are stamped
+`import:<machine>`, whatever the file says. `--bind` binds the imported
+instances to the machine they come from, as on first use: they work
+from it, but count in the policy only once an admin vouches for one
+with `iab bind`; a name another machine holds refuses the import.
+Without `--bind` they belong to no machine and are refused until an
+admin binds each one. A name or task id
 present on both sides refuses the whole import, nothing written: rename
 it on the source first (`IAB_DB=mimir-bus.db iab rename …`). The file
 is treated as untrusted: a row that concerns anything but its own
@@ -172,9 +176,8 @@ agents and tasks (work for a hub instance, a result for a hub task, a
 message to or signed by an instance it does not bring) refuses the
 whole import as well, and what it brings obeys `accepts_from` as if the
 `--bind` machine had sent it live (without `--bind`, no rule is
-satisfied). Restart
-the agents with `IAB_HUB` set: what would still be written to the local
-file is not carried over.
+satisfied). Restart the agents with `IAB_HUB` set: what would still be
+written to the local file is not carried over.
 
 ## Wake-up across machines
 

@@ -88,6 +88,9 @@ WORKSPACES_FILE = DATA_DIR / "workspaces.json"
 _COMPONENT = r"[a-z0-9][a-z0-9._-]{0,39}"
 _NAME_RE = re.compile(rf"^{_COMPONENT}(@{_COMPONENT})?$")
 _PATTERN_RE = re.compile(r"[*]")
+# The mechanism's own voice (task-queued notices, hub announcements): no
+# client may register, rename to or connect as it.
+SYSTEM_AUTHOR = "bus"
 
 
 def _now() -> str:
@@ -329,6 +332,8 @@ def register_agent(
             f"ERROR: invalid agent name '{name}' — expected harness[@workspace], "
             "each component [a-z0-9][a-z0-9._-]{0,39}."
         )
+    if name == SYSTEM_AUTHOR:
+        return f"ERROR: '{name}' is reserved for the bus itself."
     harness, workspace = split_name(name)
     with _db() as conn, _write(conn):
         known = conn.execute("SELECT 1 FROM agents WHERE name=?", (name,)).fetchone()
@@ -357,6 +362,8 @@ def rename_agent(old: str, new: str) -> str:
         return "ERROR: empty agent name."
     if not _NAME_RE.match(new):
         return f"ERROR: invalid agent name '{new}' — expected harness[@workspace]."
+    if new == SYSTEM_AUTHOR:
+        return f"ERROR: '{new}' is reserved for the bus itself."
     harness, workspace = split_name(new)
     with _db() as conn:
         with _write(conn):
@@ -468,15 +475,15 @@ def _foreign_rows(data: dict[str, list[dict]]) -> list[str]:
     # newline through), keys as text: a value the target would store or
     # compare differently must not pass the check below.
     problems = [f"agents.name={n!r}" for n in agents
-                if not (isinstance(n, str) and _NAME_RE.fullmatch(n))]
+                if not (isinstance(n, str) and _NAME_RE.fullmatch(n)) or n == SYSTEM_AUTHOR]
     problems += [f"tasks.task_id={t!r}" for t in tasks if not isinstance(t, str)]
     rules = (("tasks", "agent", agents), ("results", "task_id", tasks),
              ("results", "author", agents), ("presence", "agent", agents),
              ("channel", "author", agents), ("channel_cursor", "agent", agents),
              ("notifications", "target", agents),
-             ("notifications", "author", agents | {"bus"}),
+             ("notifications", "author", agents | {SYSTEM_AUTHOR}),
              ("notification_cursor", "target", agents),
-             ("events", "agent", agents | {"bus", None}),
+             ("events", "agent", agents | {SYSTEM_AUTHOR, None}),
              ("events", "task_id", tasks | {None}))
     for table, column, allowed in rules:
         problems += sorted({f"{table}.{column}={r.get(column)}" for r in data[table]
@@ -489,7 +496,8 @@ def _remap(mapping: dict[int, int], last_seq: int) -> int:
     return max((new for old, new in mapping.items() if old <= last_seq), default=0)
 
 
-def import_database(source: str | os.PathLike, dry_run: bool = False, after=None) -> str:
+def import_database(source: str | os.PathLike, dry_run: bool = False, after=None,
+                    origin: str = "import") -> str:
     """Copy a local bus (a SQLite file) into the current database — the
     migration of an existing bus to a hub. Agents, queues, results,
     presence, channel, notifications, cursors and journal come over in one
@@ -500,6 +508,8 @@ def import_database(source: str | os.PathLike, dry_run: bool = False, after=None
     supervisor. Refused, nothing written, when a name or task id exists on
     both sides — rename it first (`IAB_DB=<source> iab rename`) — or when
     a row refers to anything but the source's own agents and tasks.
+    Imported journal entries are stamped `origin` as their machine,
+    whatever the file claims — the journal says where an entry came from.
     `after(conn, agents, flows)` runs inside the transaction and may
     refuse with an `ERROR:` string — the hub checks the flows (kind,
     sender, recipient) against its policy and binds the imported
@@ -559,7 +569,7 @@ def import_database(source: str | os.PathLike, dry_run: bool = False, after=None
                     _insert_row(conn, known, "notification_cursor",
                                 {**row, "last_seq": _remap(notices, row["last_seq"])})
                 for row in data["events"]:
-                    _insert_row(conn, known, "events", row, skip="id")
+                    _insert_row(conn, known, "events", {**row, "machine": origin}, skip="id")
                 counts = {t: len(data[t]) for t in (
                     "agents", "tasks", "results", "presence", "channel", "notifications",
                     "events")}
@@ -572,7 +582,8 @@ def import_database(source: str | os.PathLike, dry_run: bool = False, after=None
                     # a file proves nothing: such a notice is checked as
                     # sent by the source machine itself.
                     flows = ([("work", None, r["agent"]) for r in data["tasks"]]
-                             + [("message", None if r["author"] == "bus" else r["author"],
+                             + [("message",
+                                 None if r["author"] == SYSTEM_AUTHOR else r["author"],
                                  r["target"]) for r in data["notifications"]]
                              + [("channel", r["author"], None) for r in data["channel"]])
                     refused = after(conn, agents, flows)
@@ -684,7 +695,7 @@ def push_task(
             # member — rule 1 forbids hardcoding agents, not the bus itself).
             conn.execute(
                 "INSERT INTO notifications(target, author, at, message) VALUES(?,?,?,?)",
-                (target, "bus", _now(),
+                (target, SYSTEM_AUTHOR, _now(),
                  f"task '{task_id}' queued (priority {priority}) — claim it with claim_task"),
             )
     return f"OK: task '{task_id}' queued for {target}."
@@ -1065,7 +1076,7 @@ def touch_identity(identity: dict) -> None:
     environment never has to call register_agent — then refreshes its
     presence. Failures must not break the tool call: callers swallow them."""
     name = str(identity.get("agent_name") or "").strip().lower()
-    if not name or not _NAME_RE.match(name):
+    if not name or not _NAME_RE.match(name) or name == SYSTEM_AUTHOR:
         return
     with _db() as conn, _write(conn):
         if conn.execute("SELECT 1 FROM agents WHERE name=?", (name,)).fetchone() is None:
@@ -1162,9 +1173,9 @@ def system_announce(topic: str, message: str) -> str:
         seq = _insert_id(
             conn,
             "INSERT INTO channel(author, at, topic, message) VALUES(?,?,?,?)",
-            ("bus", _now(), topic, message),
+            (SYSTEM_AUTHOR, _now(), topic, message),
         )
-        _log_event(conn, "announce", agent="bus", detail=topic)
+        _log_event(conn, "announce", agent=SYSTEM_AUTHOR, detail=topic)
     return json.dumps({"seq": seq}, ensure_ascii=False)
 
 

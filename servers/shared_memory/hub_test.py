@@ -570,7 +570,12 @@ with tempfile.TemporaryDirectory() as tmp:
           r.startswith("OK: would import") and registry.bound_machine("imported@gamma") is None, r)
     r = hub.import_bus(source, bind="gamma", home=home)
     check("an import binds its instances to their machine",
-          r.startswith("OK") and registry.pinned_machine("imported@gamma") == "gamma", r)
+          r.startswith("OK") and registry.bound_machine("imported@gamma") == "gamma", r)
+    check("an imported name grants no policy power until an admin vouches for it",
+          registry.pinned_machine("imported@gamma") is None)
+    events = [e for e in json.loads(store.get_events(task_id="imp1")) if e["event"] == "push"]
+    check("imported journal entries say they were imported, from which machine",
+          events and all(e["machine"] == "import:gamma" for e in events), events)
     r = bus.claim_task("imported@gamma", 60)
     check("the machine works its imported queue through the hub",
           r.startswith("{") and json.loads(r)["task_id"] == "imp1", r)
@@ -578,6 +583,19 @@ with tempfile.TemporaryDirectory() as tmp:
     r = as_alpha.heartbeat("imported@gamma")
     check("another machine cannot act as an imported instance",
           r.startswith("ERROR") and "belongs to machine 'gamma'" in r, r)
+    server.authz = authz.Authz({"orchestrators": ["imported@gamma"]})
+    as_gamma = remote.RemoteBackend(url, gamma_dir)
+    as_gamma.caller = "imported@gamma"
+    r = as_gamma.cancel_task("imp1")
+    check("a name listed in the policy, brought by an import, is not a principal",
+          r.startswith("ERROR") and "orchestrator" in r, r)
+    server.authz = authz.Authz(None)
+    registry.reserve("taken@alpha", "alpha")
+    source = local_bus(tmp / "taken-local.db", "taken@alpha", "imp-taken")
+    r = hub.import_bus(source, bind="gamma", home=home)
+    check("an import cannot take a name another machine holds",
+          r.startswith("ERROR") and "already belongs to machine 'alpha'" in r
+          and registry.bound_machine("taken@alpha") == "alpha", r)
     source = local_bus(tmp / "stray-local.db", "stray@nowhere", "imp2")
     r = hub.import_bus(source, home=home)
     check("an import without --bind says what stays unbound",

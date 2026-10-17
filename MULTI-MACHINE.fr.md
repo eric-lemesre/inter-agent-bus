@@ -165,10 +165,14 @@ iab hub import mimir-bus.db --bind mimir
 
 Tout passe en une transaction, après les entrées propres au moyeu (les
 numéros du canal et des notifications sont renumérotés, les curseurs de
-lecture suivent) ; les verrous de réveil restent derrière. `--bind`
-rattache les instances importées à la machine d'où elles viennent ;
-sans lui, elles n'appartiennent à aucune machine et sont refusées tant
-qu'un admin ne les a pas rattachées une à une (`iab bind`). Un nom ou
+lecture suivent) ; les verrous de réveil restent derrière ; les entrées
+de journal importées portent `import:<machine>`, quoi que dise le
+fichier. `--bind` rattache les instances importées à la machine d'où
+elles viennent, comme au premier usage : elles travaillent depuis elle,
+mais ne comptent dans la politique qu'une fois qu'un admin s'en est
+porté garant par `iab bind` ; un nom qu'une autre machine détient fait
+refuser l'import. Sans `--bind`, elles n'appartiennent à aucune machine
+et sont refusées tant qu'un admin ne les a pas rattachées une à une. Un nom ou
 un identifiant de tâche présent des deux côtés fait refuser tout
 l'import, sans rien écrire : le renommer d'abord sur la source
 (`IAB_DB=mimir-bus.db iab rename …`). Le fichier est traité comme non
