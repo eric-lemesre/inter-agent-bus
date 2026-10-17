@@ -165,10 +165,11 @@ class Authz:
                 return (f"ERROR: agent '{target}' does not accept "
                         f"{'work' if op == 'push_task' else 'messages'} from "
                         f"{', '.join(principals)} (hub policy: accepts_from)."), None
-        if op == "announce":
-            # The global channel reaches every agent, present AND future:
-            # the sender must satisfy every rule of the policy, not just
-            # those of the agents registered right now.
+        if op in ("announce", "broadcast"):
+            # The global channel reaches every agent, present AND future —
+            # a broadcast writes its message there too, whatever its
+            # scope: the sender must satisfy every rule of the policy, not
+            # just those of the agents registered right now.
             for pattern, senders in self.accepts_from.items():
                 if not _matches(principals, senders):
                     return (f"ERROR: the global channel reaches agents matching '{pattern}', "

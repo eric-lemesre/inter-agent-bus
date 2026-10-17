@@ -491,6 +491,9 @@ with tempfile.TemporaryDirectory() as tmp:
     r = bus.announce("worker@gamma", "news", "hello everyone")
     check("…including agents that do not exist yet",
           r.startswith("ERROR") and "nobody-yet@*" in r, r)
+    r = bus.broadcast("worker@gamma", "hello", "claude@lab")
+    check("a broadcast to an explicit list obeys the channel rule (its message lands there)",
+          r.startswith("ERROR") and "nobody-yet@*" in r, r)
     server.authz = authz.Authz(None)
     os.environ["IAB_MACHINE_DIR"] = alpha_dir
     listed = {m["name"]: m["agents"] for m in admin.call("machines")}
