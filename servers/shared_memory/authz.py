@@ -77,9 +77,13 @@ class Authz:
     # -- principals --------------------------------------------------------
 
     def principals(self, machine: dict, caller: str) -> list[str]:
+        """`machine:` and `role:` are proven by the certificate. An instance
+        name counts only when an ADMIN bound it to this machine (`iab
+        bind`): a binding made on first use proves first come, not trust,
+        so it never grants policy power."""
         found = [f"machine:{machine['name']}", f"role:{machine['role']}"]
         caller = (caller or "").strip().lower()
-        if caller and registry.bound_machine(caller) == machine["name"]:
+        if caller and registry.pinned_machine(caller) == machine["name"]:
             found.append(caller)
         return found
 
@@ -118,37 +122,68 @@ class Authz:
             return True
         return op == "broadcast" and _is_pattern_scope(arguments.get("scope", "*"))
 
-    def check(self, op: str, arguments: dict, machine: dict, caller: str) -> str | None:
-        """None when the operation may run for this machine, else the ERROR
-        line to return. Binds an unbound acting instance to the machine."""
+    def _recipients(self, op: str, arguments: dict) -> list[str]:
+        """Who receives work or a message from this operation (resolved like
+        the core; an address it would refuse yields nobody here)."""
+        if op == "push_task":
+            target, error = store.resolve_agent(str(arguments.get("target_agent", "")))
+            return [target] if error is None else []
+        if op == "notify":
+            target, error = store.resolve_agent(str(arguments.get("target_agent", "")))
+            return [target] if error is None else []
+        if op == "broadcast":
+            names, error = store.broadcast_recipients(arguments.get("scope", "*"))
+            return names if error is None else []
+        return []
+
+    def check(self, op: str, arguments: dict, machine: dict,
+              caller: str) -> tuple[str | None, str | None]:
+        """(None, reserved) when the operation may run for this machine —
+        `reserved` names an instance bound to it by this very check, to
+        release if the operation fails (see after) — else (ERROR line,
+        None). Every rule is checked BEFORE anything is bound."""
         principals = self.principals(machine, caller)
         if self._orchestrator_op(op, arguments) and not _matches(principals,
                                                                  self.orchestrators):
             return (f"ERROR: '{op}' is an orchestrator operation — not allowed for "
-                    f"{', '.join(principals)} (hub policy: orchestrators).")
+                    f"{', '.join(principals)} (hub policy: orchestrators)."), None
         acting = self._acting(op, arguments)
-        if acting:
-            refused = registry.bind(acting, machine["name"])
-            if refused:
-                return refused
-            if acting not in principals:
-                principals.append(acting)
-        if op == "push_task":
-            target, error = store.resolve_agent(str(arguments.get("target_agent", "")))
-            if error is None:
-                allowed = [senders for pattern, senders in self.accepts_from.items()
-                           if fnmatch.fnmatchcase(target, pattern)]
-                if allowed and not any(_matches(principals, senders) for senders in allowed):
-                    return (f"ERROR: agent '{target}' does not accept work from "
-                            f"{', '.join(principals)} (hub policy: accepts_from).")
+        owner = registry.bound_machine(acting) if acting else None
+        if owner and owner != machine["name"]:
+            return (f"ERROR: agent '{acting}' belongs to machine '{owner}' — refused from "
+                    f"'{machine['name']}' (an admin can move it: "
+                    f"`iab bind {acting} {machine['name']}`)."), None
+        if acting and registry.pinned_machine(acting) == machine["name"] \
+                and acting not in principals:
+            principals.append(acting)
+        # accepts_from applies to every recipient of work OR of a message: a
+        # message reaches an agent's context too, and a wake launches it.
+        for target in self._recipients(op, arguments):
+            allowed = [senders for pattern, senders in self.accepts_from.items()
+                       if fnmatch.fnmatchcase(target, pattern)]
+            if allowed and not any(_matches(principals, senders) for senders in allowed):
+                return (f"ERROR: agent '{target}' does not accept "
+                        f"{'work' if op == 'push_task' else 'messages'} from "
+                        f"{', '.join(principals)} (hub policy: accepts_from)."), None
         if op == "rename_agent":
             new = str(arguments.get("new", "")).strip().lower()
-            owner = registry.bound_machine(new)
-            if owner and owner != machine["name"]:
-                return f"ERROR: agent '{new}' belongs to machine '{owner}'."
-        return None
+            new_owner = registry.bound_machine(new)
+            if new_owner and new_owner != machine["name"]:
+                return f"ERROR: agent '{new}' belongs to machine '{new_owner}'.", None
+        if not acting:
+            return None, None
+        refused, reserved = registry.reserve(acting, machine["name"])
+        if refused:
+            return refused, None
+        return None, acting if reserved else None
 
-    def after(self, op: str, arguments: dict, result) -> None:
-        """Follow-ups of a successful operation."""
-        if op == "rename_agent" and isinstance(result, str) and result.startswith("OK"):
+    def after(self, op: str, arguments: dict, result, machine: dict,
+              reserved: str | None) -> None:
+        """Follow-ups: a binding made for an operation that then failed is
+        released (no squat left behind by a refused call); a rename moves
+        the binding with the name."""
+        failed = isinstance(result, str) and result.startswith("ERROR")
+        if failed and reserved:
+            registry.release(reserved, machine["name"])
+        if op == "rename_agent" and not failed:
             registry.rename_binding(str(arguments["old"]), str(arguments["new"]))

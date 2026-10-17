@@ -339,11 +339,13 @@ machines admin.
   [`MULTI-MACHINE.fr.md`](MULTI-MACHINE.fr.md).
 - **9d** — autorisation : instance ↔ machine, rôles d'orchestrateur,
   `accepts_from`, limites — **livrée**. `authz.py` : une instance
-  appartient à la première machine qui agit en son nom (`iab unbind`
-  pour la déplacer) ; annuler, re-proposer, renommer, publier en force
+  nouvelle appartient à la machine qui la crée, une instance existante
+  sans propriétaire exige `iab bind` (pas de squat), une opération
+  refusée ne laisse aucun rattachement ; seule une instance rattachée
+  par un admin compte dans la politique ; annuler, re-proposer, renommer, publier en force
   et diffuser vers un motif exigent un principal de
   `policy.orchestrators` (défaut : machines admin) ; `accepts_from`
-  borne qui pousse du travail à qui ; débit par machine ; la machine
+  borne qui pousse du travail ou envoie un message à qui ; débit par machine ; la machine
   appelante est journalisée avec chaque événement.
 - **9e** — clés TPM, politique par machine.
 - **9f** — dialecte PostgreSQL, tests sur deux moteurs.

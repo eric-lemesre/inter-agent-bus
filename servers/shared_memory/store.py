@@ -1106,6 +1106,12 @@ def _expand_scope(conn: Connection, scope: str | list) -> tuple[list[str], str |
     return names, None if names else "ERROR: empty scope."
 
 
+def broadcast_recipients(scope: str | list) -> tuple[list[str], str | None]:
+    """Read-only: who a broadcast scope designates (see _expand_scope)."""
+    with _db() as conn:
+        return _expand_scope(conn, scope)
+
+
 def broadcast(
     author: str, message: str, scope: str | list = "*",
     alive_only: bool = False, wake: bool = False,

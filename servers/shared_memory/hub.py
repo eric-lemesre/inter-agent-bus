@@ -252,11 +252,15 @@ def dispatch(name: str, body: bytes, machine: dict, caller: str = "",
     if key is not None:
         bound.arguments[key] = max(0.0, min(float(bound.arguments[key]), LONG_POLL_SECONDS))
     policy = policy or authz.Authz()
-    refused = policy.check(name, dict(bound.arguments), machine, caller)
+    refused, reserved = policy.check(name, dict(bound.arguments), machine, caller)
     if refused:
         return _bad(403, refused)
-    result = function(*bound.args, **bound.kwargs)
-    policy.after(name, dict(bound.arguments), result)
+    try:
+        result = function(*bound.args, **bound.kwargs)
+    except Exception:
+        policy.after(name, dict(bound.arguments), "ERROR: internal", machine, reserved)
+        raise
+    policy.after(name, dict(bound.arguments), result, machine, reserved)
     return 200, {"result": result}
 
 
@@ -296,8 +300,9 @@ def admin_dispatch(action: str, body: bytes, machine: dict,
         return _answer(authority.machines())
     if action == "revoke":
         return _answer(authority.revoke(str(request.get("name", "")), who))
-    if action == "unbind":
-        return _answer(registry.unbind(str(request.get("agent", ""))))
+    if action == "bind":
+        return _answer(registry.pin(str(request.get("agent", "")),
+                                    str(request.get("machine", "")), who))
     return _bad(404, f"unknown admin action '{action}'.")
 
 
@@ -411,6 +416,9 @@ class _BusHandler(_BaseHandler):
 
     def do_GET(self) -> None:
         self._authenticate()
+        if self.machine is not None and not self.server.admit(self.machine["name"]):
+            self._send(*_bad(429, "too many requests — slow down."))
+            return
         if self.machine is None:
             self.close_connection = True
             self._send(*_bad(403, "this machine certificate is not paired with the hub."))

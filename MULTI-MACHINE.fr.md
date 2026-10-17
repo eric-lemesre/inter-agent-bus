@@ -140,7 +140,7 @@ local.
 | `iab machines` | machines appairées, rôle, type de clé, dernière visite |
 | `iab revoke <machine>` | refusée dès sa requête suivante (la dernière admin ne peut pas l'être) |
 | `iab deny <code>` | refuse une demande en attente |
-| `iab unbind <instance>` | libère une instance de sa machine (elle a déménagé) |
+| `iab bind <instance> <machine>` | rattache une instance à une machine (déménagement, ou pour qu'elle compte dans la politique) |
 | `iab renew [--force]` | renouvelle le certificat (automatique à moins de 10 jours) |
 
 Chaque appairage et chaque révocation sont journalisés et annoncés sur
@@ -152,19 +152,23 @@ plus de 30 jours doit être appairée de nouveau.
 Chaque requête vient d'une machine authentifiée, ce qui rend trois
 règles applicables par le moyeu :
 
-1. **Rattachement** : une instance `harnais@espace` appartient à la
-   première machine qui agit en son nom ; aucune autre ne peut ensuite
+1. **Rattachement** : une instance `harnais@espace` **nouvelle**
+   appartient à la machine qui la crée ; aucune autre ne peut ensuite
    réclamer sa file, publier, battre son cœur, lire sa boîte ou prendre
-   son verrou de réveil. `iab unbind <instance>` (admin) la libère
-   quand elle change de machine. `iab machines` liste les instances de
+   son verrou de réveil. Une instance déjà existante que nul ne possède
+   (base importée, enregistrement antérieur) est refusée tant qu'un
+   admin ne l'a pas rattachée : `iab bind <instance> <machine>`, qui
+   sert aussi à la déménager. Une opération refusée ne laisse aucun
+   rattachement derrière elle. `iab machines` liste les instances de
    chaque machine.
 2. **Opérations d'orchestrateur** : annuler, re-proposer, renommer,
    publier en force, diffuser vers un motif (`*`, `harnais@*`…).
    Réservées aux principaux de `policy.orchestrators` — par défaut les
    machines admin.
-3. **`accepts_from`** : qui peut pousser du travail à qui, la défense
-   principale contre une injection de prompt passant des agents d'une
-   machine à ceux d'une autre.
+3. **`accepts_from`** : qui peut pousser du travail ou envoyer un
+   message (notification, chaque destinataire d'une diffusion) à qui —
+   la défense principale contre une injection de prompt passant des
+   agents d'une machine à ceux d'une autre.
 
 La politique se règle dans `hub.json`, jamais dans le code :
 
@@ -176,9 +180,11 @@ La politique se règle dans `hub.json`, jamais dans le code :
 "rate": {"per_second": 50, "burst": 200}
 ```
 
-Principaux d'une requête : `machine:<nom>`, `role:<rôle>`, et l'instance
-que le client déclare (son `IAB_AGENT_NAME`) si elle est rattachée à
-cette même machine. Les lectures (état, résultats, journal, présence)
+Principaux d'une requête : `machine:<nom>`, `role:<rôle>` (prouvés par le
+certificat), et l'instance que le client déclare ou au nom de laquelle
+il agit, **seulement si un admin l'a rattachée** à cette même machine
+(`iab bind`) : un rattachement au premier usage prouve l'antériorité,
+pas la confiance. Préférez `machine:<nom>` dans la politique. Les lectures (état, résultats, journal, présence)
 restent ouvertes à toute machine appairée. Le journal nomme la machine
 de chaque événement (`iab log`).
 

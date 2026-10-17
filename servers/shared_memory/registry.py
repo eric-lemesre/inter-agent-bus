@@ -66,7 +66,8 @@ CREATE TABLE IF NOT EXISTS pairing_requests (
 CREATE TABLE IF NOT EXISTS agent_machines (
     agent    TEXT PRIMARY KEY,
     machine  TEXT NOT NULL,
-    bound_at TEXT NOT NULL
+    bound_at TEXT NOT NULL,
+    pinned   INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS invitations (
     token_hash TEXT PRIMARY KEY,
@@ -468,24 +469,39 @@ def redeem_invitation(token_id: str, name: str, signed: bytes, mac: str) -> dict
 # -- agent instances bound to machines (authorization, phase 9d) -----------
 
 
-def bind(agent: str, machine: str) -> str | None:
-    """Bind an agent instance to the machine acting as it, on first use.
-    Returns None when `machine` may act as `agent`, else an ERROR line
-    naming the owner — no other machine may claim its queue, publish,
-    heartbeat or read its mailbox in its name."""
+def reserve(agent: str, machine: str) -> tuple[str | None, bool]:
+    """May `machine` act as `agent`? Returns (None, reserved) when it may —
+    `reserved` is True when this call just bound a NEW name to it (undo it
+    with release() if the operation then fails) — or (ERROR line, False).
+
+    Binding on first use applies to names nobody registered yet: an
+    existing instance that no machine owns (imported, or registered
+    before the hub enforced bindings) is refused until an admin binds it
+    (`iab bind`) — a paired machine must not be able to squat it."""
     agent = agent.strip().lower()
     with closing(_connect()) as conn, store._write(conn):
         row = conn.execute("SELECT machine FROM agent_machines WHERE agent=?",
                            (agent,)).fetchone()
-        if row is None:
-            conn.execute("INSERT INTO agent_machines(agent, machine, bound_at) VALUES(?,?,?)",
-                         (agent, machine, store._now()))
-            store._log_event(conn, "bind", agent=agent, detail=f"bound to machine {machine}")
-            return None
-    if row["machine"] == machine:
-        return None
-    return (f"ERROR: agent '{agent}' belongs to machine '{row['machine']}' — refused from "
-            f"'{machine}' (an admin can move it with `iab unbind {agent}`).")
+        if row is not None:
+            if row["machine"] == machine:
+                return None, False
+            return (f"ERROR: agent '{agent}' belongs to machine '{row['machine']}' — "
+                    f"refused from '{machine}' (an admin can move it: "
+                    f"`iab bind {agent} {machine}`)."), False
+        if conn.execute("SELECT 1 FROM agents WHERE name=?", (agent,)).fetchone():
+            return (f"ERROR: agent '{agent}' exists but no machine owns it — an admin must "
+                    f"bind it first: `iab bind {agent} {machine}`."), False
+        conn.execute("INSERT INTO agent_machines(agent, machine, bound_at) VALUES(?,?,?)",
+                     (agent, machine, store._now()))
+        store._log_event(conn, "bind", agent=agent, detail=f"bound to machine {machine}")
+    return None, True
+
+
+def release(agent: str, machine: str) -> None:
+    """Undo a reservation whose operation failed (never a pinned binding)."""
+    with closing(_connect()) as conn, store._write(conn):
+        conn.execute("DELETE FROM agent_machines WHERE agent=? AND machine=? AND pinned=0",
+                     (agent.strip().lower(), machine))
 
 
 def bound_machine(agent: str) -> str | None:
@@ -495,16 +511,32 @@ def bound_machine(agent: str) -> str | None:
     return row["machine"] if row else None
 
 
-def unbind(agent: str) -> str:
-    """Free an instance from its machine (it moved): the next machine to act
-    as it becomes its owner."""
+def pinned_machine(agent: str) -> str | None:
+    """The machine an ADMIN bound this instance to — the only bindings that
+    count as principals in the hub policy."""
+    with closing(_connect()) as conn:
+        row = conn.execute("SELECT machine FROM agent_machines WHERE agent=? AND pinned=1",
+                           (agent.strip().lower(),)).fetchone()
+    return row["machine"] if row else None
+
+
+def pin(agent: str, machine: str, admin: str) -> str:
+    """An admin binds an instance to a machine (creates or moves the
+    binding, marked pinned)."""
     agent = agent.strip().lower()
+    machine = machine.strip().lower()
+    if not store._NAME_RE.match(agent):
+        return f"ERROR: invalid agent name '{agent}'."
     with closing(_connect()) as conn, store._write(conn):
-        cur = conn.execute("DELETE FROM agent_machines WHERE agent=?", (agent,))
-        if not cur.rowcount:
-            return f"ERROR: agent '{agent}' is not bound to any machine."
-        store._log_event(conn, "bind", agent=agent, detail="unbound")
-    return f"OK: agent '{agent}' unbound."
+        row = conn.execute("SELECT status FROM machines WHERE name=?", (machine,)).fetchone()
+        if row is None or row["status"] != "active":
+            return f"ERROR: no active machine '{machine}'."
+        conn.execute("DELETE FROM agent_machines WHERE agent=?", (agent,))
+        conn.execute("INSERT INTO agent_machines(agent, machine, bound_at, pinned) "
+                     "VALUES(?,?,?,1)", (agent, machine, store._now()))
+        store._log_event(conn, "bind", agent=agent,
+                         detail=f"bound to machine {machine} by {admin}")
+    return f"OK: agent '{agent}' bound to machine '{machine}'."
 
 
 def rename_binding(old: str, new: str) -> None:

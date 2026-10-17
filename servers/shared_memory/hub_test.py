@@ -444,7 +444,12 @@ with tempfile.TemporaryDirectory() as tmp:
     as_gamma = remote.RemoteBackend(url, gamma_dir)
     as_gamma.caller = "worker@gamma"
     r = as_gamma.cancel_task("g2")
-    check("an instance listed as orchestrator may run orchestrator operations",
+    check("a binding made on first use grants no policy power",
+          r.startswith("ERROR") and "orchestrator" in r, r)
+    r = admin.call("bind", {"agent": "worker@gamma", "machine": "gamma"})
+    check("an admin vouches for an instance by binding it", str(r).startswith("OK"), r)
+    r = as_gamma.cancel_task("g2")
+    check("an instance bound by an admin and listed as orchestrator may orchestrate",
           r.startswith("OK"), r)
     bus.push_task("worker@gamma", "g3", "x")
     as_gamma.caller = "kimi@lab"  # bound to alpha: claiming it proves nothing
@@ -453,11 +458,33 @@ with tempfile.TemporaryDirectory() as tmp:
     server.authz = authz.Authz(None)
     bus.cancel_task("g3")
 
-    r = admin.call("unbind", {"agent": "kimi@lab"})
-    check("an admin unbinds an instance that moved", str(r).startswith("OK"), r)
+    r = admin.call("bind", {"agent": "kimi@lab", "machine": "gamma"})
+    check("an admin moves an instance to another machine", str(r).startswith("OK"), r)
     os.environ["IAB_MACHINE_DIR"] = str(gamma_dir)
     r = bus.heartbeat("kimi@lab")
-    check("the next machine acting as it becomes its owner", r.startswith("{"), r)
+    check("the instance now works from its new machine", r.startswith("{"), r)
+
+    # No squatting: an existing instance nobody owns needs an admin.
+    os.environ.pop("IAB_HUB")
+    store.register_agent("legacy@lab", "registered before the hub enforced bindings")
+    os.environ["IAB_HUB"] = url
+    r = bus.heartbeat("legacy@lab")
+    check("an existing unowned instance cannot be claimed by a machine",
+          r.startswith("ERROR") and "no machine owns it" in r, r)
+    r = bus.register_agent("Bad Name!", "refused by the core")
+    check("the core refuses an invalid name", r.startswith("ERROR"), r)
+    check("a refused operation leaves no binding behind",
+          registry.bound_machine("bad name!") is None)
+
+    # accepts_from covers messages and every broadcast recipient too.
+    server.authz = authz.Authz({"accepts_from": {"claude@*": ["machine:alpha"]}})
+    r = bus.notify("worker@gamma", "claude@lab", "hello")
+    check("accepts_from refuses a message from outside the list",
+          r.startswith("ERROR") and "messages" in r, r)
+    r = bus.broadcast("worker@gamma", "hello", "claude@lab,kimi@lab")
+    check("accepts_from refuses a broadcast with one refusing recipient",
+          r.startswith("ERROR") and "accepts_from" in r, r)
+    server.authz = authz.Authz(None)
     os.environ["IAB_MACHINE_DIR"] = alpha_dir
     listed = {m["name"]: m["agents"] for m in admin.call("machines")}
     check("machines list the instances bound to them",

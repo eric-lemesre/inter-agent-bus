@@ -183,8 +183,8 @@ def _pairing(args) -> int:
         return admin.show(admin.call("machines"))
     if args.command == "revoke":
         return admin.show(admin.call("revoke", {"name": args.name}))
-    if args.command == "unbind":
-        return admin.show(admin.call("unbind", {"agent": args.agent}))
+    if args.command == "bind":
+        return admin.show(admin.call("bind", {"agent": args.agent, "machine": args.machine}))
     if args.command == "renew":
         return admin.renew(args.force)
     return join.ping()
@@ -425,9 +425,10 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("machines", help="machines paired with the hub (admin machine)")
     p = sub.add_parser("revoke", help="revoke a machine: refused from its next request")
     p.add_argument("name")
-    p = sub.add_parser("unbind", help="free an agent instance from its machine (it moved): "
-                                      "the next machine acting as it owns it (admin)")
+    p = sub.add_parser("bind", help="bind an agent instance to a machine (admin): moves it, "
+                                    "or vouches for it in the hub policy")
     p.add_argument("agent")
+    p.add_argument("machine")
     p = sub.add_parser("renew", help="renew this machine's certificate (automatic when "
                                      "less than 10 days remain)")
     p.add_argument("--force", action="store_true", help="renew now")
@@ -449,7 +450,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "hub":
         return _hub(args)
     if args.command in ("join", "approve", "deny", "invite", "machines", "revoke",
-                        "unbind", "renew", "ping"):
+                        "bind", "renew", "ping"):
         return _pairing(args)
     if args.command == "supervise":
         return wake.supervise(args.interval, args.once, args.dry_run)
