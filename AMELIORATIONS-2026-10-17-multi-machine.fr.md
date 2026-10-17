@@ -17,8 +17,8 @@ posées :
 6. une mise en œuvre **vraiment simple**, installation et configuration
    de WireGuard comprises.
 
-Étude seulement : rien n'est développé. Candidat de phase 9 de la
-ROADMAP.
+Décisions du porteur prises le 2026-10-17 (§ 13) ; implémentation en
+cours, phase 9 de la [ROADMAP](ROADMAP.fr.md).
 
 ## 1. Constat
 
@@ -338,6 +338,14 @@ Décision à porter dans le dépôt HomeLab.
 - **9h** (optionnel) — MCP streamable HTTP pour les harnais confinés.
 
 ## 13. Décisions attendues du porteur, avec leur impact
+
+**Tranché le 2026-10-17** : moyeu unique (1) ; `cryptography` (3) ;
+variante MCP distante reportée (4) ; **une seule base** (5) — l'avis
+« une base par domaine de confiance » n'est pas retenu, `accepts_from`
+reste la défense principale entre agents ; appairage depuis Internet
+fermé au départ (6) ; TPM obligatoire pour les machines admin (7) ;
+Headscale validé, porté par le dépôt HomeLab (8). Reste ouvert : la
+machine du moyeu (2), à trancher côté HomeLab avec le rôle `iab_hub`.
 
 1. **Moyeu unique ou haute disponibilité ?** Unique : si sa machine
    tombe, la coordination entre machines s'arrête (erreur explicite), les

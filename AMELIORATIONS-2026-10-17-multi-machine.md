@@ -17,7 +17,8 @@ Noted on 2026-10-17. Owner's requests, in the order they were raised:
 6. a **truly simple** rollout, WireGuard installation and configuration
    included.
 
-Study only: nothing is implemented. Candidate for ROADMAP phase 9.
+Owner's decisions taken on 2026-10-17 (§ 13); implementation under way,
+phase 9 of the [ROADMAP](ROADMAP.md).
 
 ## 1. Findings
 
@@ -330,6 +331,14 @@ HomeLab repository.
 - **9h** (optional) — MCP streamable HTTP for sandboxed harnesses.
 
 ## 13. Decisions expected from the owner, with their impact
+
+**Decided on 2026-10-17**: single hub (1); `cryptography` (3); remote
+MCP variant deferred (4); **one single database** (5) — the "one
+database per trust domain" advice is not retained, `accepts_from`
+remains the main defence between agents; pairing from the Internet
+closed at first (6); TPM mandatory for admin machines (7); Headscale
+approved, carried by the HomeLab repository (8). Still open: the hub
+machine (2), to settle on the HomeLab side with the `iab_hub` role.
 
 1. **Single hub or high availability?** Single: if its machine goes
    down, cross-machine coordination stops (explicit error), standalone

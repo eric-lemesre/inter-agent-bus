@@ -25,7 +25,9 @@ clôt une demande.
    sans le SDK MCP.
 3. **Transport stdio, bus SQLite.** Une instance de serveur par client,
    partage par la base commune (WAL, transactions immédiates). Aucun
-   démon à superviser.
+   démon à superviser. Le moyeu multi-machine (phase 9) est un ajout
+   opt-in : sans `IAB_HUB`, rien de ceci ne change ; avec lui, le moyeu
+   est le seul démon du dispositif et la logique reste dans `store.py`.
 4. **Multiplateforme.** Linux, macOS et Windows sont tous de premier
    rang. L'outillage est en pur Python (aucun chemin réservé aux
    scripts shell), les chemins passent par `pathlib`, les défauts par
@@ -300,6 +302,29 @@ vingt heures.
   task|notification|any`, `iab signals`, `iab wake`, `iab supervise`.
 - **Skill** `worker-wake` réécrite autour du lanceur au roster et de la
   voie « session ouverte » (`iab watch --on any` en tâche de fond).
+
+## Phase 9 — Bus multi-machine
+
+Étude et décisions du 2026-10-17 :
+[`AMELIORATIONS-2026-10-17-multi-machine.fr.md`](AMELIORATIONS-2026-10-17-multi-machine.fr.md).
+Un moyeu (`iab hub`) expose `store.py` en HTTPS avec mTLS ; les
+machines s'y appairent par code, à la manière de Plex. Décisions :
+moyeu unique, une seule base, `cryptography` dans l'extra `[hub]`,
+appairage depuis Internet fermé au départ, TPM obligatoire pour les
+machines admin.
+
+- **9a** — couches d'accès et de dialecte, `LocalBackend` + SQLite, sans
+  changement de comportement.
+- **9b** — moyeu : `iab hub init/serve`, mTLS, `RemoteBackend`,
+  long-poll, détection d'inspection TLS.
+- **9c** — appairage : `iab join`, `iab approve`, invitation interne,
+  renouvellement, `iab machines`, `iab revoke`.
+- **9d** — autorisation : instance ↔ machine, rôles d'orchestrateur,
+  `accepts_from`, limites.
+- **9e** — clés TPM, politique par machine.
+- **9f** — dialecte PostgreSQL, tests sur deux moteurs.
+- **9g** — `host` dans `launch`, superviseur par machine.
+- **9h** — MCP streamable HTTP : **reportée**.
 
 ## Critère d'acceptation global
 

@@ -23,7 +23,9 @@ change that violates an invariant is wrong even if it closes a request.
    `store_test.py` runnable without the MCP SDK.
 3. **stdio transport, SQLite bus.** One server instance per client,
    sharing through the common database (WAL, immediate transactions).
-   No daemon to supervise.
+   No daemon to supervise. The multi-machine hub (phase 9) is an opt-in
+   addition: without `IAB_HUB` none of this changes; with it, the hub is
+   the only daemon of the setup and the logic stays in `store.py`.
 4. **Cross-platform.** Linux, macOS and Windows are all first-class.
    Tooling is pure Python (no shell-script-only path), file paths go
    through `pathlib`, platform defaults through a `platformdirs`-style
@@ -280,6 +282,28 @@ unnoticed for six weeks, and a reply sat unread for twenty hours.
   task|notification|any`, `iab signals`, `iab wake`, `iab supervise`.
 - **Skill** `worker-wake` rewritten around the roster launcher and the
   open-session path (`iab watch --on any` as a background task).
+
+## Phase 9 — Multi-machine bus
+
+Study and decisions of 2026-10-17:
+[`AMELIORATIONS-2026-10-17-multi-machine.md`](AMELIORATIONS-2026-10-17-multi-machine.md).
+A hub (`iab hub`) exposes `store.py` over HTTPS with mTLS; machines
+pair with it by code, Plex style. Decisions: single hub, one single
+database, `cryptography` in the `[hub]` extra, pairing from the
+Internet closed at first, TPM mandatory for admin machines.
+
+- **9a** — access and dialect layers, `LocalBackend` + SQLite, no
+  behaviour change.
+- **9b** — hub: `iab hub init/serve`, mTLS, `RemoteBackend`, long-poll,
+  TLS inspection detection.
+- **9c** — pairing: `iab join`, `iab approve`, internal invitation,
+  renewal, `iab machines`, `iab revoke`.
+- **9d** — authorization: instance ↔ machine, orchestrator roles,
+  `accepts_from`, limits.
+- **9e** — TPM keys, per-machine policy.
+- **9f** — PostgreSQL dialect, tests on two engines.
+- **9g** — `host` in `launch`, per-machine supervisor.
+- **9h** — MCP streamable HTTP: **deferred**.
 
 ## Global acceptance criterion
 
