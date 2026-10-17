@@ -484,6 +484,9 @@ with tempfile.TemporaryDirectory() as tmp:
     r = bus.broadcast("worker@gamma", "hello", "claude@lab,kimi@lab")
     check("accepts_from refuses a broadcast with one refusing recipient",
           r.startswith("ERROR") and "accepts_from" in r, r)
+    r = bus.announce("worker@gamma", "news", "hello everyone")
+    check("accepts_from covers the global channel (it reaches every agent)",
+          r.startswith("ERROR") and "accepts_from" in r, r)
     server.authz = authz.Authz(None)
     os.environ["IAB_MACHINE_DIR"] = alpha_dir
     listed = {m["name"]: m["agents"] for m in admin.call("machines")}

@@ -134,6 +134,10 @@ class Authz:
         if op == "broadcast":
             names, error = store.broadcast_recipients(arguments.get("scope", "*"))
             return names if error is None else []
+        if op == "announce":
+            # The global channel reaches every registered agent.
+            names, error = store.broadcast_recipients("*")
+            return names if error is None else []
         return []
 
     def check(self, op: str, arguments: dict, machine: dict,
