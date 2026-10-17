@@ -208,6 +208,7 @@ class _Handler(BaseHTTPRequestHandler):
     def setup(self) -> None:
         super().setup()
         self.machine: dict | None = None
+        self.fingerprint = ""
         try:
             self.request.do_handshake()
         except (ssl.SSLError, OSError) as exc:
@@ -220,8 +221,12 @@ class _Handler(BaseHTTPRequestHandler):
             return
         self.handshake_error = ""
         der = self.request.getpeercert(binary_form=True)
-        if der:
-            self.machine = registry.authenticate(pki.cert_sha256(der))
+        self.fingerprint = pki.cert_sha256(der) if der else ""
+
+    def _authenticate(self) -> None:
+        # Per REQUEST, not per connection: a keep-alive connection opened
+        # before a revocation must not outlive it.
+        self.machine = registry.authenticate(self.fingerprint) if self.fingerprint else None
 
     def _send(self, status: int, answer: dict) -> None:
         data = json.dumps(answer, ensure_ascii=False).encode("utf-8")
@@ -251,6 +256,7 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         started = time.monotonic()
+        self._authenticate()
         name = self.path[len("/v1/op/"):] if self.path.startswith("/v1/op/") else ""
         if self.machine is None:
             status, answer = _bad(403, "this machine certificate is not (or no longer) "
@@ -276,6 +282,7 @@ class _Handler(BaseHTTPRequestHandler):
         _log(f"{who} {name or self.path} {status} {time.monotonic() - started:.3f}s")
 
     def do_GET(self) -> None:
+        self._authenticate()
         if self.machine is None:
             self.close_connection = True
             self._send(*_bad(403, "this machine certificate is not paired with the hub."))

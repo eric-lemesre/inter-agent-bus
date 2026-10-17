@@ -184,7 +184,19 @@ with tempfile.TemporaryDirectory() as tmp:
     os.environ["IAB_HUB"] = url
     os.environ["IAB_MACHINE_DIR"] = str(second)
     check("a second machine reaches the hub", bus.list_presence().startswith("["))
+    import http.client
+    kept = http.client.HTTPSConnection("127.0.0.1", port, timeout=10,
+                                       context=remote.client_context(remote.credentials(second)))
+    kept.request("GET", "/v1/ping")
+    first = kept.getresponse()
+    first.read()
     registry.revoke("beta")
+    kept.request("GET", "/v1/ping")
+    after = kept.getresponse()
+    after.read()
+    kept.close()
+    check("a keep-alive connection does not outlive a revocation",
+          (first.status, after.status) == (200, 403), f"{first.status} {after.status}")
     r = bus.list_presence()
     check("a revoked machine is refused at its next request",
           r.startswith("ERROR") and "no longer" in r, r)
