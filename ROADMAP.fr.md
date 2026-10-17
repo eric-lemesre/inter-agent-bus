@@ -329,8 +329,9 @@ machines admin.
 - **9c** — appairage : `iab join`, `iab approve`, invitation interne,
   renouvellement, `iab machines`, `iab revoke` — **livrée**. Port
   d'appairage distinct (réseaux privés seulement par défaut) ; quatre
-  mots liés à la clé de la machine ET à la CA du moyeu (comparaison
-  numérique façon Bluetooth) ; invitation dont le jeton ne voyage
+  mots liés à la clé de la machine, à la CA du moyeu et aux aléas des
+  deux côtés, par engagement puis révélation (comparaison numérique
+  Bluetooth : aucune recherche de clé par force brute possible) ; invitation dont le jeton ne voyage
   jamais (identifiant + code d'authentification lié à la demande) ;
   renouvellement sans CSR, l'ancien certificat retiré au premier usage
   du nouveau ; dernière admin non révocable ; annonces sur le canal

@@ -60,9 +60,10 @@ class Authority:
 
     # -- pairing listener (no client certificate) --------------------------
 
-    def request(self, body: dict, source: str) -> dict | str:
-        """A machine asks to join: with an invitation token it is paired at
-        once; otherwise it gets a code to have approved."""
+    def invited(self, body: dict, source: str) -> dict | str:
+        """A machine joins with an invitation: paired at once. It proves it
+        holds the token by a MAC over its own request (the token never
+        travels); the answer proves the CA back the same way."""
         name = str(body.get("name", "")).strip().lower()
         key_kind = str(body.get("key_kind", "file"))
         if key_kind not in CLAIMABLE_KEY_KINDS:
@@ -72,42 +73,72 @@ class Authority:
             csr = pki.load_csr(str(body.get("csr", "")).encode("ascii"))
         except (ValueError, UnicodeEncodeError) as exc:
             return f"ERROR: unusable certificate request: {exc}."
-        platform = str(body.get("platform", ""))[:80]
+        platform = registry.printable(body.get("platform", ""))
         common = {"ca": self.ca_pem, "bus_url": self.bus_url,
                   "hub": self.config["names"][0]}
         token_id = body.get("invitation")
-        if token_id:
-            existing = registry.get(name)
-            if existing and existing["status"] == "active":
-                # Checked before redeeming: a refused join keeps its invitation.
-                return f"ERROR: machine '{name}' is already paired — revoke it first."
-            invitation = registry.redeem_invitation(
-                str(token_id), name, str(body.get("csr", "")).encode("utf-8"),
-                str(body.get("mac", "")))
-            if isinstance(invitation, str):
-                return invitation
-            refused = policy(invitation["role"], key_kind)
-            if refused:
-                return refused
-            cert_pem, fingerprint, serial, expires = self._issue(csr.public_key(), name)
-            enrolled = registry.enroll(name, invitation["role"], key_kind, fingerprint, serial,
-                                       expires, platform)
-            if enrolled.startswith("ERROR"):
-                return enrolled
-            self._announce(f"machine '{name}' paired as {invitation['role']} by invitation "
-                           f"of {invitation['created_by']} (from {source})")
-            return {**common, "status": "approved", "name": name, "certificate": cert_pem,
-                    "proof": pki.invitation_proof(invitation["key"], self.ca_cert)}
-        words = pki.check_words(self.ca_cert, csr.public_key())
-        created = registry.create_request(name, platform, key_kind, source,
-                                          pki.csr_pem(csr).decode("ascii"), words)
+        if not token_id:
+            return "ERROR: an invited join needs its invitation id."
+        existing = registry.get(name)
+        if existing and existing["status"] == "active":
+            # Checked before redeeming: a refused join keeps its invitation.
+            return f"ERROR: machine '{name}' is already paired — revoke it first."
+        invitation = registry.redeem_invitation(
+            str(token_id), name, str(body.get("csr", "")).encode("utf-8"),
+            str(body.get("mac", "")))
+        if isinstance(invitation, str):
+            return invitation
+        refused = policy(invitation["role"], key_kind)
+        if refused:
+            return refused
+        cert_pem, fingerprint, serial, expires = self._issue(csr.public_key(), name)
+        enrolled = registry.enroll(name, invitation["role"], key_kind, fingerprint, serial,
+                                   expires, platform)
+        if enrolled.startswith("ERROR"):
+            return enrolled
+        self._announce(f"machine '{name}' paired as {invitation['role']} by invitation "
+                       f"of {invitation['created_by']} (from {source})")
+        return {**common, "status": "approved", "name": name, "certificate": cert_pem,
+                "proof": pki.invitation_proof(invitation["key"], self.ca_cert)}
+
+    def commit(self, body: dict, source: str) -> dict | str:
+        """Pairing by code, step 1: the machine commits to its request."""
+        name = str(body.get("name", "")).strip().lower()
+        key_kind = str(body.get("key_kind", "file"))
+        if key_kind not in CLAIMABLE_KEY_KINDS:
+            return (f"ERROR: key kind '{key_kind}' cannot be proven to this hub yet — "
+                    "pair with a file key.")
+        created = registry.create_request(name, str(body.get("platform", "")), key_kind,
+                                          source, str(body.get("commitment", "")))
         if isinstance(created, str):
             return created
-        return {**common, **created, "status": "pending"}
+        return {"ca": self.ca_pem, "bus_url": self.bus_url, "hub": self.config["names"][0],
+                **created}
+
+    def reveal(self, body: dict) -> dict | str:
+        """Pairing by code, step 2: the request is revealed and must match
+        the commitment; the check words are computed from both sides'
+        contributions and shown to the approver later."""
+        device_code = str(body.get("device_code", ""))
+        waiting = registry.committed_request(device_code)
+        if waiting is None:
+            return "ERROR: no pairing request waiting for this reveal (expired?)."
+        csr_text = str(body.get("csr", ""))
+        nonce_joiner = str(body.get("nonce", ""))
+        if not nonce_joiner.isascii() or len(nonce_joiner) < 32:
+            return "ERROR: the reveal needs the machine's nonce."
+        if pki.commitment(csr_text.encode("utf-8"), nonce_joiner) != waiting["commitment"]:
+            return "ERROR: the revealed request does not match its commitment."
+        try:
+            csr = pki.load_csr(csr_text.encode("ascii"))
+        except (ValueError, UnicodeEncodeError) as exc:
+            return f"ERROR: unusable certificate request: {exc}."
+        words = pki.check_words(self.ca_cert, csr.public_key(), nonce_joiner,
+                                waiting["nonce_hub"])
+        return registry.reveal_request(device_code, csr_text, words)
 
     def poll(self, body: dict) -> dict:
-        answer = registry.poll_request(str(body.get("device_code", "")))
-        return answer
+        return registry.poll_request(str(body.get("device_code", "")))
 
     # -- admin actions (bus listener, admin machines only) ------------------
 

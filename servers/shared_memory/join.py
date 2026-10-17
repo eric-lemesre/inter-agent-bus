@@ -22,6 +22,8 @@ import http.client
 import json
 import os
 import platform
+import re
+import secrets
 import ssl
 import time
 from pathlib import Path
@@ -94,11 +96,30 @@ class _Channel:
         raise JoinError("unreachable")  # pragma: no cover
 
 
+_CODE_RE = re.compile(r"[BCDFGHJKLMNPQRSTVWXZ]{4}-[BCDFGHJKLMNPQRSTVWXZ]{4}")
+
+
+def _clean(text, limit: int = 300) -> str:
+    # Everything the pairing listener sends may come from a party in the
+    # middle (unverified first contact): nothing it says is printed raw.
+    return registry.printable(text, limit)
+
+
 def _result(status: int, answer: dict) -> dict:
     if status != 200 or "result" not in answer:
-        raise JoinError(str(answer.get("error") or f"hub answered HTTP {status}")
+        raise JoinError(_clean(answer.get("error") or f"hub answered HTTP {status}")
                         .removeprefix("ERROR: "))
-    return answer["result"]
+    result = answer["result"]
+    if not isinstance(result, dict):
+        raise JoinError("the pairing listener sent an unexpected answer")
+    return result
+
+
+def _seconds(value, low: int, high: int) -> int:
+    try:
+        return max(low, min(high, int(value)))
+    except (TypeError, ValueError):
+        raise JoinError("the pairing listener sent an unexpected answer") from None
 
 
 def _check_certificate(cert_pem: str, ca_cert, key, name: str):
@@ -108,9 +129,66 @@ def _check_certificate(cert_pem: str, ca_cert, key, name: str):
     if not pki.same_key(cert.public_key(), key.public_key()):
         raise JoinError("the certificate received is not for this machine's key")
     if pki.common_name(cert) != name:
-        raise JoinError(f"the certificate received names '{pki.common_name(cert)}', "
+        raise JoinError(f"the certificate received names '{_clean(pki.common_name(cert))}', "
                         f"not '{name}'")
     return cert
+
+
+def _by_invitation(channel: "_Channel", body: dict, key, token: str) -> tuple[dict, str, str]:
+    # The token itself never travels (the channel may be unverified): an
+    # id to find the invitation, a MAC binding it to THIS request.
+    body["invitation"] = registry.invitation_id(token)
+    body["mac"] = registry.invitation_mac(registry.invitation_key(token),
+                                          body["csr"].encode("utf-8"))
+    answer = _result(*channel.post("/v1/pair/invited", body))
+    ca_cert = pki.load_cert_bytes(str(answer.get("ca", "")).encode("ascii"))
+    expected = pki.invitation_proof(registry.invitation_key(token), ca_cert)
+    if not hmac.compare_digest(expected, str(answer.get("proof", ""))):
+        raise JoinError("the hub could not prove it issued this invitation — nothing was saved")
+    return answer, str(answer["name"]), str(answer["certificate"])
+
+
+def _by_code(channel: "_Channel", body: dict, key, say,
+             timeout: float | None) -> tuple[dict, str, str]:
+    # Commit, then reveal (see pki.check_words): the hub's nonce is drawn
+    # after this machine committed to its request, and this machine
+    # reveals the request only after receiving that nonce and the CA.
+    nonce = secrets.token_hex(32)
+    csr_text = body.pop("csr")
+    body["commitment"] = pki.commitment(csr_text.encode("utf-8"), nonce)
+    answer = _result(*channel.post("/v1/pair/commit", body))
+    ca_cert = pki.load_cert_bytes(str(answer.get("ca", "")).encode("ascii"))
+    nonce_hub = str(answer.get("nonce_hub", ""))
+    if not re.fullmatch(r"[0-9a-f]{64}", nonce_hub):
+        raise JoinError("the pairing listener sent an unexpected answer")
+    device_code = str(answer.get("device_code", ""))
+    revealed = _result(*channel.post("/v1/pair/reveal", {
+        "device_code": device_code, "csr": csr_text, "nonce": nonce}))
+    code = str(revealed.get("user_code", ""))
+    if not _CODE_RE.fullmatch(code):
+        raise JoinError("the pairing listener sent an unexpected code")
+    expires_in = _seconds(revealed.get("expires_in"), 0, 3600)
+    interval = _seconds(revealed.get("interval"), 1, 60)
+    words = pki.check_words(ca_cert, key.public_key(), nonce, nonce_hub)
+    say(f"Hub: {_clean(answer.get('hub', ''), 80)}"
+        + ("" if channel.verified else " (certificate not verified)"))
+    say("To pair this machine, on an admin machine run:")
+    say("    iab approve")
+    say(f"and type the code:   {code}   (valid {expires_in // 60} min, waiting…)")
+    # Computed here, printed last on its own line: what the person compares.
+    say(f"Check words: {words}")
+    deadline = time.monotonic() + (timeout if timeout is not None else expires_in)
+    while time.monotonic() < deadline:
+        time.sleep(interval)
+        status = _result(*channel.post("/v1/pair/poll", {"device_code": device_code}))
+        state = status.get("status")
+        if state == "approved":
+            return answer, str(status["name"]), str(status["certificate"])
+        if state == "slow_down":
+            interval = min(60, interval + 5)
+        elif state in ("denied", "expired"):
+            raise JoinError(f"pairing {state}")
+    raise JoinError("pairing not approved in time")
 
 
 def join(hub: str, name: str | None = None, token: str | None = None,
@@ -123,64 +201,35 @@ def join(hub: str, name: str | None = None, token: str | None = None,
             "and remove that directory to pair again.")
         return 1
     name = (name or platform.node().split(".")[0]).strip().lower()
+    if not registry.valid_machine_name(name):
+        say(f"ERROR: invalid machine name '{name}' — pass --name.")
+        return 1
     host, port = _target(hub)
     key = pki.new_key()
     body = {"name": name, "platform": f"{platform.system()} {platform.machine()}",
             "key_kind": "file",
             "csr": pki.csr_pem(pki.new_csr(key, name)).decode("ascii")}
-    if token:
-        # The token itself never travels (the channel may be unverified):
-        # an id to find the invitation, a MAC binding it to THIS request.
-        body["invitation"] = registry.invitation_id(token)
-        body["mac"] = registry.invitation_mac(registry.invitation_key(token),
-                                              body["csr"].encode("utf-8"))
     channel = _Channel(host, port, say)
     try:
-        answer = _result(*channel.post("/v1/pair/request", body))
-        ca_cert = pki.load_cert_bytes(answer["ca"].encode("ascii"))
         if token:
-            expected = pki.invitation_proof(registry.invitation_key(token), ca_cert)
-            if not hmac.compare_digest(expected, str(answer.get("proof", ""))):
-                raise JoinError("the hub could not prove it issued this invitation — "
-                                "nothing was saved")
-            final = answer["name"]
-            cert_pem = answer["certificate"]
+            answer, final, cert_pem = _by_invitation(channel, body, key, token)
         else:
-            words = pki.check_words(ca_cert, key.public_key())
-            say(f"Hub: {answer['hub']}"
-                + ("" if channel.verified else " (certificate not verified)"))
-            say("To pair this machine, on an admin machine run:")
-            say("    iab approve")
-            say(f"and type the code:   {answer['user_code']}")
-            say(f"Check words: {words}   (valid {answer['expires_in'] // 60} min, waiting…)")
-            final, cert_pem = _wait(channel, answer, timeout)
+            answer, final, cert_pem = _by_code(channel, body, key, say, timeout)
+        if not registry.valid_machine_name(final):
+            raise JoinError("the hub sent an invalid machine name")
+        ca_cert = pki.load_cert_bytes(str(answer["ca"]).encode("ascii"))
         cert = _check_certificate(cert_pem, ca_cert, key, final)
-    except JoinError as exc:
-        say(f"ERROR: {exc}.")
+        bus_url = str(answer.get("bus_url", ""))
+        remote.parse_hub(bus_url)
+    except (JoinError, remote.HubError, ValueError, KeyError) as exc:
+        say(f"ERROR: {_clean(exc)}.")
         return 1
     expires = pki.not_after(cert).isoformat()
-    write_credentials(directory, key, cert_pem, answer["ca"],
-                      {"name": final, "hub": answer["bus_url"], "expires_at": expires})
+    write_credentials(directory, key, cert_pem, str(answer["ca"]),
+                      {"name": final, "hub": bus_url, "expires_at": expires})
     say(f"Paired as '{final}'. Certificate valid until {expires[:10]}, renewed automatically.")
-    say(f"Point this machine's clients at the hub: IAB_HUB={answer['bus_url']}")
+    say(f"Point this machine's clients at the hub: IAB_HUB={_clean(bus_url, 200)}")
     return 0
-
-
-def _wait(channel: _Channel, answer: dict, timeout: float | None) -> tuple[str, str]:
-    interval = float(answer.get("interval", 5))
-    deadline = time.monotonic() + (timeout if timeout is not None else answer["expires_in"])
-    while time.monotonic() < deadline:
-        time.sleep(interval)
-        status = _result(*channel.post("/v1/pair/poll",
-                                       {"device_code": answer["device_code"]}))
-        state = status.get("status")
-        if state == "approved":
-            return status["name"], status["certificate"]
-        if state == "slow_down":
-            interval += 5
-        elif state in ("denied", "expired"):
-            raise JoinError(f"pairing {state}")
-    raise JoinError("pairing not approved in time")
 
 
 def write_credentials(directory: Path, key, cert_pem: str, ca_pem: str, info: dict) -> None:

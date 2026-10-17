@@ -80,8 +80,8 @@ $ iab join iab.example.org
 Hub: iab.example.org
 To pair this machine, on an admin machine run:
     iab approve
-and type the code:   WDJB-MJHT
-Check words: lampe-orage-violon-tulipe   (valid 10 min, waiting…)
+and type the code:   WDJB-MJHT   (valid 10 min, waiting…)
+Check words: lampe-orage-violon-tulipe
 ```
 
 Sur une machine admin :
@@ -96,11 +96,17 @@ Machine 'mimir' paired (certificate until 2026-11-16).
 ```
 
 La nouvelle machine termine seule. Les **quatre mots** sont calculés à
-partir de la clé de la machine **et** de la CA du moyeu : quiconque
-s'interposerait au premier contact les ferait changer. C'est leur
-comparaison qui protège l'appairage quand le port d'appairage n'a pas de
-certificat public (le client le signale). L'approbation est
-volontairement interactive.
+partir de la clé de la machine, de la CA du moyeu et d'un aléa de chaque
+côté, selon un schéma « engagement puis révélation » (celui de la
+comparaison numérique Bluetooth) : la machine s'engage sur sa demande
+avant de connaître l'aléa du moyeu, et ne la révèle qu'ensuite. Personne
+ne peut donc choisir une clé qui accorderait les mots des deux côtés :
+un intermédiaire au premier contact a une chance sur quatre milliards,
+et une seule tentative par appairage. C'est cette comparaison qui
+protège l'appairage quand le port d'appairage n'a pas de certificat
+public (le client le signale). L'approbation est volontairement
+interactive, et rien de ce qu'envoie l'autre côté n'est affiché sans
+être débarrassé des caractères de contrôle.
 
 **Machines gérées par Ansible** : une invitation à usage unique, liée au
 nom, valable 15 minutes, remplace la personne :

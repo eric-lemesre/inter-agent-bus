@@ -426,9 +426,14 @@ class _PairHandler(_BaseHandler):
                 status, answer = _bad(400, "request body is not a JSON object.")
                 self._send(status, answer)
             else:
+                authority = self.server.authority
                 try:
-                    if self.path == "/v1/pair/request":
-                        status, answer = _answer(self.server.authority.request(request, source))
+                    if self.path == "/v1/pair/commit":
+                        status, answer = _answer(authority.commit(request, source))
+                    elif self.path == "/v1/pair/reveal":
+                        status, answer = _answer(authority.reveal(request))
+                    elif self.path == "/v1/pair/invited":
+                        status, answer = _answer(authority.invited(request, source))
                     elif self.path == "/v1/pair/poll":
                         status, answer = 200, {"result": self.server.authority.poll(request)}
                     else:

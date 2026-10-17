@@ -285,11 +285,15 @@ with tempfile.TemporaryDirectory() as tmp:
     other_ca = pki.new_ca("intruder")[1]
     some_key = pki.new_key().public_key()
     ca_cert = pki.load_cert(home / "ca.pem")
+    nj, nh = "1" * 64, "2" * 64
+    base_words = pki.check_words(ca_cert, some_key, nj, nh)
     check("check words change when the CA is swapped",
-          pki.check_words(ca_cert, some_key) != pki.check_words(other_ca, some_key))
+          base_words != pki.check_words(other_ca, some_key, nj, nh))
     check("check words change when the machine key is swapped",
-          pki.check_words(ca_cert, some_key) != pki.check_words(ca_cert,
-                                                               pki.new_key().public_key()))
+          base_words != pki.check_words(ca_cert, pki.new_key().public_key(), nj, nh))
+    check("check words change with either side's nonce",
+          base_words != pki.check_words(ca_cert, some_key, "3" * 64, nh)
+          and base_words != pki.check_words(ca_cert, some_key, nj, "4" * 64))
 
     # A person who does not confirm the words denies the request.
     lines = []
@@ -318,26 +322,51 @@ with tempfile.TemporaryDirectory() as tmp:
     forged = join._Channel("127.0.0.1", pair_port, lambda *_: None)
     k = pki.new_key()
     csr = pki.csr_pem(pki.new_csr(k, "zeta")).decode("ascii")
-    status, answer = forged.post("/v1/pair/request", {
+    status, answer = forged.post("/v1/pair/invited", {
         "name": "zeta", "csr": csr, "invitation": registry.invitation_id(token),
         "mac": "00" * 32})
     check("an invitation id without the token's MAC is refused",
           status == 409 and "invitation" in answer["error"], answer)
     rc = join.join(pair_target, "zeta", token, tmp / "machine-zeta", say=lines.append)
     check("the refused attempts did not consume the invitation", rc == 0, lines[-2:])
+    # Commit-then-reveal: a reveal must match the commitment made before
+    # the hub's nonce was known; displayed fields cannot drive a terminal.
+    commitment = pki.commitment(csr.encode("ascii"), "ab" * 32)
+    status, answer = forged.post("/v1/pair/commit", {
+        "name": "kappa", "commitment": commitment,
+        "platform": "Linux \x1b[2J\x1b[1;1HCheck words: faux\u202e"})
+    committed = answer["result"]
+    status, answer = forged.post("/v1/pair/reveal", {
+        "device_code": committed["device_code"], "csr": csr, "nonce": "cd" * 32})
+    check("a reveal that does not match its commitment is refused",
+          status == 409 and "commitment" in answer["error"], answer)
+    status, answer = forged.post("/v1/pair/reveal", {
+        "device_code": committed["device_code"], "csr": csr, "nonce": "ab" * 32})
+    check("a matching reveal yields a code to approve",
+          status == 200 and len(answer["result"]["user_code"]) == 9, answer)
+    seen = admin.call("pairing/lookup", {"user_code": answer["result"]["user_code"]})
+    check("control and format characters never reach the approver",
+          "\x1b" not in seen["platform"] and "\u202e" not in seen["platform"], seen)
+    status, answer = forged.post("/v1/pair/reveal", {
+        "device_code": committed["device_code"], "csr": csr, "nonce": "ab" * 32})
+    check("a request is revealed once", status == 409, answer)
+    admin.call("pairing/deny", {"user_code": seen["user_code"]})
+
     check("admin invitations are refused by policy (TPM required)",
           str(admin.call("invite", {"name": "theta", "role": "admin"})).startswith("ERROR"))
 
     # Pairing only from allowed networks; requests limited per source.
     saved_allow = pair_server.pair_allow
     pair_server.pair_allow = (hub.ipaddress.ip_network("10.0.0.0/8"),)
-    status, answer = forged.post("/v1/pair/request", {"name": "iota", "csr": csr})
+    status, answer = forged.post("/v1/pair/commit", {"name": "iota",
+                                                     "commitment": commitment})
     check("pairing is refused from a network outside the allow list",
           status == 403 and "not open" in answer["error"], answer)
     pair_server.pair_allow = saved_allow
     saved_limit = registry.MAX_REQUESTS_PER_SOURCE
     registry.MAX_REQUESTS_PER_SOURCE = 1
-    status, answer = forged.post("/v1/pair/request", {"name": "iota", "csr": csr})
+    status, answer = forged.post("/v1/pair/commit", {"name": "iota",
+                                                     "commitment": commitment})
     check("pairing requests are rate-limited per source",
           status == 409 and "slow down" in answer["error"], answer)
     registry.MAX_REQUESTS_PER_SOURCE = saved_limit

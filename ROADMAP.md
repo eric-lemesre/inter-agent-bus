@@ -307,7 +307,8 @@ Internet closed at first, TPM mandatory for admin machines.
 - **9c** — pairing: `iab join`, `iab approve`, internal invitation,
   renewal, `iab machines`, `iab revoke` — **shipped**. Separate pairing
   listener (private networks only by default); four words bound to the
-  machine's key AND the hub's CA (Bluetooth-style numeric comparison);
+  machine's key, the hub's CA and both sides' nonces, commit-then-reveal
+  (Bluetooth numeric comparison: no key grinding possible);
   invitation whose token never travels (id + authentication code bound
   to the request); renewal without CSR, the old certificate retired at
   the first use of the new one; the last admin cannot be revoked;

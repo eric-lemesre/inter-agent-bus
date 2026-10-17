@@ -15,8 +15,9 @@ import os
 import sys
 
 try:  # installed package (`iab` maps to this directory)
-    from . import remote
+    from . import registry, remote
 except ImportError:  # bare script usage
+    import registry
     import remote
 
 
@@ -52,11 +53,12 @@ def approve(code: str | None, name: str | None, role: str,
     if isinstance(found, str):
         say(found)
         return 1
-    say(f"Request from '{found['name']}' — {found['platform'] or 'unknown system'} — "
-        f"{found['source']} — key: {found['key_kind']}")
-    say(f"Check words: {found['words']}")
+    shown = {k: registry.printable(v) for k, v in found.items()}  # never raw to a terminal
+    say(f"Request from '{shown['name']}' — {shown['platform'] or 'unknown system'} — "
+        f"{shown['source']} — key: {shown['key_kind']}")
+    say(f"Check words: {shown['words']}")
     final = (name or found["name"]).strip().lower()
-    answer = ask(f"Are the four words identical to those shown on {found['name']}? "
+    answer = ask(f"Are the four words identical to those shown on {shown['name']}? "
                  f"Pair it as '{final}' ({role}) [y/N] ").strip().lower()
     if answer not in ("y", "yes", "o", "oui"):
         denied = call("pairing/deny", {"user_code": code})

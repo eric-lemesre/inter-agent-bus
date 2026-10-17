@@ -52,9 +52,11 @@ CREATE TABLE IF NOT EXISTS pairing_requests (
     platform    TEXT NOT NULL DEFAULT '',
     key_kind    TEXT NOT NULL,
     source      TEXT NOT NULL DEFAULT '',
-    csr         TEXT NOT NULL,
-    words       TEXT NOT NULL,
-    status      TEXT NOT NULL DEFAULT 'pending',
+    commitment  TEXT NOT NULL,
+    nonce_hub   TEXT NOT NULL,
+    csr         TEXT NOT NULL DEFAULT '',
+    words       TEXT NOT NULL DEFAULT '',
+    status      TEXT NOT NULL DEFAULT 'committed',
     created_at  TEXT NOT NULL,
     expires_at  TEXT NOT NULL,
     last_poll   TEXT NOT NULL DEFAULT '',
@@ -108,6 +110,7 @@ def enroll(
         return f"ERROR: role must be one of {', '.join(ROLES)}."
     if key_kind not in KEY_KINDS:
         return f"ERROR: key kind must be one of {', '.join(KEY_KINDS)}."
+    platform = printable(platform)
     now = store._now()
     with closing(_connect()) as conn, store._write(conn):
         row = conn.execute("SELECT status FROM machines WHERE name=?", (name,)).fetchone()
@@ -233,26 +236,39 @@ def _new_code() -> str:
 
 def _expire(conn) -> None:
     conn.execute("UPDATE pairing_requests SET status='expired', csr='', cert='' "
-                 "WHERE status IN ('pending', 'approved') AND expires_at < ?",
+                 "WHERE status IN ('committed', 'pending', 'approved') AND expires_at < ?",
                  (store._now(),))
 
 
+def printable(text: str, limit: int = 80) -> str:
+    """Strip what a terminal would interpret (control, format and other
+    non-printable characters): a displayed field must not be able to
+    redraw the approval dialogue."""
+    return "".join(c for c in str(text) if c.isprintable())[:limit]
+
+
 def create_request(name: str, platform: str, key_kind: str, source: str,
-                   csr_pem: str, words: str) -> dict | str:
-    """Open a pairing request. Returns {device_code, user_code, expires_in,
-    interval}: the device code is a secret known only to the joining
-    machine (it polls with it); the user code is what a person types."""
+                   commitment: str) -> dict | str:
+    """Open a pairing request from a COMMITMENT to the certificate request
+    (step 1 of 2, see pairing.py). Returns {device_code, nonce_hub,
+    expires_in}: the device code is a secret known only to the joining
+    machine; the hub's nonce is drawn only now, after the commitment."""
     name = name.strip().lower()
     if not valid_machine_name(name):
         return f"ERROR: invalid machine name '{name}' — expected [a-z0-9][a-z0-9.-]{{0,62}}."
     if key_kind not in KEY_KINDS:
         return f"ERROR: key kind must be one of {', '.join(KEY_KINDS)}."
+    if not re.fullmatch(r"[0-9a-f]{64}", commitment or ""):
+        return "ERROR: the pairing commitment must be a SHA-256 hex digest."
+    platform = printable(platform)
     device_code = secrets.token_urlsafe(32)
+    nonce_hub = secrets.token_hex(32)
     since = (datetime.now(timezone.utc) - timedelta(seconds=PAIRING_TTL)).isoformat()
     with closing(_connect()) as conn, store._write(conn):
         _expire(conn)
         pending = conn.execute(
-            "SELECT COUNT(*) AS n FROM pairing_requests WHERE status='pending'").fetchone()["n"]
+            "SELECT COUNT(*) AS n FROM pairing_requests "
+            "WHERE status IN ('committed', 'pending')").fetchone()["n"]
         if pending >= MAX_PENDING:
             return "ERROR: too many pairing requests waiting — try again in a few minutes."
         recent = conn.execute(
@@ -269,12 +285,40 @@ def create_request(name: str, platform: str, key_kind: str, source: str,
             return "ERROR: could not allocate a pairing code."
         conn.execute(
             "INSERT INTO pairing_requests(device_hash, user_code, name, platform, key_kind, "
-            "source, csr, words, created_at, expires_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
-            (_hash(device_code), code, name, platform, key_kind, source, csr_pem, words,
-             store._now(), _in(PAIRING_TTL)),
+            "source, commitment, nonce_hub, created_at, expires_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?)",
+            (_hash(device_code), code, name, platform, key_kind, source, commitment,
+             nonce_hub, store._now(), _in(PAIRING_TTL)),
         )
         store._log_event(conn, "machine", detail=f"pairing requested for {name} from {source}")
-    return {"device_code": device_code, "user_code": code, "expires_in": PAIRING_TTL,
+    return {"device_code": device_code, "nonce_hub": nonce_hub, "expires_in": PAIRING_TTL}
+
+
+def committed_request(device_code: str) -> dict | None:
+    """A request waiting for its reveal (step 2): commitment and nonce."""
+    with closing(_connect()) as conn:
+        _expire(conn)
+        row = conn.execute(
+            "SELECT commitment, nonce_hub, user_code FROM pairing_requests "
+            "WHERE device_hash=? AND status='committed'", (_hash(device_code),)).fetchone()
+    return dict(row) if row else None
+
+
+def reveal_request(device_code: str, csr_pem: str, words: str) -> dict | str:
+    """Step 2: the revealed request matched its commitment (checked by the
+    caller); the request now waits for a person. Returns {user_code,
+    expires_in, interval}."""
+    with closing(_connect()) as conn, store._write(conn):
+        _expire(conn)
+        row = conn.execute(
+            "SELECT user_code, expires_at FROM pairing_requests "
+            "WHERE device_hash=? AND status='committed'", (_hash(device_code),)).fetchone()
+        if row is None:
+            return "ERROR: no pairing request waiting for this reveal (expired?)."
+        conn.execute("UPDATE pairing_requests SET status='pending', csr=?, words=? "
+                     "WHERE device_hash=?", (csr_pem, words, _hash(device_code)))
+    left = (datetime.fromisoformat(row["expires_at"]) - datetime.now(timezone.utc))
+    return {"user_code": row["user_code"], "expires_in": max(0, int(left.total_seconds())),
             "interval": POLL_INTERVAL}
 
 
@@ -299,8 +343,8 @@ def poll_request(device_code: str) -> dict:
             conn.execute("UPDATE pairing_requests SET status='delivered', cert='', csr='' "
                          "WHERE device_hash=?", (row["device_hash"],))
             return {"status": "approved", "name": row["name"], "certificate": row["cert"]}
-        if row["status"] == "delivered":
-            return {"status": "expired"}
+        if row["status"] in ("delivered", "committed"):
+            return {"status": "expired"}  # a committed request is never polled
         return {"status": row["status"]}
 
 

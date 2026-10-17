@@ -109,15 +109,25 @@ def spki_der(public_key) -> bytes:
     )
 
 
-def check_words(ca_cert: x509.Certificate, machine_key) -> str:
-    """The four check words of a pairing, bound to BOTH the bus CA and the
-    joining machine's public key: the joining machine computes them from
-    the CA it received, the hub from the request it received. Anyone in
-    between who swaps either key changes the words — the comparison by a
-    person is what authenticates a first contact over an unverified
-    channel."""
+def commitment(csr_pem: bytes, nonce_joiner: str) -> str:
+    """The joining machine's commitment to its request, sent BEFORE it
+    learns the hub's nonce and CA (see check_words)."""
+    return hashlib.sha256(b"iab-commit-v1\0" + csr_pem + b"\0" + nonce_joiner.encode("ascii")
+                          ).hexdigest()
+
+
+def check_words(ca_cert: x509.Certificate, machine_key, nonce_joiner: str,
+                nonce_hub: str) -> str:
+    """The four check words of a pairing, bound to the bus CA, the joining
+    machine's key and both nonces. Commit-then-reveal, as in Bluetooth
+    numeric comparison: the machine commits to its request before it sees
+    the hub's nonce, the hub draws that nonce after the commitment, the
+    machine reveals only then. Nobody in between can choose a key to make
+    both sides' words agree: one try per pairing, 2^-32 — and a person
+    must still confirm it."""
     digest = hashlib.sha256(
-        b"iab-pair-v1\0" + spki_der(ca_cert.public_key()) + b"\0" + spki_der(machine_key)
+        b"iab-pair-v2\0" + spki_der(ca_cert.public_key()) + b"\0" + spki_der(machine_key)
+        + b"\0" + nonce_joiner.encode("ascii") + b"\0" + nonce_hub.encode("ascii")
     ).digest()
     return "-".join(WORDS[b] for b in digest[:4])
 

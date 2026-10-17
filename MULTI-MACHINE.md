@@ -80,8 +80,8 @@ $ iab join iab.example.org
 Hub: iab.example.org
 To pair this machine, on an admin machine run:
     iab approve
-and type the code:   WDJB-MJHT
-Check words: lampe-orage-violon-tulipe   (valid 10 min, waiting…)
+and type the code:   WDJB-MJHT   (valid 10 min, waiting…)
+Check words: lampe-orage-violon-tulipe
 ```
 
 On an admin machine:
@@ -96,10 +96,16 @@ Machine 'mimir' paired (certificate until 2026-11-16).
 ```
 
 The new machine finishes by itself. The **four words** are computed from
-the machine's key **and** the hub's CA: anyone in the middle of the first
-contact would change them. Comparing them is what protects the pairing
-when the pairing port has no public certificate (the client says so).
-Approval is interactive on purpose.
+the machine's key, the hub's CA and a nonce from each side, in a
+"commit, then reveal" scheme (that of Bluetooth numeric comparison): the
+machine commits to its request before it knows the hub's nonce, and
+reveals it only afterwards. Nobody can therefore choose a key that makes
+both sides' words agree: a party in the middle of the first contact has
+one chance in four billion, and a single try per pairing. Comparing them
+is what protects the pairing when the pairing port has no public
+certificate (the client says so). Approval is interactive on purpose,
+and nothing the other side sends is displayed before control characters
+are stripped.
 
 **Machines managed by Ansible**: a single-use invitation, bound to the
 name, valid 15 minutes, replaces the person:
