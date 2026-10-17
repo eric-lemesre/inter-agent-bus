@@ -135,10 +135,30 @@ else:
             assert json.loads(out)["content"].strip() == "executed: cross-machine", out
             out = run("the admin lists both machines", ["machines"])
             assert {m["name"] for m in json.loads(out)} == {"smoke", "second"}, out
+
+            # The second machine's local bus moves to the running hub, its
+            # instance bound to it; its queue is then worked through the hub.
+            local = {k: v for k, v in first.items() if k != "IAB_HUB"}
+            env = {**local, "IAB_DB": str(Path(tmp) / "second-local.db")}
+            run("the second machine had a local bus",
+                ["register", "local@second", "-d", "before the hub"])
+            run("with work still queued in it", ["push", "local@second", "T3", "-"],
+                stdin="migrated")
+            env = local
+            run("the hub imports that bus, bound to the second machine",
+                ["hub", "import", str(Path(tmp) / "second-local.db"), "--bind", "second"])
+            env = {**first, "IAB_MACHINE_DIR": str(Path(tmp) / "second")}
+            run("the second machine works its migrated queue through the hub",
+                ["worker", "--agent", "local@second", "--once", "--",
+                 sys.executable, "-c", WORKER_STANDIN])
+            env = first
+            out = run("the migrated task's result is on the hub", ["result", "T3"])
+            assert json.loads(out)["content"].strip() == "executed: migrated", out
         finally:
             hub_proc.terminate()
             hub_proc.wait(timeout=10)
 
 print("smoke: OK — push → worker → result → guarded review → log, "
       "all through the CLI, on the local bus and through a hub; "
-      "a second machine paired by invitation works across machines.")
+      "a second machine paired by invitation works across machines; "
+      "a local bus migrates into the hub.")

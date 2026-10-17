@@ -554,15 +554,21 @@ def pin(agent: str, machine: str, admin: str) -> str:
     if not store._NAME_RE.match(agent):
         return f"ERROR: invalid agent name '{agent}'."
     with closing(_connect()) as conn, store._write(conn):
-        row = conn.execute("SELECT status FROM machines WHERE name=?", (machine,)).fetchone()
-        if row is None or row["status"] != "active":
-            return f"ERROR: no active machine '{machine}'."
-        conn.execute("DELETE FROM agent_machines WHERE agent=?", (agent,))
-        conn.execute("INSERT INTO agent_machines(agent, machine, bound_at, pinned) "
-                     "VALUES(?,?,?,1)", (agent, machine, store._now()))
-        store._log_event(conn, "bind", agent=agent,
-                         detail=f"bound to machine {machine} by {admin}")
-    return f"OK: agent '{agent}' bound to machine '{machine}'."
+        refused = pin_in(conn, agent, machine, admin)
+    return refused or f"OK: agent '{agent}' bound to machine '{machine}'."
+
+
+def pin_in(conn, agent: str, machine: str, admin: str) -> str | None:
+    """`pin` inside the caller's write transaction (an import binds what it
+    brings in the same transaction). Returns an ERROR line, or None."""
+    row = conn.execute("SELECT status FROM machines WHERE name=?", (machine,)).fetchone()
+    if row is None or row["status"] != "active":
+        return f"ERROR: no active machine '{machine}'."
+    conn.execute("DELETE FROM agent_machines WHERE agent=?", (agent,))
+    conn.execute("INSERT INTO agent_machines(agent, machine, bound_at, pinned) "
+                 "VALUES(?,?,?,1)", (agent, machine, store._now()))
+    store._log_event(conn, "bind", agent=agent, detail=f"bound to machine {machine} by {admin}")
+    return None
 
 
 def rename_binding(old: str, new: str, keep_pin: bool, machine: str) -> None:

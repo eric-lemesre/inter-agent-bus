@@ -550,6 +550,41 @@ with tempfile.TemporaryDirectory() as tmp:
     check("a refused operation leaves no binding behind",
           registry.bound_machine("bad name!") is None)
 
+    # iab hub import: a machine's local bus moves to the hub, its instances
+    # bound to that machine in the same transaction — or to none.
+    def local_bus(path: Path, agent: str, task: str) -> str:
+        os.environ.pop("IAB_HUB")
+        os.environ["IAB_DB"] = str(path)
+        store.register_agent(agent, "on its machine before the hub")
+        store.push_task(agent, task, "local payload")
+        os.environ["IAB_DB"] = hub_db
+        os.environ["IAB_HUB"] = url
+        return str(path)
+
+    source = local_bus(tmp / "gamma-local.db", "imported@gamma", "imp1")
+    r = hub.import_bus(source, bind="nosuch", home=home)
+    check("an import cannot bind to an unknown machine", r.startswith("ERROR"), r)
+    r = hub.import_bus(source, dry_run=True, home=home)
+    check("a dry run of an import says what it would do",
+          r.startswith("OK: would import") and registry.bound_machine("imported@gamma") is None, r)
+    r = hub.import_bus(source, bind="gamma", home=home)
+    check("an import binds its instances to their machine",
+          r.startswith("OK") and registry.pinned_machine("imported@gamma") == "gamma", r)
+    r = bus.claim_task("imported@gamma", 60)
+    check("the machine works its imported queue through the hub",
+          r.startswith("{") and json.loads(r)["task_id"] == "imp1", r)
+    as_alpha = remote.RemoteBackend(url, Path(alpha_dir))
+    r = as_alpha.heartbeat("imported@gamma")
+    check("another machine cannot act as an imported instance",
+          r.startswith("ERROR") and "belongs to machine 'gamma'" in r, r)
+    source = local_bus(tmp / "stray-local.db", "stray@nowhere", "imp2")
+    r = hub.import_bus(source, home=home)
+    check("an import without --bind says what stays unbound",
+          r.startswith("OK") and "Bound to no machine" in r and "stray@nowhere" in r, r)
+    r = bus.heartbeat("stray@nowhere")
+    check("an imported unbound instance is refused until an admin binds it",
+          r.startswith("ERROR") and "no machine owns it" in r, r)
+
     # accepts_from covers messages and every broadcast recipient too.
     server.authz = authz.Authz({"accepts_from": {"claude@*": ["machine:alpha"]}})
     r = bus.notify("worker@gamma", "claude@lab", "hello")

@@ -346,7 +346,9 @@ machines admin.
   et diffuser vers un motif exigent un principal de
   `policy.orchestrators` (défaut : machines admin) ; `accepts_from`
   borne qui pousse du travail ou envoie un message à qui ; débit par machine ; la machine
-  appelante est journalisée avec chaque événement.
+  appelante est journalisée avec chaque événement. `iab hub import`
+  reprend le bus local d'une machine en une transaction, ses instances
+  rattachées à cette machine (`--bind`) ou à aucune.
 - **9e** — clés TPM, politique par machine.
 - **9f** — dialecte PostgreSQL, tests sur deux moteurs — **livrée**.
   `IAB_DB=postgresql://…` (extra `[postgres]`, psycopg) : même SQL que

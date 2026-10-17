@@ -1205,6 +1205,109 @@ with tempfile.TemporaryDirectory() as tmp:
     check("a local helper is refused through bus", refused)
     check("without IAB_HUB the backend is the local core", access.backend() is store)
 
+    # Import of a local bus (iab hub import): the source is always a SQLite
+    # file, the target the engine under test, which already has rows of its
+    # own (renumbering of channel and notification ids).
+    SOURCE = str(Path(tmp) / "import-source.db")
+    os.environ["IAB_DB"] = SOURCE
+    store.register_agent("alpha@src", "test")
+    store.register_agent("beta@src", "test")
+    store.push_task("alpha@src", "imp-queued", "payload one")
+    store.push_task("alpha@src", "imp-done", "payload two")
+    store.claim_task("alpha@src", task_id="imp-done")
+    store.publish_result("alpha@src", "imp-done", "result two")
+    store.announce("alpha@src", "news", "before the move")
+    old_broadcast = json.loads(
+        store.broadcast("alpha@src", "status?", ["beta@src"]))["broadcast_id"]
+    store.notify("beta@src", "alpha@src", "all green", reply_to=old_broadcast)
+    json.loads(store.read_channel(agent="beta@src"))
+    store.poll("beta@src")
+    store.heartbeat("beta@src", capabilities='{"skills": ["test"]}')
+    store.acquire_wake_lock("alpha@src", holder="old-supervisor")
+
+    TARGET = fresh_db(tmp, "import-target")
+    os.environ["IAB_DB"] = TARGET
+    store.register_agent("gamma@hub", "test")
+    store.announce("gamma@hub", "news", "the hub's own entry")
+    store.announce("gamma@hub", "news", "and another")
+
+    dry = json.loads(store.import_database(SOURCE, dry_run=True))
+    state = json.loads(store.get_system_state())
+    check("a dry run counts and writes nothing",
+          dry["dry_run"] and dry["imported"]["tasks"] == 2
+          and "alpha@src" not in str(state["agents"]), dry)
+
+    out = store.import_database(SOURCE)
+    summary = json.loads(out) if not out.startswith("ERROR") else {}
+    check("a local bus imports into a non-empty one",
+          summary.get("agents") == ["alpha@src", "beta@src"]
+          and summary.get("left_behind") == {"wake_locks": 1}, out)
+    t = json.loads(store.claim_task("alpha@src"))
+    check("an imported queued task is claimable", t.get("task_id") == "imp-queued", t)
+    check("an imported result is readable",
+          "result two" in store.read_result("imp-done"))
+    new_broadcast = [m for m in json.loads(store.read_channel(since_seq=0))
+                     if m["topic"] == "broadcast"]
+    check("channel entries are renumbered after the target's own",
+          len(new_broadcast) == 1 and new_broadcast[0]["seq"] > 2, new_broadcast)
+    answers = json.loads(store.replies(new_broadcast[0]["seq"]))
+    check("a reply follows its renumbered broadcast",
+          [a["message"] for a in answers] == ["all green"], answers)
+    check("a channel cursor follows the renumbering (nothing re-read)",
+          json.loads(store.read_channel(agent="beta@src")) == [])
+    check("a notification cursor follows the renumbering (nothing re-delivered)",
+          json.loads(store.poll("beta@src")) == [])
+    delivered = [m["message"] for m in json.loads(store.poll("alpha@src"))]
+    check("an unread notification stays unread", "all green" in delivered, delivered)
+    events = json.loads(store.get_events(agent="alpha@src"))
+    check("the journal comes over", any(e["event"] == "publish" for e in events), events)
+    check("the import is journaled",
+          any(e["event"] == "import" for e in json.loads(store.get_events())))
+    lock = store.acquire_wake_lock("alpha@src", holder="hub-supervisor")
+    check("wake locks stay behind", not lock.startswith("BUSY"), lock)
+    presence = json.loads(store.list_presence())
+    check("presence and its capability card come over",
+          "beta@src" in json.dumps(presence), presence)
+
+    agents_before = len(json.loads(store.get_system_state())["agents"])
+    again = store.import_database(SOURCE)
+    check("a second import of the same bus is refused, nothing written",
+          again.startswith("ERROR") and "agents.name=alpha@src" in again
+          and len(json.loads(store.get_system_state())["agents"]) == agents_before, again)
+    check("the current database cannot import itself",
+          PG or store.import_database(TARGET).startswith("ERROR"))
+    junk = Path(tmp) / "not-a-bus.db"
+    sqlite3.connect(junk).execute("CREATE TABLE other(x)").connection.close()
+    check("a file that is not a bus is refused",
+          store.import_database(str(junk)).startswith("ERROR"))
+
+    # A source of an older schema: no harness/workspace/max_attempts
+    # columns, no notification table — the target's defaults apply.
+    OLD = Path(tmp) / "import-old.db"
+    with sqlite3.connect(OLD) as old:
+        old.executescript(
+            "CREATE TABLE agents(name TEXT PRIMARY KEY, description TEXT NOT NULL DEFAULT '',"
+            " registered_at TEXT NOT NULL);"
+            "CREATE TABLE tasks(task_id TEXT PRIMARY KEY, agent TEXT NOT NULL, payload TEXT"
+            " NOT NULL, priority INTEGER NOT NULL DEFAULT 1, status TEXT NOT NULL DEFAULT"
+            " 'queued', attempts INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL,"
+            " claimed_at TEXT, lease_deadline TEXT);"
+            "INSERT INTO agents VALUES('kimi@legacy', '', '2026-01-01T00:00:00+00:00');"
+            "INSERT INTO tasks(task_id, agent, payload, created_at) VALUES('imp-old',"
+            " 'kimi@legacy', 'p', '2026-01-01T00:00:00+00:00');")
+    old.close()
+    refused = store.import_database(str(OLD), after=lambda conn, agents: "ERROR: hook says no")
+    check("a refusal of the hook rolls the whole import back",
+          refused == "ERROR: hook says no"
+          and "kimi@legacy" not in json.dumps(json.loads(store.get_system_state())["agents"]))
+    out = store.import_database(str(OLD))
+    t = json.loads(store.claim_task("kimi@legacy"))
+    check("an older schema imports with the target's defaults",
+          not out.startswith("ERROR") and t.get("task_id") == "imp-old", out)
+    legacy = json.loads(store.get_system_state())["agents"].get("kimi@legacy", {})
+    check("the composed identity of an older row is filled in",
+          legacy.get("harness") == "kimi" and legacy.get("workspace") == "legacy", legacy)
+
     del os.environ["IAB_DB"]
 
 if fail:

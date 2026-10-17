@@ -148,6 +148,28 @@ declaration:
 `iab ping` checks the pairing; `whoami` shows `"db_source": "hub"`. Each
 session's workspace is still derived from its local directory.
 
+## Bring an existing bus over
+
+A machine that already had a local bus keeps its agents, queues,
+results, channel and journal: stop its agents (the file is then
+complete, nothing left in its `-wal`), copy the file (see `iab whoami`
+there) to the hub, then on the hub:
+
+```bash
+iab hub import mimir-bus.db --bind mimir --dry-run   # checks and counts
+iab hub import mimir-bus.db --bind mimir
+```
+
+Everything comes over in one transaction, after the hub's own entries
+(channel and notification ids are renumbered, read cursors follow);
+wake locks stay behind. `--bind` binds the imported instances to the
+machine they come from; without it they belong to no machine and are
+refused until an admin binds each one (`iab bind`). A name or task id
+present on both sides refuses the whole import, nothing written: rename
+it on the source first (`IAB_DB=mimir-bus.db iab rename …`). Restart
+the agents with `IAB_HUB` set: what would still be written to the local
+file is not carried over.
+
 ## Wake-up across machines
 
 The roster's `launch` block gains a `host` field: the machine that

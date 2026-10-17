@@ -188,6 +188,52 @@ def init(names: list[str], machine: str, home: Path | None = None,
             f"Start it with `iab hub serve`, then point clients at it: IAB_HUB={url}")
 
 
+def import_bus(source: str, bind: str | None = None, dry_run: bool = False,
+               home: Path | None = None) -> str:
+    """Bring a machine's local bus into the hub's database (run on the hub:
+    local access to its home is the authority, as for init). Imported
+    instances belong to no machine — refused until an admin binds them —
+    unless `bind` names the machine they come from: they are then bound to
+    it, in the same transaction."""
+    home = home or hub_home()
+    try:
+        config = load_config(home)
+    except RuntimeError as exc:
+        return f"ERROR: {exc}"
+    _use_database(config)
+    after = None
+    if bind:
+        machine = bind.strip().lower()
+        if (registry.get(machine) or {}).get("status") != "active":
+            return f"ERROR: no active machine '{machine}' to bind the imported instances to."
+
+        def after(conn, agents):
+            for agent in agents:
+                refused = registry.pin_in(conn, agent, machine, "hub import")
+                if refused:
+                    return refused
+            return None
+    out = store.import_database(source, dry_run=dry_run, after=after)
+    if out.startswith("ERROR"):
+        return out
+    summary = json.loads(out)
+    counts = ", ".join(f"{n} {table}" for table, n in summary["imported"].items())
+    verb = "would import" if dry_run else "imported"
+    lines = [f"OK: {verb} {counts} from {summary['source']}."]
+    if summary["left_behind"]["wake_locks"]:
+        lines.append(f"{summary['left_behind']['wake_locks']} wake lock(s) left behind "
+                     "(held by the old machine's supervisor).")
+    if summary["agents"] and bind:
+        lines.append(f"Instances bound to '{bind.strip().lower()}': "
+                     + ", ".join(summary["agents"]))
+    elif summary["agents"]:
+        lines.append("Bound to no machine (refused until then): "
+                     + ", ".join(summary["agents"])
+                     + " — `iab bind <instance> <machine>` from an admin machine, "
+                       "or import again with --bind.")
+    return "\n".join(lines)
+
+
 def _platform() -> str:
     return f"{platform.system()} {platform.machine()}"
 

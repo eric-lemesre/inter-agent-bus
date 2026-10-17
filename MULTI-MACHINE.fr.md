@@ -151,6 +151,30 @@ déclaration MCP :
 L'espace de travail de chaque session reste dérivé de son répertoire
 local.
 
+## Reprendre un bus existant
+
+Une machine qui avait déjà un bus local garde ses agents, files,
+résultats, canal et journal : arrêter ses agents (le fichier est alors
+complet, rien ne reste dans son `-wal`), copier le fichier (voir `iab
+whoami` sur elle) vers le moyeu, puis sur le moyeu :
+
+```bash
+iab hub import mimir-bus.db --bind mimir --dry-run   # vérifie et compte
+iab hub import mimir-bus.db --bind mimir
+```
+
+Tout passe en une transaction, après les entrées propres au moyeu (les
+numéros du canal et des notifications sont renumérotés, les curseurs de
+lecture suivent) ; les verrous de réveil restent derrière. `--bind`
+rattache les instances importées à la machine d'où elles viennent ;
+sans lui, elles n'appartiennent à aucune machine et sont refusées tant
+qu'un admin ne les a pas rattachées une à une (`iab bind`). Un nom ou
+un identifiant de tâche présent des deux côtés fait refuser tout
+l'import, sans rien écrire : le renommer d'abord sur la source
+(`IAB_DB=mimir-bus.db iab rename …`). Relancer les agents avec
+`IAB_HUB` posé : ce qui s'écrirait encore dans le fichier local ne
+serait pas repris.
+
 ## Réveil sur plusieurs machines
 
 Le bloc `launch` du roster gagne un champ `host` : la machine qui lance

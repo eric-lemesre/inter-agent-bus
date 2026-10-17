@@ -133,6 +133,11 @@ def _hub(args) -> int:
                        args.db, args.port)
         print(out)
         return 1 if out.startswith("ERROR") else 0
+    if args.hub_command == "import":
+        out = hub.import_bus(args.source, args.bind, args.dry_run,
+                             Path(args.home) if args.home else None)
+        print(out)
+        return 1 if out.startswith("ERROR") else 0
     try:
         listen = hub.parse_listen(args.listen) if args.listen else None
         if args.pair_listen == "off":
@@ -403,6 +408,15 @@ def main(argv: list[str] | None = None) -> int:
     h.add_argument("--pair-listen", metavar="HOST:PORT|off",
                    help="pairing listener (default: same host, the pair port of hub.json; "
                         "'off' to close pairing)")
+    h = hub_sub.add_parser("import", help="bring an existing local bus (agents, queues, "
+                                          "results, channel, journal) into the hub's database")
+    h.add_argument("source", help="the local bus file (see `iab whoami` on its machine)")
+    h.add_argument("--bind", metavar="MACHINE",
+                   help="bind the imported instances to this paired machine (the one they "
+                        "come from); without it an admin binds each one with `iab bind`")
+    h.add_argument("--dry-run", action="store_true",
+                   help="check and count, write nothing")
+    h.add_argument("--home", help="hub directory (default: IAB_HUB_HOME or <data dir>/hub)")
 
     p = sub.add_parser("join", help="pair this machine with a hub: shows a code and four "
                                     "check words to confirm on an admin machine")

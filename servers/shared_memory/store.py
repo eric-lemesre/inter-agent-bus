@@ -38,6 +38,7 @@ import hashlib
 import json
 import os
 import re
+import sqlite3
 import sys
 import time
 from contextlib import contextmanager
@@ -380,6 +381,170 @@ def rename_agent(old: str, new: str) -> str:
                 conn.execute("UPDATE presence SET agent=? WHERE agent=?", (new, old))
             _log_event(conn, "rename", agent=new, detail=f"was {old}")
     return f"OK: agent '{old}' renamed to '{new}'."
+
+
+# What an import copies. Keyed tables keep their keys and refuse a key
+# present on both sides; serial tables are renumbered after the target's
+# own rows (their references and the cursors follow).
+_IMPORT_KEYED = (("agents", "name"), ("tasks", "task_id"), ("results", "task_id"),
+                 ("presence", "agent"), ("channel_cursor", "agent"),
+                 ("notification_cursor", "target"))
+_IMPORT_ORDER = {"channel": "seq", "notifications": "seq", "events": "id"}
+
+
+class _Abort(Exception):
+    """Leave an import's write transaction by rolling it back (a dry run,
+    or a refusal from the caller's hook)."""
+
+    def __init__(self, answer: str) -> None:
+        super().__init__(answer)
+        self.answer = answer
+
+
+def _read_source(path: Path) -> dict[str, list[dict]] | str:
+    """Every row an import needs from a bus file, read in one snapshot,
+    without writing to it (no migration, no WAL checkpoint: the file may be
+    the live bus of local agents)."""
+    try:
+        src = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True,
+                              isolation_level=None)
+    except sqlite3.Error as exc:
+        return f"ERROR: cannot open {path}: {exc}"
+    src.row_factory = sqlite3.Row
+    try:
+        src.execute("BEGIN")
+        tables = {r["name"] for r in src.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+        if not {"agents", "tasks"} <= tables:
+            return f"ERROR: {path} is not a bus database."
+        if "machines" in tables and src.execute("SELECT 1 FROM machines").fetchone():
+            return (f"ERROR: {path} is a hub database (it has machines) — importing a "
+                    "hub into another is not supported.")
+        data = {}
+        for table, _ in _IMPORT_KEYED:
+            data[table] = ([dict(r) for r in src.execute(f"SELECT * FROM {table}")]
+                           if table in tables else [])
+        for table, order in _IMPORT_ORDER.items():
+            data[table] = ([dict(r) for r in src.execute(
+                f"SELECT * FROM {table} ORDER BY {order}")] if table in tables else [])
+        data["wake_locks"] = ([dict(r) for r in src.execute("SELECT agent FROM wake_locks")]
+                              if "wake_locks" in tables else [])
+        return data
+    except sqlite3.Error as exc:
+        return f"ERROR: cannot read {path}: {exc}"
+    finally:
+        src.close()
+
+
+def _insert_row(conn: Connection, known: dict[str, set[str]], table: str, row: dict,
+                skip: str | None = None):
+    """INSERT the columns of `row` the target knows (`known`: its columns
+    per table — a source of an older schema lacks some, the target's
+    defaults apply), but `skip` — a serial column, whose new value is
+    returned."""
+    if table not in known:
+        known[table] = conn.dialect.columns(conn, table)
+    columns = [c for c in row if c in known[table] and c != skip]
+    sql = (f"INSERT INTO {table}({', '.join(columns)}) "
+           f"VALUES({', '.join('?' for _ in columns)})")
+    params = tuple(row[c] for c in columns)
+    if skip:
+        return conn.dialect.insert_id(conn, sql, params, column=skip)
+    conn.execute(sql, params)
+    return None
+
+
+def _remap(mapping: dict[int, int], last_seq: int) -> int:
+    """A cursor's new position: the new number of the last row it had read."""
+    return max((new for old, new in mapping.items() if old <= last_seq), default=0)
+
+
+def import_database(source: str | os.PathLike, dry_run: bool = False, after=None) -> str:
+    """Copy a local bus (a SQLite file) into the current database — the
+    migration of an existing bus to a hub. Agents, queues, results,
+    presence, channel, notifications, cursors and journal come over in one
+    transaction; channel, notification and journal entries are renumbered
+    after the target's own, references and cursors following (a cursor
+    that had read anything also counts the target's earlier entries as
+    read). Wake locks stay behind: they belong to the old machine's
+    supervisor. Refused, nothing written, when a name or task id exists on
+    both sides — rename it first (`IAB_DB=<source> iab rename`).
+    `after(conn, agents)` runs inside the transaction and may refuse with
+    an `ERROR:` string (the hub binds the imported instances there)."""
+    if dialect.is_url(source):
+        return "ERROR: the source must be a local bus file (SQLite), not a URL."
+    path = Path(source).expanduser()
+    if not path.is_file():
+        return f"ERROR: no bus database at {path}."
+    target = db_path()
+    if not dialect.is_url(target) and Path(target).resolve() == path.resolve():
+        return "ERROR: the source is the current bus database itself."
+    data = _read_source(path)
+    if isinstance(data, str):
+        return data
+    agents = sorted(r["name"] for r in data["agents"])
+    with _db() as conn:
+        try:
+            with _write(conn):
+                clashes = []
+                for table, key in _IMPORT_KEYED:
+                    existing = {r[key] for r in conn.execute(f"SELECT {key} FROM {table}")}
+                    clashes += [f"{table}.{key}={r[key]}" for r in data[table]
+                                if r[key] in existing]
+                if clashes:
+                    shown = ", ".join(clashes[:10]) + (" …" if len(clashes) > 10 else "")
+                    return (f"ERROR: {len(clashes)} key(s) exist on both sides: {shown} — "
+                            "rename on the source first (IAB_DB=<source> iab rename).")
+                known = set(agents) | {r["name"] for r in conn.execute("SELECT name FROM agents")}
+                orphans = sorted({r["agent"] for r in data["tasks"]} - known)
+                if orphans:
+                    return (f"ERROR: tasks of unregistered agent(s) {', '.join(orphans)} — "
+                            "the source is inconsistent.")
+                known: dict[str, set[str]] = {}
+                for row in data["agents"]:
+                    if not row.get("harness"):
+                        row["harness"], row["workspace"] = split_name(row["name"])
+                    _insert_row(conn, known, "agents", row)
+                for table in ("tasks", "results", "presence"):
+                    for row in data[table]:
+                        _insert_row(conn, known, table, row)
+                channel = {row["seq"]: _insert_row(conn, known, "channel", row, skip="seq")
+                           for row in data["channel"]}
+                notices = {}
+                for row in data["notifications"]:
+                    for ref in ("broadcast_id", "reply_to"):
+                        if row.get(ref) is not None:
+                            row[ref] = channel.get(row[ref])
+                    notices[row["seq"]] = _insert_row(conn, known, "notifications", row,
+                                                      skip="seq")
+                for row in data["channel_cursor"]:
+                    _insert_row(conn, known, "channel_cursor",
+                                {**row, "last_seq": _remap(channel, row["last_seq"])})
+                for row in data["notification_cursor"]:
+                    _insert_row(conn, known, "notification_cursor",
+                                {**row, "last_seq": _remap(notices, row["last_seq"])})
+                for row in data["events"]:
+                    _insert_row(conn, known, "events", row, skip="id")
+                counts = {t: len(data[t]) for t in (
+                    "agents", "tasks", "results", "presence", "channel", "notifications",
+                    "events")}
+                _log_event(conn, "import", detail=f"from {path.name}: " + ", ".join(
+                    f"{n} {t}" for t, n in counts.items()))
+                if after is not None:
+                    refused = after(conn, agents)
+                    if refused:
+                        raise _Abort(refused)
+                answer = json.dumps(
+                    {"source": str(path), "dry_run": dry_run, "agents": agents,
+                     "imported": counts, "left_behind": {"wake_locks": len(data["wake_locks"])}},
+                    ensure_ascii=False)
+                if dry_run:
+                    raise _Abort(answer)
+        except _Abort as stop:
+            return stop.answer
+        except conn.dialect.integrity_error as exc:
+            return f"ERROR: import refused by the database, nothing written: {exc}"
+    return answer
 
 
 def resolve_agent(text: str) -> tuple[str | None, str | None]:

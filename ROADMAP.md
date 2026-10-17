@@ -322,7 +322,9 @@ Internet closed at first, TPM mandatory for admin machines.
   requeue, rename, forced publish and broadcast to a pattern need a
   principal of `policy.orchestrators` (default: admin machines);
   `accepts_from` bounds who pushes work or sends a message to whom; rate per machine; the
-  calling machine is journaled with every event.
+  calling machine is journaled with every event. `iab hub import`
+  brings a machine's local bus over in one transaction, its instances
+  bound to that machine (`--bind`) or to none.
 - **9e** — TPM keys, per-machine policy.
 - **9f** — PostgreSQL dialect, tests on two engines — **shipped**.
   `IAB_DB=postgresql://…` (extra `[postgres]`, psycopg): the same SQL as
