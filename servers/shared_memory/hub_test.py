@@ -50,7 +50,10 @@ with tempfile.TemporaryDirectory() as tmp:
 
     home = tmp / "hub"
     port, pair_port = free_port(), free_port()
-    out = hub.init(["localhost", "127.0.0.1"], "alpha", home, port=port, pair_port=pair_port)
+    from testdb import PG, fresh_db
+    print(f"engine: {'postgresql' if PG else 'sqlite'}")
+    out = hub.init(["localhost", "127.0.0.1"], "alpha", home,
+                   db=fresh_db(tmp, "hub") if PG else None, port=port, pair_port=pair_port)
     check("hub init creates the hub and pairs the first admin", out.startswith("OK"), out)
     check("the CA key is owner-only",
           os.name != "posix" or (home / "ca.key").stat().st_mode & 0o077 == 0)

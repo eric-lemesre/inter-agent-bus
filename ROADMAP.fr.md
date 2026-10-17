@@ -348,7 +348,15 @@ machines admin.
   borne qui pousse du travail ou envoie un message à qui ; débit par machine ; la machine
   appelante est journalisée avec chaque événement.
 - **9e** — clés TPM, politique par machine.
-- **9f** — dialecte PostgreSQL, tests sur deux moteurs.
+- **9f** — dialecte PostgreSQL, tests sur deux moteurs — **livrée**.
+  `IAB_DB=postgresql://…` (extra `[postgres]`, psycopg) : même SQL que
+  SQLite (paramètres traduits), verrou d'écriture par verrou consultatif
+  de transaction, clés étrangères différées au COMMIT, colonnes texte en
+  collation « C » (dates ISO comparées octet par octet), petit pool de
+  connexions, mise en place une fois par processus et par base, réveil
+  des attentes par LISTEN/NOTIFY au COMMIT ; mot de passe masqué dans
+  `whoami`. `store_test.py` et `hub_test.py` tournent sur les deux
+  moteurs (`IAB_TEST_POSTGRES`).
 - **9g** — `host` dans `launch`, superviseur par machine.
 - **9h** — MCP streamable HTTP : **reportée**.
 

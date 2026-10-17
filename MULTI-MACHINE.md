@@ -71,6 +71,23 @@ ReadWritePaths=/home/iab/.local/share/inter-agent-bus
 WantedBy=multi-user.target
 ```
 
+## PostgreSQL database (option)
+
+SQLite suits the hub as long as it stays the only writer. For a hub on
+an existing PostgreSQL server (`pg_dump` backups, monitoring already in
+place):
+
+```bash
+pip install 'inter-agent-bus[hub,postgres]'
+iab hub init --name iab.example.org --db 'postgresql://iab@/iab?host=/run/postgresql'
+```
+
+The schema creates itself. Prefer authentication without a password in
+the URL (Unix socket and `peer`, or `PGPASSFILE`); `hub.json` is readable
+by the hub's account only anyway, and `whoami` masks the password.
+Behaviour is identical to SQLite (same tests); blocking waits wake as
+soon as a write commits (LISTEN/NOTIFY) instead of at their next poll.
+
 ## Pair a machine
 
 On the new machine:

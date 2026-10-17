@@ -97,10 +97,14 @@ def valid_machine_name(name: str) -> bool:
 
 def _connect():
     conn = store.connect()
+    conn.dialect.prepare(conn, _create)
+    return conn
+
+
+def _create(conn) -> None:
     for statement in SCHEMA.split(";"):
         if statement.strip():
-            conn.execute(statement)
-    return conn
+            conn.execute(conn.dialect.ddl(statement))
 
 
 def enroll(

@@ -21,8 +21,10 @@ every change and are summarized below.
 - `servers/shared_memory/store.py` — storage core. **All state logic
   lives here.** No MCP dependency, ever.
 - `servers/shared_memory/dialect.py` — SQL dialect layer: connection,
-  schema, write transaction, generated ids, introspection. store.py
-  writes portable SQL and asks the dialect for the rest.
+  schema, write transaction, generated ids, introspection, wait pauses.
+  store.py writes portable SQL and asks the dialect for the rest; SQLite
+  by default, PostgreSQL for a `postgresql://` target (extra
+  `[postgres]`). A change to the SQL must pass both engines.
 - `servers/shared_memory/access.py` — access layer: `bus.<operation>`
   forwards to the backend of the moment (store.py locally, a hub client
   when `IAB_HUB` is set). **Wrappers and drivers call operations through
@@ -122,6 +124,8 @@ python3 -m venv .venv                          # py -m venv .venv on Windows
 .venv/bin/python servers/shared_memory/store_test.py
 .venv/bin/pip install -e '.[hub]'              # hub tests and hub smoke
 .venv/bin/python servers/shared_memory/hub_test.py
+# Both suites again on PostgreSQL (extra [postgres]; an EMPTY test database):
+IAB_TEST_POSTGRES=postgresql://… .venv/bin/python servers/shared_memory/store_test.py
 python3 scripts/smoke.py       # end-to-end acceptance, CLI only
 ```
 

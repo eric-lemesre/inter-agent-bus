@@ -324,7 +324,14 @@ Internet closed at first, TPM mandatory for admin machines.
   `accepts_from` bounds who pushes work or sends a message to whom; rate per machine; the
   calling machine is journaled with every event.
 - **9e** — TPM keys, per-machine policy.
-- **9f** — PostgreSQL dialect, tests on two engines.
+- **9f** — PostgreSQL dialect, tests on two engines — **shipped**.
+  `IAB_DB=postgresql://…` (extra `[postgres]`, psycopg): the same SQL as
+  SQLite (placeholders translated), a transaction-level advisory lock as
+  the writer lock, foreign keys deferred to COMMIT, text columns in the
+  "C" collation (ISO dates compared byte-wise), a small connection pool,
+  setup once per process and database, waits woken by LISTEN/NOTIFY at
+  COMMIT; password masked in `whoami`. `store_test.py` and `hub_test.py`
+  run on both engines (`IAB_TEST_POSTGRES`).
 - **9g** — `host` in `launch`, per-machine supervisor.
 - **9h** — MCP streamable HTTP: **deferred**.
 

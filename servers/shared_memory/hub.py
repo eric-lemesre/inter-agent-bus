@@ -154,8 +154,9 @@ def init(names: list[str], machine: str, home: Path | None = None,
         "pair_allow": list(PRIVATE_NETWORKS),
         "db": db or str(home / "bus.db"),
     }
-    pki.write_public(paths["config"],
-                     json.dumps(config, indent=2, ensure_ascii=False).encode("utf-8"))
+    # Private: the database target may be a URL carrying credentials.
+    pki.write_private(paths["config"],
+                      json.dumps(config, indent=2, ensure_ascii=False).encode("utf-8"))
     if os.name == "posix":
         os.chmod(home, 0o700)
     _use_database(config)

@@ -5,6 +5,11 @@ agent clients each spawning their own stdio server) must see the same
 state — that was the flaw of the first, in-memory version.
 
     python3 store_test.py
+
+Two engines: by default every bus database is a SQLite file; with
+IAB_TEST_POSTGRES=<URL of an EMPTY test database> the same checks run on
+PostgreSQL (each fresh bus is a new schema there). The SQLite-only checks
+— file permissions, legacy files, path resolution — keep using files.
 """
 from __future__ import annotations
 
@@ -19,6 +24,7 @@ from pathlib import Path
 
 HERE = Path(__file__).parent
 fail = 0
+from testdb import PG, fresh_db  # noqa: E402  (engine under test)
 
 
 def check(label: str, ok: bool, detail: str = "") -> None:
@@ -29,8 +35,10 @@ def check(label: str, ok: bool, detail: str = "") -> None:
 
 
 with tempfile.TemporaryDirectory() as tmp:
-    os.environ["IAB_DB"] = str(Path(tmp) / "bus.db")
+    MAIN = fresh_db(tmp, "bus")
+    os.environ["IAB_DB"] = MAIN
     import store
+    print(f"engine: {'postgresql' if PG else 'sqlite'}")
 
     # Unknown agent refused (typo detection).
     r = store.push_task("ghost", "t0", "x")
@@ -253,7 +261,7 @@ with tempfile.TemporaryDirectory() as tmp:
     check("a hung command is killed after --task-timeout",
           r.startswith("ERROR") and "timeout" in r, r)
 
-    if os.name == "posix":
+    if os.name == "posix" and not PG:
         check("the bus database is owner-only (0600)",
               (Path(os.environ["IAB_DB"]).stat().st_mode & 0o777) == 0o600)
 
@@ -355,11 +363,11 @@ with tempfile.TemporaryDirectory() as tmp:
     check("a pre-phase-3 database is migrated on contact", t["task_id"] == "t-old")
     check("a migrated task settles with the fencing token",
           store.publish_result("old", "t-old", "ok", attempt=t["attempts"]).startswith("OK"))
-    os.environ["IAB_DB"] = str(Path(tmp) / "bus.db")
+    os.environ["IAB_DB"] = MAIN
 
     # Naming migration: legacy ORCHESTRATOR_DB honored, IAB_DB wins over it.
     os.environ["ORCHESTRATOR_DB"] = str(Path(tmp) / "legacy.db")
-    check("IAB_DB wins over the legacy variable", store.db_path().name == "bus.db")
+    check("IAB_DB wins over the legacy variable", str(store.db_path()) == MAIN)
 
     del os.environ["IAB_DB"]
     check("legacy ORCHESTRATOR_DB honored when IAB_DB is unset",
@@ -423,7 +431,7 @@ with tempfile.TemporaryDirectory() as tmp:
     # =====================================================================
     from datetime import datetime, timedelta, timezone
 
-    os.environ["IAB_DB"] = str(Path(tmp) / "phase7.db")
+    os.environ["IAB_DB"] = fresh_db(tmp, "phase7")
 
     # Injectable clock: every presence/channel code path goes through
     # store._now() only — liveness is computed at read time, never slept on.
@@ -1089,6 +1097,27 @@ with tempfile.TemporaryDirectory() as tmp:
           entry and entry[0]["author"] == "bus" and entry[0]["message"] == "machine 'x' paired")
     check("system announcements keep the topic rule",
           store.system_announce("Bad Topic", "x").startswith("ERROR"))
+
+    # 9f — on PostgreSQL a blocking wait wakes at the writer's COMMIT
+    # (LISTEN/NOTIFY), not at its next poll.
+    if PG:
+        store.register_agent("pgwait", "LISTEN/NOTIFY")
+
+        def push_soon() -> None:
+            time.sleep(0.5)
+            store.push_task("pgwait", "t-pg", "x")
+
+        import threading
+        threading.Thread(target=push_soon).start()
+        started = time.monotonic()
+        snap = json.loads(store.wait_signal("pgwait", "task", 20, 10))
+        waited = time.monotonic() - started
+        check("a PostgreSQL wait wakes at the commit, long before its poll interval",
+              snap["signalled"] and waited < 3, f"{waited:.2f}s")
+        store.cancel_task("t-pg")
+        check("the database URL is shown without its password",
+              "secret" not in store.dialect.describe("postgresql://u:secret@h/db")
+              and "***" in store.dialect.describe("postgresql://u:secret@h/db"))
 
     # 9a — access layer: every exposed operation is a core function, and a
     # local helper cannot be reached through `bus` (it would bypass a hub).

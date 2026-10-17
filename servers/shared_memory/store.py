@@ -200,11 +200,12 @@ def project_key(cwd: str | os.PathLike | None = None) -> str:
     return f"{slug}-{digest}"
 
 
-def _resolve_db(cwd: str | os.PathLike | None = None) -> tuple[Path, str]:
+def _resolve_db(cwd: str | os.PathLike | None = None) -> tuple[Path | str, str]:
     for var in ("IAB_DB", "ORCHESTRATOR_DB"):
         value = os.environ.get(var)
         if value:
-            return Path(value), f"env:{var}"
+            # A postgresql:// URL stays a string; anything else is a file.
+            return (value if dialect.is_url(value) else Path(value)), f"env:{var}"
     if GLOBAL_DB.exists():
         return GLOBAL_DB, "global (pre-isolation bus kept — set IAB_DB to opt out)"
     if LEGACY_DB.exists():
@@ -212,7 +213,7 @@ def _resolve_db(cwd: str | os.PathLike | None = None) -> tuple[Path, str]:
     return DATA_DIR / "projects" / f"{project_key(cwd)}.db", "project"
 
 
-def db_path(cwd: str | os.PathLike | None = None) -> Path:
+def db_path(cwd: str | os.PathLike | None = None) -> Path | str:
     return _resolve_db(cwd)[0]
 
 
@@ -221,7 +222,7 @@ def db_info() -> str:
     diagnosis: participants of one project must all see the same path."""
     path, source = _resolve_db()
     return json.dumps(
-        {"db": str(path), "db_source": source, "project_key": project_key()},
+        {"db": dialect.describe(path), "db_source": source, "project_key": project_key()},
         ensure_ascii=False,
     )
 
@@ -230,8 +231,11 @@ def connect() -> Connection:
     """Open the bus database through its dialect, schema and additive
     migrations applied. The caller closes it (see _db)."""
     conn = dialect.for_target(db_path()).connect()
-    conn.dialect.create_schema(conn)
-    _migrate(conn)
+    try:
+        conn.dialect.prepare(conn, _setup)
+    except BaseException:
+        conn.close()
+        raise
     return conn
 
 
@@ -253,6 +257,12 @@ def _write(conn: Connection):
 
 def _insert_id(conn: Connection, sql: str, params: tuple) -> int:
     return conn.dialect.insert_id(conn, sql, params)
+
+
+def _setup(conn: Connection) -> None:
+    """The bus tables, then their additive migrations."""
+    conn.dialect.create_schema(conn)
+    _migrate(conn)
 
 
 def _migrate(conn: Connection) -> None:
@@ -497,7 +507,7 @@ def wait_for_task(agent: str, timeout_s: float = 300.0, interval_s: float = 2.0)
                 return json.dumps([r["task_id"] for r in rows], ensure_ascii=False)
             if time.monotonic() >= deadline:
                 return "[]"
-            time.sleep(min(interval_s, max(0.0, deadline - time.monotonic())))
+            conn.dialect.pause(conn, min(interval_s, max(0.0, deadline - time.monotonic())))
     finally:
         conn.close()
 
@@ -1294,7 +1304,7 @@ def wait_signal(
                 return json.dumps({"signalled": True, **pending}, ensure_ascii=False)
             if time.monotonic() >= deadline:
                 return json.dumps({"signalled": False, **pending}, ensure_ascii=False)
-            time.sleep(min(interval_s, max(0.0, deadline - time.monotonic())))
+            conn.dialect.pause(conn, min(interval_s, max(0.0, deadline - time.monotonic())))
     finally:
         conn.close()
 

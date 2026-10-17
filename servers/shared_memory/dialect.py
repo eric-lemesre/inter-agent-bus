@@ -10,13 +10,21 @@ integrity-error class. No ORM: the rule "no new dependency lightly"
 holds, and the core stays standard-library only for SQLite.
 
 The engine is chosen by the database target (see store.db_path): a
-filesystem path selects SQLite — the default.
+filesystem path selects SQLite — the default; a `postgresql://` URL
+selects PostgreSQL (extra `[postgres]`, the psycopg driver), meant for a
+hub: one writer lock (an advisory lock) keeps the core's transactional
+guarantees unchanged, LISTEN/NOTIFY wakes the blocking waits.
 """
 from __future__ import annotations
 
 import os
+import re
 import sqlite3
+import threading
+import time
+import urllib.parse
 from contextlib import contextmanager
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -136,10 +144,23 @@ class SQLiteDialect:
     def create_schema(self, conn: Connection) -> None:
         conn.executescript(SCHEMA.format(serial="INTEGER PRIMARY KEY AUTOINCREMENT"))
 
+    def prepare(self, conn: Connection, setup) -> None:
+        """Run a module's `setup(conn)` (its tables, its additive
+        migrations) at every connection: cheap on a local file, and a file
+        replaced under a running process is still prepared."""
+        setup(conn)
+
+    def ddl(self, statement: str) -> str:
+        return statement
+
+    def pause(self, conn: Connection, seconds: float) -> None:
+        """Wait between two polls of a blocking wait."""
+        time.sleep(seconds)
+
     def columns(self, conn: Connection, table: str) -> set[str]:
         return {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
 
-    def insert_id(self, conn: Connection, sql: str, params: tuple) -> int:
+    def insert_id(self, conn: Connection, sql: str, params: tuple, column: str = "seq") -> int:
         """Run an INSERT into a table with an auto-generated id and return
         that id."""
         return conn.execute(sql, params).lastrowid
@@ -160,6 +181,170 @@ class SQLiteDialect:
         conn.execute("COMMIT")
 
 
-def for_target(target: Path) -> SQLiteDialect:
+# -- PostgreSQL -------------------------------------------------------------
+
+_SCHEMES = ("postgresql://", "postgres://")
+# One writer at a time, like SQLite's BEGIN IMMEDIATE: a transaction-level
+# advisory lock, released at COMMIT/ROLLBACK. Key: "iab" in ASCII.
+_WRITER_LOCK = 0x696162
+_CHANNEL = "iab_bus"
+_POOL_SIZE = 8
+
+
+def is_url(target) -> bool:
+    return isinstance(target, str) and target.startswith(_SCHEMES)
+
+
+def describe(target) -> str:
+    """A target fit for display: a URL loses its password."""
+    if not is_url(target):
+        return str(target)
+    parts = urllib.parse.urlsplit(target)
+    if parts.password is None:
+        return target
+    netloc = parts.netloc.replace(f":{parts.password}@", ":***@", 1)
+    return urllib.parse.urlunsplit(parts._replace(netloc=netloc))
+
+
+@lru_cache(maxsize=512)
+def _translate(sql: str) -> str:
+    """The core's portable SQL to psycopg's: `?` → `%s` outside string
+    literals, every literal `%` doubled (psycopg reads `%` everywhere when
+    parameters are passed — and they always are)."""
+    out, quoted = [], False
+    for char in sql:
+        if char == "'":
+            quoted = not quoted
+            out.append(char)
+        elif char == "%":
+            out.append("%%")
+        elif char == "?" and not quoted:
+            out.append("%s")
+        else:
+            out.append(char)
+    return "".join(out)
+
+
+class _PGConnection:
+    """A psycopg connection behind the sqlite3-like surface the core uses:
+    `execute(sql, params)` → cursor (fetchone, fetchall, iteration,
+    rowcount), rows as mappings, `close()` back to the pool."""
+
+    def __init__(self, raw, dialect: "PostgresDialect") -> None:
+        self.raw = raw
+        self.dialect = dialect
+        self.listening = False
+
+    def execute(self, sql: str, params=()):
+        return self.raw.execute(_translate(sql), tuple(params))
+
+    def close(self) -> None:
+        self.dialect._release(self)
+
+
+class PostgresDialect:
+    """PostgreSQL for a hub: the same SQL as SQLite, one advisory writer
+    lock, a small connection pool, LISTEN/NOTIFY for the waits."""
+
+    name = "postgresql"
+
+    def __init__(self, url: str) -> None:
+        try:
+            import psycopg
+            from psycopg.rows import dict_row
+        except ImportError as exc:
+            raise ImportError("a postgresql:// bus needs the psycopg driver: "
+                              "pip install 'inter-agent-bus[postgres]'") from exc
+        self._psycopg = psycopg
+        self._dict_row = dict_row
+        self.url = url
+        self.integrity_error = psycopg.IntegrityError
+
+    def connect(self) -> Connection:
+        idle = _POOLS.setdefault(self.url, [])
+        with _POOL_LOCK:
+            while idle:
+                conn = idle.pop()
+                if not conn.raw.closed:
+                    return conn
+        raw = self._psycopg.connect(self.url, autocommit=True, row_factory=self._dict_row)
+        return _PGConnection(raw, self)
+
+    def _release(self, conn: _PGConnection) -> None:
+        healthy = (not conn.raw.closed and conn.raw.info.transaction_status
+                   == self._psycopg.pq.TransactionStatus.IDLE)
+        with _POOL_LOCK:
+            idle = _POOLS.setdefault(self.url, [])
+            if healthy and len(idle) < _POOL_SIZE:
+                idle.append(conn)
+                return
+        conn.raw.close()
+
+    def ddl(self, statement: str) -> str:
+        # Text columns compared as ISO dates must compare byte-wise, whatever
+        # the database's locale: the "C" collation. Foreign keys are checked
+        # at COMMIT: a rename moves a name and its references in one
+        # transaction (SQLite does not enforce them at all).
+        statement = re.sub(r"\bTEXT\b", 'TEXT COLLATE "C"', statement)
+        return re.sub(r"(REFERENCES \w+\(\w+\))", r"\1 DEFERRABLE INITIALLY DEFERRED",
+                      statement)
+
+    def create_schema(self, conn: Connection) -> None:
+        for statement in SCHEMA.format(serial="BIGSERIAL PRIMARY KEY").split(";"):
+            if statement.strip():
+                conn.execute(self.ddl(statement))
+
+    def prepare(self, conn: Connection, setup) -> None:
+        """Run a module's `setup(conn)` at most once per process and
+        database, inside the writer lock (several hub threads, or hubs, may
+        start at once; DDL is transactional here)."""
+        key = (self.url, setup.__module__, setup.__qualname__)
+        if key in _PREPARED:
+            return
+        with self.write(conn):
+            setup(conn)
+        _PREPARED.add(key)
+
+    def columns(self, conn: Connection, table: str) -> set[str]:
+        return {r["name"] for r in conn.execute(
+            "SELECT column_name AS name FROM information_schema.columns "
+            "WHERE table_schema = current_schema() AND table_name = ?", (table,))}
+
+    def insert_id(self, conn: Connection, sql: str, params: tuple, column: str = "seq") -> int:
+        return conn.execute(f"{sql} RETURNING {column}", params).fetchone()[column]
+
+    @contextmanager
+    def write(self, conn: Connection) -> Iterator[Connection]:
+        """Same contract as SQLite's: the writer lock from the first
+        statement, commit on normal exit, rollback on exception. Waiters
+        are notified at commit (a NOTIFY is delivered only then)."""
+        conn.execute("BEGIN")
+        try:
+            conn.execute("SELECT pg_advisory_xact_lock(?)", (_WRITER_LOCK,))
+            yield conn
+            conn.execute(f"NOTIFY {_CHANNEL}")
+        except BaseException:
+            conn.execute("ROLLBACK")
+            raise
+        conn.execute("COMMIT")
+
+    def pause(self, conn: Connection, seconds: float) -> None:
+        """Sleep until a write commits somewhere or `seconds` elapse — a
+        wait wakes at once instead of at its next poll."""
+        if not conn.listening:
+            conn.execute(f"LISTEN {_CHANNEL}")
+            conn.listening = True
+        for _ in conn.raw.notifies(timeout=seconds, stop_after=1):
+            pass
+
+
+_POOLS: dict[str, list] = {}
+_POOL_LOCK = threading.Lock()
+_PREPARED: set[tuple[str, str, str]] = set()
+
+
+def for_target(target) -> SQLiteDialect | PostgresDialect:
     """The dialect serving a database target (see store.db_path)."""
+    if is_url(target):
+        return PostgresDialect(target)
     return SQLiteDialect(target)

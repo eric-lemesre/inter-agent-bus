@@ -71,6 +71,24 @@ ReadWritePaths=/home/iab/.local/share/inter-agent-bus
 WantedBy=multi-user.target
 ```
 
+## Base PostgreSQL (option)
+
+SQLite convient au moyeu tant qu'il reste le seul écrivain. Pour un
+moyeu sur une base PostgreSQL existante (sauvegarde `pg_dump`,
+supervision déjà en place) :
+
+```bash
+pip install 'inter-agent-bus[hub,postgres]'
+iab hub init --name iab.example.org --db 'postgresql://iab@/iab?host=/run/postgresql'
+```
+
+Le schéma se crée seul. Préférez une authentification sans mot de passe
+dans l'URL (socket Unix et `peer`, ou `PGPASSFILE`) ; `hub.json` reste de
+toute façon lisible par le seul compte du moyeu, et `whoami` masque le
+mot de passe. Le comportement est identique à SQLite (mêmes tests) ; les
+attentes bloquantes se réveillent dès le COMMIT d'une écriture
+(LISTEN/NOTIFY) au lieu d'attendre leur prochain sondage.
+
 ## Appairer une machine
 
 Sur la nouvelle machine :
