@@ -37,11 +37,19 @@ import hashlib
 import json
 import os
 import re
-import sqlite3
 import sys
 import time
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Iterator
+
+try:  # installed package: `iab` maps to this directory (pyproject.toml)
+    from . import dialect
+except ImportError:  # bare script or test: the directory is on sys.path
+    import dialect
+
+Connection = dialect.Connection
 
 
 def _data_dir() -> Path:
@@ -210,120 +218,56 @@ def db_info() -> str:
     )
 
 
-def connect() -> sqlite3.Connection:
-    path = db_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(path, timeout=10, isolation_level=None)
-    if os.name == "posix":
-        # Writing the bus is prompt-injection-adjacent (payloads reach
-        # autonomous agents): keep the file owner-only. Hardening, not
-        # correctness — an exotic filesystem may refuse, the bus still works.
-        try:
-            os.chmod(path, 0o600)
-        except OSError:
-            pass
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=10000")
-    conn.executescript(
-        """
-        CREATE TABLE IF NOT EXISTS agents (
-            name          TEXT PRIMARY KEY,
-            description   TEXT NOT NULL DEFAULT '',
-            registered_at TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS tasks (
-            task_id        TEXT PRIMARY KEY,
-            agent          TEXT NOT NULL REFERENCES agents(name),
-            payload        TEXT NOT NULL,
-            priority       INTEGER NOT NULL DEFAULT 1,
-            status         TEXT NOT NULL DEFAULT 'queued',
-            attempts       INTEGER NOT NULL DEFAULT 0,
-            created_at     TEXT NOT NULL,
-            claimed_at     TEXT,
-            lease_deadline TEXT
-        );
-        CREATE TABLE IF NOT EXISTS results (
-            task_id    TEXT PRIMARY KEY,
-            author     TEXT NOT NULL,
-            content    TEXT NOT NULL,
-            updated_at TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS events (
-            id      INTEGER PRIMARY KEY AUTOINCREMENT,
-            task_id TEXT,
-            agent   TEXT,
-            event   TEXT NOT NULL,
-            at      TEXT NOT NULL,
-            detail  TEXT NOT NULL DEFAULT ''
-        );
-        CREATE INDEX IF NOT EXISTS events_task ON events(task_id);
-        CREATE TABLE IF NOT EXISTS presence (
-            agent        TEXT PRIMARY KEY,
-            last_seen    TEXT NOT NULL,
-            ttl_seconds  INTEGER NOT NULL,
-            capabilities TEXT NOT NULL DEFAULT '{}'
-        );
-        CREATE TABLE IF NOT EXISTS channel (
-            seq     INTEGER PRIMARY KEY AUTOINCREMENT,
-            author  TEXT NOT NULL,
-            at      TEXT NOT NULL,
-            topic   TEXT NOT NULL,
-            message TEXT NOT NULL
-        );
-        CREATE INDEX IF NOT EXISTS channel_topic ON channel(topic);
-        CREATE TABLE IF NOT EXISTS channel_cursor (
-            agent    TEXT PRIMARY KEY,
-            last_seq INTEGER NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS notifications (
-            seq     INTEGER PRIMARY KEY AUTOINCREMENT,
-            target  TEXT NOT NULL,
-            author  TEXT NOT NULL,
-            at      TEXT NOT NULL,
-            message TEXT NOT NULL
-        );
-        CREATE INDEX IF NOT EXISTS notifications_target ON notifications(target);
-        CREATE TABLE IF NOT EXISTS notification_cursor (
-            target   TEXT PRIMARY KEY,
-            last_seq INTEGER NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS wake_locks (
-            agent  TEXT PRIMARY KEY,
-            token  TEXT NOT NULL,
-            until  TEXT NOT NULL,
-            holder TEXT NOT NULL DEFAULT ''
-        );
-        """
-    )
+def connect() -> Connection:
+    """Open the bus database through its dialect, schema and additive
+    migrations applied. The caller closes it (see _db)."""
+    conn = dialect.for_target(db_path()).connect()
+    conn.dialect.create_schema(conn)
     _migrate(conn)
     return conn
 
 
-def _migrate(conn: sqlite3.Connection) -> None:
+@contextmanager
+def _db() -> Iterator[Connection]:
+    """One connection for one operation, closed on the way out."""
+    conn = connect()
+    try:
+        yield conn
+    finally:
+        conn.close()
+
+
+def _write(conn: Connection):
+    """The write transaction of the engine (writer lock held from the first
+    statement; commit on normal exit, rollback on exception)."""
+    return conn.dialect.write(conn)
+
+
+def _insert_id(conn: Connection, sql: str, params: tuple) -> int:
+    return conn.dialect.insert_id(conn, sql, params)
+
+
+def _migrate(conn: Connection) -> None:
     """Additive migrations only — the database is a long-lived rendezvous
     shared by several clients; existing files must keep working."""
-    columns = {r["name"] for r in conn.execute("PRAGMA table_info(tasks)")}
+    columns = conn.dialect.columns(conn, "tasks")
     if "max_attempts" not in columns:
         conn.execute("ALTER TABLE tasks ADD COLUMN max_attempts INTEGER NOT NULL DEFAULT 3")
-    columns = {r["name"] for r in conn.execute("PRAGMA table_info(agents)")}
+    columns = conn.dialect.columns(conn, "agents")
     for column in ("harness", "workspace", "cwd"):
         if column not in columns:
             conn.execute(f"ALTER TABLE agents ADD COLUMN {column} TEXT NOT NULL DEFAULT ''")
     # Rows registered before the composed identity: their harness is their
     # name (a legacy bare name stays addressable, see _resolve_target).
-    conn.execute(
-        "UPDATE agents SET harness = CASE WHEN instr(name, '@') > 0 "
-        "THEN substr(name, 1, instr(name, '@') - 1) ELSE name END, "
-        "workspace = CASE WHEN instr(name, '@') > 0 "
-        "THEN substr(name, instr(name, '@') + 1) ELSE '' END "
-        "WHERE harness = ''"
-    )
-    columns = {r["name"] for r in conn.execute("PRAGMA table_info(presence)")}
+    # Split in Python: string functions differ between engines.
+    for row in conn.execute("SELECT name FROM agents WHERE harness = ''").fetchall():
+        harness, workspace = split_name(row["name"])
+        conn.execute("UPDATE agents SET harness=?, workspace=? WHERE name=?",
+                     (harness, workspace, row["name"]))
+    columns = conn.dialect.columns(conn, "presence")
     if "model" not in columns:
         conn.execute("ALTER TABLE presence ADD COLUMN model TEXT NOT NULL DEFAULT ''")
-    columns = {r["name"] for r in conn.execute("PRAGMA table_info(notifications)")}
+    columns = conn.dialect.columns(conn, "notifications")
     if "broadcast_id" not in columns:
         conn.execute("ALTER TABLE notifications ADD COLUMN broadcast_id INTEGER")
     if "reply_to" not in columns:
@@ -333,7 +277,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
 
 
 def _log_event(
-    conn: sqlite3.Connection,
+    conn: Connection,
     event: str,
     task_id: str | None = None,
     agent: str | None = None,
@@ -361,7 +305,7 @@ def register_agent(
             "each component [a-z0-9][a-z0-9._-]{0,39}."
         )
     harness, workspace = split_name(name)
-    with connect() as conn:
+    with _db() as conn:
         known = conn.execute("SELECT 1 FROM agents WHERE name=?", (name,)).fetchone()
         conn.execute(
             "INSERT INTO agents(name, description, registered_at, harness, workspace, cwd) "
@@ -389,14 +333,11 @@ def rename_agent(old: str, new: str) -> str:
     if not _NAME_RE.match(new):
         return f"ERROR: invalid agent name '{new}' — expected harness[@workspace]."
     harness, workspace = split_name(new)
-    with connect() as conn:
-        conn.execute("BEGIN IMMEDIATE")
-        try:
+    with _db() as conn:
+        with _write(conn):
             if conn.execute("SELECT 1 FROM agents WHERE name=?", (old,)).fetchone() is None:
-                conn.execute("COMMIT")
                 return f"ERROR: agent '{old}' not registered."
             if conn.execute("SELECT 1 FROM agents WHERE name=?", (new,)).fetchone():
-                conn.execute("COMMIT")
                 return f"ERROR: agent '{new}' already exists — rename refused."
             conn.execute(
                 "UPDATE agents SET name=?, harness=?, workspace=? WHERE name=?",
@@ -414,18 +355,14 @@ def rename_agent(old: str, new: str) -> str:
             else:
                 conn.execute("UPDATE presence SET agent=? WHERE agent=?", (new, old))
             _log_event(conn, "rename", agent=new, detail=f"was {old}")
-            conn.execute("COMMIT")
-        except Exception:
-            conn.execute("ROLLBACK")
-            raise
     return f"OK: agent '{old}' renamed to '{new}'."
 
 
-def _known_agents(conn: sqlite3.Connection) -> list[str]:
+def _known_agents(conn: Connection) -> list[str]:
     return [r["name"] for r in conn.execute("SELECT name FROM agents ORDER BY name")]
 
 
-def _resolve_target(conn: sqlite3.Connection, text: str) -> tuple[str | None, str | None]:
+def _resolve_target(conn: Connection, text: str) -> tuple[str | None, str | None]:
     """Turn an address into one registered instance: an exact name, or a
     bare harness that designates exactly one registered instance (a legacy
     bare name counts). Ambiguity is refused with the candidates — a message
@@ -479,7 +416,7 @@ def push_task(
     the agent. The notification is a hint for claim_task, not a delivery
     channel: at-least-once still rules, and a woken worker may find an empty
     queue (lease expiry, cancellation) and must tolerate it."""
-    with connect() as conn:
+    with _db() as conn:
         # Explicit refusal of an unregistered or ambiguous agent: keeps the
         # typo detection that hard-coded queues provided, without freezing
         # the cast.
@@ -492,7 +429,7 @@ def push_task(
                 "max_attempts) VALUES(?,?,?,?,?,?)",
                 (task_id, target, payload, priority, _now(), max_attempts),
             )
-        except sqlite3.IntegrityError:
+        except conn.dialect.integrity_error:
             return f"ERROR: task_id '{task_id}' already exists."
         _log_event(conn, "push", task_id, target, f"priority {priority}")
         if notify:
@@ -542,7 +479,7 @@ def wait_for_task(agent: str, timeout_s: float = 300.0, interval_s: float = 2.0)
         conn.close()
 
 
-def _requeue_expired(conn: sqlite3.Connection) -> None:
+def _requeue_expired(conn: Connection) -> None:
     expired = conn.execute(
         "SELECT task_id, agent, attempts, max_attempts FROM tasks "
         "WHERE status='claimed' AND lease_deadline < ?",
@@ -573,12 +510,10 @@ def claim_task(agent_name: str, lease_seconds: int = 900, task_id: str | None = 
     under lease — or one specific queued task of one's own queue when
     task_id is given (logged escape hatch; no cross-queue poaching)."""
     deadline = (datetime.now(timezone.utc) + timedelta(seconds=lease_seconds)).isoformat()
-    with connect() as conn:
-        conn.execute("BEGIN IMMEDIATE")
-        try:
+    with _db() as conn:
+        with _write(conn):
             target, error = _resolve_target(conn, agent_name)
             if error:
-                conn.execute("COMMIT")
                 return error
             _requeue_expired(conn)
             if task_id is None:
@@ -589,7 +524,6 @@ def claim_task(agent_name: str, lease_seconds: int = 900, task_id: str | None = 
                     (target,),
                 ).fetchone()
                 if row is None:
-                    conn.execute("COMMIT")
                     return "NO_TASK"
             else:
                 row = conn.execute(
@@ -598,16 +532,13 @@ def claim_task(agent_name: str, lease_seconds: int = 900, task_id: str | None = 
                     (task_id,),
                 ).fetchone()
                 if row is None:
-                    conn.execute("COMMIT")
                     return f"ERROR: unknown task '{task_id}'."
                 if row["agent"] != target:
-                    conn.execute("COMMIT")
                     return (
                         f"ERROR: task '{task_id}' belongs to {row['agent']}'s queue — "
                         "no cross-queue claiming."
                     )
                 if row["status"] != "queued":
-                    conn.execute("COMMIT")
                     return f"ERROR: task '{task_id}' is not queued (status: {row['status']})."
             conn.execute(
                 "UPDATE tasks SET status='claimed', claimed_at=?, lease_deadline=?, "
@@ -617,10 +548,6 @@ def claim_task(agent_name: str, lease_seconds: int = 900, task_id: str | None = 
             _log_event(conn, "claim", row["task_id"], target,
                        f"attempt {row['attempts'] + 1}, lease until {deadline}"
                        + (" (targeted)" if task_id is not None else ""))
-            conn.execute("COMMIT")
-        except Exception:
-            conn.execute("ROLLBACK")
-            raise
     return json.dumps(
         {
             "task_id": row["task_id"],
@@ -648,28 +575,24 @@ def publish_result(
     the worker that took the task over. `force` is the orchestrator's
     explicit override for all three checks."""
     author = agent_name.strip().lower()
-    with connect() as conn:
-        conn.execute("BEGIN IMMEDIATE")
-        try:
+    with _db() as conn:
+        with _write(conn):
             row = conn.execute(
                 "SELECT agent, status, attempts FROM tasks WHERE task_id=?",
                 (task_id,),
             ).fetchone()
             if not force:
                 if row is None:
-                    conn.execute("COMMIT")
                     return (
                         f"ERROR: unknown task '{task_id}' — nothing to settle "
                         "(force=True to store a result anyway)."
                     )
                 if row["agent"] != author:
-                    conn.execute("COMMIT")
                     return (
                         f"ERROR: task '{task_id}' belongs to {row['agent']}'s queue; "
                         f"'{author}' cannot settle it (force=True to override)."
                     )
                 if attempt is not None and attempt < row["attempts"]:
-                    conn.execute("COMMIT")
                     return (
                         f"ERROR: stale attempt token {attempt} < {row['attempts']} — "
                         f"the lease expired and task '{task_id}' was re-offered; "
@@ -688,26 +611,19 @@ def publish_result(
             if force:
                 detail += " (forced)"
             _log_event(conn, "publish", task_id, author, detail)
-            conn.execute("COMMIT")
-        except Exception:
-            conn.execute("ROLLBACK")
-            raise
     return f"OK: result for '{task_id}' published by {author}."
 
 
 def cancel_task(task_id: str) -> str:
     """Cancel a task that is not settled yet (terminal status `cancelled`)."""
-    with connect() as conn:
-        conn.execute("BEGIN IMMEDIATE")
-        try:
+    with _db() as conn:
+        with _write(conn):
             row = conn.execute(
                 "SELECT agent, status FROM tasks WHERE task_id=?", (task_id,)
             ).fetchone()
             if row is None:
-                conn.execute("COMMIT")
                 return f"ERROR: unknown task '{task_id}'."
             if row["status"] in ("done", "cancelled"):
-                conn.execute("COMMIT")
                 return f"ERROR: task '{task_id}' is already {row['status']}."
             conn.execute(
                 "UPDATE tasks SET status='cancelled', claimed_at=NULL, "
@@ -716,10 +632,6 @@ def cancel_task(task_id: str) -> str:
             )
             _log_event(conn, "cancel", task_id, row["agent"],
                        f"was {row['status']}")
-            conn.execute("COMMIT")
-        except Exception:
-            conn.execute("ROLLBACK")
-            raise
     return f"OK: task '{task_id}' cancelled."
 
 
@@ -728,21 +640,17 @@ def requeue_task(task_id: str) -> str:
     attempts (the attempt counter itself never goes backwards: it is the
     fencing token of publish_result). A done task stays done — push a new
     task_id instead of rewriting history."""
-    with connect() as conn:
-        conn.execute("BEGIN IMMEDIATE")
-        try:
+    with _db() as conn:
+        with _write(conn):
             row = conn.execute(
                 "SELECT agent, status, attempts, max_attempts FROM tasks WHERE task_id=?",
                 (task_id,),
             ).fetchone()
             if row is None:
-                conn.execute("COMMIT")
                 return f"ERROR: unknown task '{task_id}'."
             if row["status"] == "queued":
-                conn.execute("COMMIT")
                 return f"ERROR: task '{task_id}' is already queued."
             if row["status"] == "done":
-                conn.execute("COMMIT")
                 return (
                     f"ERROR: task '{task_id}' is settled — push a new task_id "
                     "instead of requeueing a done task."
@@ -755,10 +663,6 @@ def requeue_task(task_id: str) -> str:
             )
             _log_event(conn, "requeue", task_id, row["agent"],
                        f"was {row['status']}; max_attempts re-armed to {rearmed}")
-            conn.execute("COMMIT")
-        except Exception:
-            conn.execute("ROLLBACK")
-            raise
     return f"OK: task '{task_id}' requeued."
 
 
@@ -766,17 +670,14 @@ def extend_lease(task_id: str, lease_seconds: int = 900) -> str:
     """Renew the lease of a claimed task (deadline = now + lease_seconds):
     long work extends instead of overshooting and being re-offered."""
     deadline = (datetime.now(timezone.utc) + timedelta(seconds=lease_seconds)).isoformat()
-    with connect() as conn:
-        conn.execute("BEGIN IMMEDIATE")
-        try:
+    with _db() as conn:
+        with _write(conn):
             row = conn.execute(
                 "SELECT agent, status FROM tasks WHERE task_id=?", (task_id,)
             ).fetchone()
             if row is None:
-                conn.execute("COMMIT")
                 return f"ERROR: unknown task '{task_id}'."
             if row["status"] != "claimed":
-                conn.execute("COMMIT")
                 return (
                     f"ERROR: task '{task_id}' is not claimed "
                     f"(status: {row['status']}) — no lease to extend."
@@ -787,15 +688,11 @@ def extend_lease(task_id: str, lease_seconds: int = 900) -> str:
             )
             _log_event(conn, "extend", task_id, row["agent"],
                        f"lease until {deadline}")
-            conn.execute("COMMIT")
-        except Exception:
-            conn.execute("ROLLBACK")
-            raise
     return f"OK: lease of '{task_id}' extended until {deadline}."
 
 
 def read_result(task_id: str) -> str:
-    with connect() as conn:
+    with _db() as conn:
         row = conn.execute(
             "SELECT author, content, updated_at FROM results WHERE task_id=?",
             (task_id,),
@@ -822,7 +719,7 @@ def _parse_capabilities(capabilities: str | None) -> dict | str:
     return parsed
 
 
-def _set_model(conn: sqlite3.Connection, agent: str, model: str, force: bool) -> None:
+def _set_model(conn: Connection, agent: str, model: str, force: bool) -> None:
     """Record the model carrying an instance in its presence row (created
     at default TTL if absent). `force` overwrites a stored value — an
     explicit declaration; without it (environment echo) a declared model
@@ -850,7 +747,7 @@ def heartbeat(
     parsed = _parse_capabilities(capabilities)
     if isinstance(parsed, str):
         return parsed
-    with connect() as conn:
+    with _db() as conn:
         agent, error = _resolve_target(conn, agent)
         if error:
             return error
@@ -887,7 +784,7 @@ def touch_presence(agent: str, model: str | None = None) -> None:
     agent = agent.strip().lower()
     if not agent:
         return
-    with connect() as conn:
+    with _db() as conn:
         row = conn.execute(
             "SELECT ttl_seconds, capabilities, model FROM presence WHERE agent=?", (agent,)
         ).fetchone()
@@ -915,12 +812,12 @@ def touch_identity(identity: dict) -> None:
     name = identity.get("agent_name")
     if not name or not _NAME_RE.match(name):
         return
-    with connect() as conn:
+    with _db() as conn:
         if conn.execute("SELECT 1 FROM agents WHERE name=?", (name,)).fetchone() is None:
             harness, workspace = split_name(name)
             conn.execute(
-                "INSERT OR IGNORE INTO agents(name, description, registered_at, harness, "
-                "workspace, cwd) VALUES(?,?,?,?,?,?)",
+                "INSERT INTO agents(name, description, registered_at, harness, "
+                "workspace, cwd) VALUES(?,?,?,?,?,?) ON CONFLICT(name) DO NOTHING",
                 (name, "", _now(), harness, workspace, identity.get("cwd") or ""),
             )
             _log_event(conn, "register", agent=name, detail="auto (connected client)")
@@ -931,7 +828,7 @@ def touch_identity(identity: dict) -> None:
 
 def list_presence() -> str:
     """Return every known agent (registered or seen) with a computed status."""
-    with connect() as conn:
+    with _db() as conn:
         rows = conn.execute(
             """
             SELECT a.name, a.description, a.harness, a.workspace, a.cwd,
@@ -984,16 +881,16 @@ def announce(author: str, topic: str, message: str) -> str:
         return "ERROR: topic must match ^[a-z0-9-]{1,64}$."
     if len(message.encode("utf-8")) > 16 * 1024:
         return "ERROR: message exceeds 16 KiB."
-    with connect() as conn:
+    with _db() as conn:
         author, error = _resolve_target(conn, author)
         if error:
             return error.replace("agent", "author", 1)
-        cur = conn.execute(
+        seq = _insert_id(
+            conn,
             "INSERT INTO channel(author, at, topic, message) VALUES(?,?,?,?)",
             (author, _now(), topic, message),
         )
         _log_event(conn, "announce", agent=author, detail=topic)
-        seq = cur.lastrowid
     return json.dumps({"seq": seq}, ensure_ascii=False)
 
 
@@ -1013,7 +910,7 @@ def read_channel(
         return "ERROR: provide either agent or since_seq."
     if agent is not None and since_seq is None and topic is not None:
         return "ERROR: topic filter is not allowed with a cursor read."
-    with connect() as conn:
+    with _db() as conn:
         if agent is not None and since_seq is None:
             agent, error = _resolve_target(conn, agent)
             if error:
@@ -1032,8 +929,7 @@ def read_channel(
                     (since_seq, limit),
                 ).fetchall()
         else:
-            conn.execute("BEGIN IMMEDIATE")
-            try:
+            with _write(conn):
                 cursor = conn.execute(
                     "SELECT last_seq FROM channel_cursor WHERE agent=?", (agent,)
                 ).fetchone()
@@ -1050,10 +946,6 @@ def read_channel(
                         "ON CONFLICT(agent) DO UPDATE SET last_seq=excluded.last_seq",
                         (agent, new_last),
                     )
-                conn.execute("COMMIT")
-            except Exception:
-                conn.execute("ROLLBACK")
-                raise
     return json.dumps([dict(r) for r in rows], ensure_ascii=False)
 
 
@@ -1074,7 +966,7 @@ def notify(
         return "ERROR: empty target agent."
     if len(message.encode("utf-8")) > 16 * 1024:
         return "ERROR: message exceeds 16 KiB."
-    with connect() as conn:
+    with _db() as conn:
         author, error = _resolve_target(conn, author)
         if error:
             return error.replace("agent", "author", 1)
@@ -1084,7 +976,8 @@ def notify(
         if reply_to is not None:
             if not _is_broadcast(conn, reply_to):
                 return f"ERROR: reply_to {reply_to} is not a broadcast id."
-        cur = conn.execute(
+        seq = _insert_id(
+            conn,
             "INSERT INTO notifications(target, author, at, message, reply_to, wake) "
             "VALUES(?,?,?,?,?,?)",
             (target, author, _now(), message, reply_to, 1 if wake else 0),
@@ -1092,17 +985,16 @@ def notify(
         _log_event(conn, "notify", agent=author,
                    detail=target + (f" (reply to broadcast {reply_to})" if reply_to else "")
                    + (" (wake)" if wake else ""))
-        seq = cur.lastrowid
     return json.dumps({"seq": seq}, ensure_ascii=False)
 
 
-def _is_broadcast(conn: sqlite3.Connection, broadcast_id: int) -> bool:
+def _is_broadcast(conn: Connection, broadcast_id: int) -> bool:
     return conn.execute(
         "SELECT 1 FROM channel WHERE seq=? AND topic='broadcast'", (broadcast_id,)
     ).fetchone() is not None
 
 
-def _alive_set(conn: sqlite3.Connection) -> set[str]:
+def _alive_set(conn: Connection) -> set[str]:
     now = datetime.fromisoformat(_now())
     alive = set()
     for r in conn.execute("SELECT agent, last_seen, ttl_seconds FROM presence"):
@@ -1112,7 +1004,7 @@ def _alive_set(conn: sqlite3.Connection) -> set[str]:
     return alive
 
 
-def _expand_scope(conn: sqlite3.Connection, scope: str | list) -> tuple[list[str], str | None]:
+def _expand_scope(conn: Connection, scope: str | list) -> tuple[list[str], str | None]:
     """Recipients of a broadcast: `*` (every registered agent), `harness@*`
     (every instance of a harness, a legacy bare row included), `*@workspace`
     (every agent of a workspace), `model:<glob>` (instances whose declared
@@ -1178,29 +1070,25 @@ def broadcast(
         return "ERROR: empty author."
     if len(message.encode("utf-8")) > 16 * 1024:
         return "ERROR: message exceeds 16 KiB."
-    with connect() as conn:
-        conn.execute("BEGIN IMMEDIATE")
-        try:
+    with _db() as conn:
+        with _write(conn):
             author_name, error = _resolve_target(conn, author)
             if error:
-                conn.execute("COMMIT")
                 return error.replace("agent", "author", 1)
             names, error = _expand_scope(conn, scope)
             if error:
-                conn.execute("COMMIT")
                 return error
             alive = _alive_set(conn)
             if alive_only:
                 names = [n for n in names if n in alive]
                 if not names:
-                    conn.execute("COMMIT")
                     return "ERROR: no alive recipient in scope."
             scope_text = scope if isinstance(scope, str) else ",".join(scope)
-            cur = conn.execute(
+            broadcast_id = _insert_id(
+                conn,
                 "INSERT INTO channel(author, at, topic, message) VALUES(?,?,?,?)",
                 (author_name, _now(), "broadcast", message),
             )
-            broadcast_id = cur.lastrowid
             now = _now()
             for name in names:
                 conn.execute(
@@ -1211,10 +1099,6 @@ def broadcast(
             _log_event(conn, "broadcast", agent=author_name,
                        detail=f"id {broadcast_id}, scope {scope_text} → {len(names)} recipient(s)"
                        + (" (wake)" if wake else ""))
-            conn.execute("COMMIT")
-        except Exception:
-            conn.execute("ROLLBACK")
-            raise
     delivered = [n for n in names if n in alive]
     asleep = [n for n in names if n not in alive]
     return json.dumps(
@@ -1228,7 +1112,7 @@ def replies(broadcast_id: int) -> str:
     """Answers to a broadcast (notifications sent with reply_to=id), oldest
     first — a pure read, no cursor moves. Refused for an id that is not a
     broadcast."""
-    with connect() as conn:
+    with _db() as conn:
         if not _is_broadcast(conn, broadcast_id):
             return f"ERROR: {broadcast_id} is not a broadcast id."
         rows = conn.execute(
@@ -1248,12 +1132,10 @@ def poll(agent: str, limit: int = 100) -> str:
         limit = 1
     elif limit > 1000:
         limit = 1000
-    with connect() as conn:
-        conn.execute("BEGIN IMMEDIATE")
-        try:
+    with _db() as conn:
+        with _write(conn):
             target, error = _resolve_target(conn, agent)
             if error:
-                conn.execute("COMMIT")
                 return error
             cursor = conn.execute(
                 "SELECT last_seq FROM notification_cursor WHERE target=?", (target,)
@@ -1270,16 +1152,12 @@ def poll(agent: str, limit: int = 100) -> str:
                     "ON CONFLICT(target) DO UPDATE SET last_seq=excluded.last_seq",
                     (target, rows[-1]["seq"]),
                 )
-            conn.execute("COMMIT")
-        except Exception:
-            conn.execute("ROLLBACK")
-            raise
     return json.dumps(
         [{**dict(r), "wake": bool(r["wake"])} for r in rows], ensure_ascii=False
     )
 
 
-def _pending(conn: sqlite3.Connection, target: str) -> dict:
+def _pending(conn: Connection, target: str) -> dict:
     """Signals waiting for an instance, without moving any cursor: queued
     task ids (highest priority first), unread notifications (total, those
     flagged `wake`, and the broadcast ids among the flagged ones)."""
@@ -1322,7 +1200,7 @@ def _signalled(pending: dict, wanted: set[str]) -> bool:
 
 def pending_signals(agent: str) -> str:
     """Snapshot of what waits for an instance (see _pending) — read only."""
-    with connect() as conn:
+    with _db() as conn:
         target, error = _resolve_target(conn, agent)
         if error:
             return error
@@ -1374,13 +1252,11 @@ def acquire_wake_lock(agent: str, lease_seconds: int = 600, holder: str = "") ->
         return "ERROR: empty agent."
     token = hashlib.sha256(f"{target}{time.time_ns()}{os.getpid()}".encode()).hexdigest()[:16]
     until = (datetime.now(timezone.utc) + timedelta(seconds=lease_seconds)).isoformat()
-    with connect() as conn:
-        conn.execute("BEGIN IMMEDIATE")
-        try:
+    with _db() as conn:
+        with _write(conn):
             row = conn.execute(
                 "SELECT token, until FROM wake_locks WHERE agent=?", (target,)).fetchone()
             if row is not None and row["until"] > _now():
-                conn.execute("COMMIT")
                 return "BUSY"
             conn.execute(
                 "INSERT INTO wake_locks(agent, token, until, holder) VALUES(?,?,?,?) "
@@ -1388,34 +1264,31 @@ def acquire_wake_lock(agent: str, lease_seconds: int = 600, holder: str = "") ->
                 "until=excluded.until, holder=excluded.holder",
                 (target, token, until, holder),
             )
-            conn.execute("COMMIT")
-        except Exception:
-            conn.execute("ROLLBACK")
-            raise
     return json.dumps({"token": token, "until": until}, ensure_ascii=False)
 
 
 def renew_wake_lock(agent: str, token: str, lease_seconds: int = 600) -> str:
     target = agent.strip().lower()
     until = (datetime.now(timezone.utc) + timedelta(seconds=lease_seconds)).isoformat()
-    with connect() as conn:
-        cur = conn.execute(
-            "UPDATE wake_locks SET until=? WHERE agent=? AND token=?", (until, target, token))
-    return "OK" if cur.rowcount else "ERROR: wake lock not held with this token."
+    with _db() as conn:
+        held = conn.execute(
+            "UPDATE wake_locks SET until=? WHERE agent=? AND token=?",
+            (until, target, token)).rowcount
+    return "OK" if held else "ERROR: wake lock not held with this token."
 
 
 def release_wake_lock(agent: str, token: str) -> str:
     target = agent.strip().lower()
-    with connect() as conn:
-        cur = conn.execute(
-            "DELETE FROM wake_locks WHERE agent=? AND token=?", (target, token))
-    return "OK" if cur.rowcount else "ERROR: wake lock not held with this token."
+    with _db() as conn:
+        held = conn.execute(
+            "DELETE FROM wake_locks WHERE agent=? AND token=?", (target, token)).rowcount
+    return "OK" if held else "ERROR: wake lock not held with this token."
 
 
 def record_wake(agent: str, detail: str) -> None:
     """Journal a wake-up transition (`wake` event: start/end/refused) — the
     budget `wake_count` is computed from these starts."""
-    with connect() as conn:
+    with _db() as conn:
         _log_event(conn, "wake", agent=agent.strip().lower(), detail=detail)
 
 
@@ -1423,7 +1296,7 @@ def wake_count(agent: str, window_seconds: int = 3600) -> int:
     """Launches of an instance within the window (events `wake` whose detail
     starts with `start`)."""
     since = (datetime.now(timezone.utc) - timedelta(seconds=window_seconds)).isoformat()
-    with connect() as conn:
+    with _db() as conn:
         row = conn.execute(
             "SELECT COUNT(*) c FROM events WHERE event='wake' AND agent=? AND at >= ? "
             "AND detail LIKE 'start%'", (agent.strip().lower(), since)).fetchone()
@@ -1431,7 +1304,7 @@ def wake_count(agent: str, window_seconds: int = 3600) -> int:
 
 
 def get_system_state() -> str:
-    with connect() as conn:
+    with _db() as conn:
         _requeue_expired(conn)
         agents = {
             r["name"]: {
@@ -1503,7 +1376,7 @@ def get_events(task_id: str | None = None, agent: str | None = None, limit: int 
         query += " WHERE " + " AND ".join(conds)
     query += " ORDER BY id DESC LIMIT ?"
     params.append(limit)
-    with connect() as conn:
+    with _db() as conn:
         rows = [dict(r) for r in conn.execute(query, params)]
     rows.reverse()
     return json.dumps(rows, indent=2, ensure_ascii=False)

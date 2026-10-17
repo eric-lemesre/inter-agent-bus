@@ -22,11 +22,13 @@ from pathlib import Path
 
 try:  # installed package: `iab` maps to this directory (pyproject.toml)
     from . import review, store, wake, worker
+    from .access import bus
 except ImportError:  # bare script: python servers/shared_memory/cli.py
     import review
     import store
     import wake
     import worker
+    from access import bus
 
 
 def _version() -> str:
@@ -45,7 +47,7 @@ def _content(arg: str | None) -> str:
 
 
 def _whoami() -> str:
-    return json.dumps({**store.resolve_identity(), **json.loads(store.db_info())})
+    return json.dumps({**store.resolve_identity(), **json.loads(bus.db_info())})
 
 
 def _server_config(agent_name: str) -> dict:
@@ -117,11 +119,11 @@ def _watch(agent: str, timeout: float, interval: float, on: str) -> str:
     signal snapshot as JSON (`signalled` tells timeout from arrival) — the
     wake-up of an open interactive session run as a background task."""
     if on == "task":
-        out = store.wait_for_task(agent, timeout, interval)
+        out = bus.wait_for_task(agent, timeout, interval)
         if out.startswith("ERROR"):
             return out
         return "\n".join(json.loads(out))
-    return store.wait_signal(agent, on, timeout, interval)
+    return bus.wait_signal(agent, on, timeout, interval)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -350,39 +352,39 @@ def main(argv: list[str] | None = None) -> int:
             model=args.model or os.environ.get("IAB_MODEL") or None,
         )
     out = {
-        "register": lambda: store.register_agent(
+        "register": lambda: bus.register_agent(
             args.name, args.description, args.cwd, args.model),
-        "rename": lambda: store.rename_agent(args.old, args.new),
-        "push": lambda: store.push_task(
+        "rename": lambda: bus.rename_agent(args.old, args.new),
+        "push": lambda: bus.push_task(
             args.agent, args.task_id, _content(args.payload), args.priority,
             args.max_attempts, not args.no_notify,
         ),
         "watch": lambda: _watch(args.agent, args.timeout, args.interval, args.on),
-        "signals": lambda: store.pending_signals(args.agent),
+        "signals": lambda: bus.pending_signals(args.agent),
         "wake": lambda: wake.wake_agent(args.agent, dry_run=args.dry_run),
-        "claim": lambda: store.claim_task(args.agent, args.lease, args.task_id),
-        "publish": lambda: store.publish_result(
+        "claim": lambda: bus.claim_task(args.agent, args.lease, args.task_id),
+        "publish": lambda: bus.publish_result(
             args.agent, args.task_id, _content(args.content), args.attempt, args.force
         ),
-        "cancel": lambda: store.cancel_task(args.task_id),
-        "requeue": lambda: store.requeue_task(args.task_id),
-        "extend": lambda: store.extend_lease(args.task_id, args.lease),
-        "result": lambda: store.read_result(args.task_id),
-        "state": lambda: store.get_system_state(),
-        "heartbeat": lambda: store.heartbeat(
+        "cancel": lambda: bus.cancel_task(args.task_id),
+        "requeue": lambda: bus.requeue_task(args.task_id),
+        "extend": lambda: bus.extend_lease(args.task_id, args.lease),
+        "result": lambda: bus.read_result(args.task_id),
+        "state": lambda: bus.get_system_state(),
+        "heartbeat": lambda: bus.heartbeat(
             args.agent, args.ttl, args.capabilities, args.model),
-        "announce": lambda: store.announce(args.author, args.topic, _content(args.message)),
-        "channel": lambda: store.read_channel(
+        "announce": lambda: bus.announce(args.author, args.topic, _content(args.message)),
+        "channel": lambda: bus.read_channel(
             args.agent, args.since_seq, args.topic, args.limit
         ),
-        "notify": lambda: store.notify(args.author, args.agent, _content(args.message),
+        "notify": lambda: bus.notify(args.author, args.agent, _content(args.message),
                                        args.reply_to, args.wake),
-        "broadcast": lambda: store.broadcast(args.author, _content(args.message), args.scope,
+        "broadcast": lambda: bus.broadcast(args.author, _content(args.message), args.scope,
                                              args.alive_only, args.wake),
-        "replies": lambda: store.replies(args.broadcast_id),
-        "poll": lambda: store.poll(args.agent, args.limit),
-        "presence": lambda: store.list_presence(),
-        "log": lambda: store.get_events(args.task_id, args.agent, args.limit),
+        "replies": lambda: bus.replies(args.broadcast_id),
+        "poll": lambda: bus.poll(args.agent, args.limit),
+        "presence": lambda: bus.list_presence(),
+        "log": lambda: bus.get_events(args.task_id, args.agent, args.limit),
         "whoami": _whoami,
         "install": lambda: _install(args.scope, args.agent_name, args.print_only),
     }[args.command]()

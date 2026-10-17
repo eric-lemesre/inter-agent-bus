@@ -1047,6 +1047,18 @@ with tempfile.TemporaryDirectory() as tmp:
           and "yy: DRY_RUN" in out.stderr, out.stdout + out.stderr)
     store.cancel_task("t-cli")
 
+    # 9a — access layer: every exposed operation is a core function, and a
+    # local helper cannot be reached through `bus` (it would bypass a hub).
+    import access
+    missing = sorted(op for op in access.OPERATIONS if not callable(getattr(store, op, None)))
+    check("every bus operation is a store function", not missing, str(missing))
+    try:
+        access.bus.resolve_identity
+        refused = False
+    except AttributeError:
+        refused = True
+    check("a local helper is refused through bus", refused)
+    check("without IAB_HUB the backend is the local core", access.backend() is store)
 
     del os.environ["IAB_DB"]
 

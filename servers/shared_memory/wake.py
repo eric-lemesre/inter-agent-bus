@@ -43,8 +43,10 @@ from pathlib import Path
 
 try:  # installed package (`iab` maps to this directory)
     from . import store
+    from .access import bus
 except ImportError:  # bare script usage
     import store
+    from access import bus
 
 DEFAULT_LEASE = 10800
 DEFAULT_MAX_WAKES_PER_HOUR = 4
@@ -174,7 +176,7 @@ def wake_agent(agent: str, roster: list[dict] | None = None, dry_run: bool = Fal
     command = spec.get("command")
     if not isinstance(command, list) or not command or not all(isinstance(c, str) for c in command):
         return f"ERROR: launch.command of '{agent}' must be a non-empty list of strings."
-    snapshot = store.pending_signals(agent)
+    snapshot = bus.pending_signals(agent)
     if snapshot.startswith("ERROR"):
         return snapshot
     pending = json.loads(snapshot)
@@ -182,11 +184,11 @@ def wake_agent(agent: str, roster: list[dict] | None = None, dry_run: bool = Fal
     if reason is None:
         return "NO_SIGNAL"
     budget = int(spec.get("max_wakes_per_hour", DEFAULT_MAX_WAKES_PER_HOUR))
-    used = store.wake_count(agent, 3600)
+    used = bus.wake_count(agent, 3600)
     if used >= budget:
         if dry_run:
             return f"DRY_RUN: would refuse — {used}/{budget} wakes in the last hour ({reason})"
-        store.record_wake(agent, f"refused: budget {used}/{budget} per hour exhausted ({reason})")
+        bus.record_wake(agent, f"refused: budget {used}/{budget} per hour exhausted ({reason})")
         return f"REFUSED: {used}/{budget} wakes in the last hour — loop breaker."
     cwd = os.path.expanduser(str(spec.get("cwd") or os.getcwd()))
     if not Path(cwd).is_dir():
@@ -197,7 +199,7 @@ def wake_agent(agent: str, roster: list[dict] | None = None, dry_run: bool = Fal
     if dry_run:
         return (f"DRY_RUN: would launch {json.dumps(command)} in {cwd} "
                 f"(reason: {reason}; timeout {timeout}s; prompt {len(prompt)} chars)")
-    lock = store.acquire_wake_lock(agent, lease_seconds=timeout + 60,
+    lock = bus.acquire_wake_lock(agent, lease_seconds=timeout + 60,
                                    holder=f"pid {os.getpid()}")
     if lock == "BUSY":
         return "BUSY"
@@ -214,14 +216,14 @@ def wake_agent(agent: str, roster: list[dict] | None = None, dry_run: bool = Fal
     # The journal is a shared, long-lived record: it gets the decision, the
     # program name and the directory — never the full argv (an operator may
     # pass a token there), never the prompt, never the worker's stdout.
-    store.record_wake(agent, f"start: {reason}; {Path(argv[0]).name} in {cwd}")
+    bus.record_wake(agent, f"start: {reason}; {Path(argv[0]).name} in {cwd}")
     started = time.monotonic()
     try:
         proc = subprocess.Popen(argv, cwd=cwd, stdin=subprocess.PIPE,
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     except OSError as exc:
-        store.record_wake(agent, f"end: launch failed ({exc})")
-        store.release_wake_lock(agent, token)
+        bus.record_wake(agent, f"end: launch failed ({exc})")
+        bus.release_wake_lock(agent, token)
         if prompt_file:
             os.unlink(prompt_file)
         return f"ERROR: cannot launch {argv[0]}: {exc}"
@@ -248,12 +250,12 @@ def wake_agent(agent: str, roster: list[dict] | None = None, dry_run: bool = Fal
     else:
         detail = f"end: exit 0 after {elapsed}s"
         status = f"OK: worker finished in {elapsed}s"
-    store.record_wake(agent, detail)
+    bus.record_wake(agent, detail)
     if code != 0:
         # Diagnosis goes to the supervisor's stderr (operator's terminal or
         # unit log), trimmed — not into the bus journal.
         _log(f"{agent}: {status}; stderr tail: {_tail(err)}")
-    store.release_wake_lock(agent, token)
+    bus.release_wake_lock(agent, token)
     return status
 
 

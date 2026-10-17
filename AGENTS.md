@@ -20,6 +20,14 @@ every change and are summarized below.
 
 - `servers/shared_memory/store.py` — storage core. **All state logic
   lives here.** No MCP dependency, ever.
+- `servers/shared_memory/dialect.py` — SQL dialect layer: connection,
+  schema, write transaction, generated ids, introspection. store.py
+  writes portable SQL and asks the dialect for the rest.
+- `servers/shared_memory/access.py` — access layer: `bus.<operation>`
+  forwards to the backend of the moment (store.py locally, a hub client
+  when `IAB_HUB` is set). **Wrappers and drivers call operations through
+  `bus`, never `store.` directly**; only pure helpers (identity, names)
+  are called on store.py.
 - `servers/shared_memory/server.py` — MCP wrapper (SDK >= 2.0,
   `MCPServer`). Thin: one `@mcp.tool()` per store function, no logic.
 - `servers/shared_memory/cli.py` — console entry point (`iab`, see
