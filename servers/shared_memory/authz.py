@@ -214,4 +214,5 @@ class Authz:
             # An admin's binding vouches for a NAME: it follows a rename
             # only when an admin machine renames.
             registry.rename_binding(str(arguments["old"]), str(arguments["new"]),
-                                    keep_pin=machine["role"] == "admin")
+                                    keep_pin=machine["role"] == "admin",
+                                    machine=machine["name"])

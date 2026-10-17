@@ -237,8 +237,25 @@ de chaque événement (`iab log`).
 - Les payloads n'apparaissent jamais dans le journal du moyeu ; une
   requête trop grosse est refusée, jamais tronquée.
 - Appairage : codes de 8 lettres sans ambiguïté, 10 minutes, usage
-  unique ; demandes limitées par adresse et en nombre ; réseaux privés
-  seulement par défaut (`pair_allow` dans `hub.json`).
+  unique ; demandes limitées par adresse (`pair_rate`) et en nombre ;
+  réseaux privés seulement par défaut (`pair_allow` dans `hub.json`),
+  filtrés avant toute négociation TLS. L'adresse du moyeu enregistrée
+  par la machine est liée aux mots et à la preuve d'invitation.
+- **Le port d'appairage (7444) ne doit jamais passer par un relais TCP**
+  (nginx stream, tunnel) : le moyeu y verrait l'adresse privée du relais
+  et l'appairage s'ouvrirait à tout Internet. Liez-le à l'interface du
+  réseau local ou du tunnel (`iab hub serve --pair-listen
+  192.168.20.30:7444`). `100.64.0.0/10` (tailnet) est admis par défaut :
+  retirez-le de `pair_allow` si le moyeu est lui-même derrière le CGNAT
+  d'un opérateur.
+- Plafonds : connexions ouvertes (256, dont 32 par adresse), négociation
+  TLS bornée à 10 s, débit par machine (`rate`), réponses lues bornées
+  côté client. Avec PostgreSQL, chaque attente bloquante tient une
+  connexion : prévoir `max_connections` au-delà du nombre d'attentes
+  simultanées.
+- Le certificat du port du bus est vérifié deux fois par jour et
+  renouvelé à chaud ; deux réponses de renouvellement perdues de suite
+  ne verrouillent pas une machine.
 - **Rôle admin** (approuver, inviter, révoquer) : réservé à une machine
   dont la clé est dans une puce TPM (politique du porteur). Tant que la
   preuve TPM n'est pas livrée, seule la machine de `iab hub init` est

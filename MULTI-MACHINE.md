@@ -232,8 +232,22 @@ to every paired machine. The journal names the machine of every event
 - Payloads never appear in the hub's log; an oversized request is
   refused, never truncated.
 - Pairing: 8-letter unambiguous codes, 10 minutes, single use; requests
-  limited per address and in number; private networks only by default
-  (`pair_allow` in `hub.json`).
+  limited per address (`pair_rate`) and in number; private networks only
+  by default (`pair_allow` in `hub.json`), filtered before any TLS work.
+  The hub address the machine saves is bound to the words and to the
+  invitation proof.
+- **The pairing port (7444) must never go through a TCP relay** (nginx
+  stream, a tunnel): the hub would see the relay's private address and
+  pairing would open to the whole Internet. Bind it to the LAN or tunnel
+  interface (`iab hub serve --pair-listen 192.168.20.30:7444`).
+  `100.64.0.0/10` (tailnet) is allowed by default: remove it from
+  `pair_allow` if the hub itself sits behind a carrier's CGNAT.
+- Caps: open connections (256, 32 per address), TLS handshake bounded to
+  10 s, rate per machine (`rate`), answers read with a bound on the
+  client side. With PostgreSQL every blocking wait holds a connection:
+  plan `max_connections` above the number of concurrent waits.
+- The bus listener's certificate is checked twice a day and renewed
+  live; two renewal answers lost in a row do not lock a machine out.
 - **Admin role** (approve, invite, revoke): reserved to a machine whose
   key lives in a TPM chip (owner's policy). Until the TPM proof ships,
   only the machine of `iab hub init` is admin.

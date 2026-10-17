@@ -53,9 +53,12 @@ def approve(code: str | None, name: str | None, role: str,
     if isinstance(found, str):
         say(found)
         return 1
-    shown = {k: registry.printable(v) for k, v in found.items()}  # never raw to a terminal
+    shown = {k: registry.printable(v) for k, v in found.items() if k != "inherits"}  # never raw to a terminal
     say(f"Request from '{shown['name']}' — {shown['platform'] or 'unknown system'} — "
         f"{shown['source']} — key: {shown['key_kind']}")
+    if found.get("inherits"):
+        inherited = ", ".join(registry.printable(a) for a in found["inherits"])
+        say(f"This name was paired before: the machine would inherit {inherited}")
     say(f"Check words: {shown['words']}")
     final = (name or found["name"]).strip().lower()
     answer = ask(f"Are the four words identical to those shown on {shown['name']}? "

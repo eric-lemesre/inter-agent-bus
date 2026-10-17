@@ -36,6 +36,7 @@ except ImportError:  # bare script usage
     import remote
 
 DEFAULT_PAIR_PORT = remote.DEFAULT_PORT + 1
+MAX_ANSWER = 1024 * 1024  # a pairing answer is a few KiB; refuse a flood
 POLL_TIMEOUT = 15
 
 
@@ -74,7 +75,9 @@ class _Channel:
                 conn.request("POST", path, body=json.dumps(body).encode("utf-8"),
                              headers={"Content-Type": "application/json"})
                 response = conn.getresponse()
-                status, raw = response.status, response.read()
+                status, raw = response.status, response.read(MAX_ANSWER + 1)
+                if len(raw) > MAX_ANSWER:
+                    raise JoinError("the pairing listener sent an oversized answer")
             except ssl.SSLCertVerificationError:
                 if not self.verified:
                     raise
@@ -142,7 +145,8 @@ def _by_invitation(channel: "_Channel", body: dict, key, token: str) -> tuple[di
                                           body["csr"].encode("utf-8"))
     answer = _result(*channel.post("/v1/pair/invited", body))
     ca_cert = pki.load_cert_bytes(str(answer.get("ca", "")).encode("ascii"))
-    expected = pki.invitation_proof(registry.invitation_key(token), ca_cert)
+    expected = pki.invitation_proof(registry.invitation_key(token), ca_cert,
+                                    str(answer.get("bus_url", "")))
     if not hmac.compare_digest(expected, str(answer.get("proof", ""))):
         raise JoinError("the hub could not prove it issued this invitation — nothing was saved")
     return answer, str(answer["name"]), str(answer["certificate"])
@@ -169,7 +173,8 @@ def _by_code(channel: "_Channel", body: dict, key, say,
         raise JoinError("the pairing listener sent an unexpected code")
     expires_in = _seconds(revealed.get("expires_in"), 0, 3600)
     interval = _seconds(revealed.get("interval"), 1, 60)
-    words = pki.check_words(ca_cert, key.public_key(), nonce, nonce_hub)
+    words = pki.check_words(ca_cert, key.public_key(), nonce, nonce_hub,
+                            str(answer.get("bus_url", "")))
     say(f"Hub: {_clean(answer.get('hub', ''), 80)}"
         + ("" if channel.verified else " (certificate not verified)"))
     say("To pair this machine, on an admin machine run:")

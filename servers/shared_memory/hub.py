@@ -67,9 +67,18 @@ MAX_PAIR_BODY = 64 * 1024
 # A blocking wait is served for at most this long; the client chains waits.
 LONG_POLL_SECONDS = remote.LONG_POLL_SECONDS
 SERVER_RENEW_BEFORE_DAYS = 60
-# Requests per machine (token bucket), configurable as "rate" in hub.json.
+# Requests per machine (token bucket), configurable as "rate" in hub.json;
+# requests per source address on the pairing listener ("pair_rate").
 RATE_PER_SECOND = 50
 RATE_BURST = 200
+PAIR_RATE_PER_SECOND = 1
+PAIR_RATE_BURST = 10
+# Open connections (each holds a thread), checked before the TLS handshake.
+MAX_CONNECTIONS = 256
+MAX_CONNECTIONS_PER_SOURCE = 32
+# A handshake must complete quickly; a request may then take longer.
+HANDSHAKE_SECONDS = 10
+SERVER_CERT_CHECK_SECONDS = 12 * 3600
 _WAIT_TIMEOUT = {"wait_signal": "timeout_s", "wait_for_task": "timeout_s"}
 # Where a pairing request may come from by default: loopback, private
 # networks, CGNAT (a tailnet), link-local — never the open Internet.
@@ -173,6 +182,8 @@ def init(names: list[str], machine: str, home: Path | None = None,
     url = hub_url(config)
     save_machine(remote.machine_dir(), pki.key_pem(key), pki.cert_pem(cert),
                  pki.cert_pem(ca_cert), {"name": machine, "hub": url, "expires_at": expires})
+    if os.name == "posix":
+        os.chmod(remote.machine_dir(), 0o700)
     return (f"OK: hub created in {home}; machine '{machine}' paired as admin.\n"
             f"Start it with `iab hub serve`, then point clients at it: IAB_HUB={url}")
 
@@ -181,16 +192,33 @@ def _platform() -> str:
     return f"{platform.system()} {platform.machine()}"
 
 
-def _renew_server_cert(home: Path, config: dict) -> None:
+def _renew_server_cert(home: Path, config: dict) -> bool:
+    """Renew the bus listener's certificate when it nears its end. True
+    when it was renewed (a running server then reloads it)."""
     paths = _paths(home)
     cert = pki.load_cert(paths["server"])
     if not pki.needs_renewal(cert, SERVER_RENEW_BEFORE_DAYS):
-        return
+        return False
     key, cert = pki.server_cert(pki.load_key(paths["ca_key"]), pki.load_cert(paths["ca"]),
                                 config["names"])
     pki.write_private(paths["server_key"], pki.key_pem(key))
     pki.write_public(paths["server"], pki.cert_pem(cert))
     _log(f"server certificate renewed until {pki.not_after(cert).isoformat()}")
+    return True
+
+
+def _keep_server_cert_fresh(home: Path, config: dict, server: "HubServer") -> None:
+    """A hub may run for more than a year: check the certificate twice a
+    day and load a renewed one into the live context (new connections get
+    it; established ones finish with the old)."""
+    paths = _paths(home)
+    while True:
+        time.sleep(SERVER_CERT_CHECK_SECONDS)
+        try:
+            if _renew_server_cert(home, config):
+                server.context.load_cert_chain(str(paths["server"]), str(paths["server_key"]))
+        except Exception as exc:  # retried at the next check, said loudly
+            _log(f"ERROR: server certificate renewal failed: {type(exc).__name__}: {exc}")
 
 
 def server_context(home: Path) -> ssl.SSLContext:
@@ -325,7 +353,9 @@ class _BaseHandler(BaseHTTPRequestHandler):
         self.fingerprint = ""
         self.peer_der = b""
         try:
+            self.request.settimeout(HANDSHAKE_SECONDS)
             self.request.do_handshake()
+            self.request.settimeout(self.timeout)
         except (ssl.SSLError, OSError) as exc:
             self.close_connection = True
             self.handshake_error = str(exc)
@@ -417,7 +447,7 @@ class _BusHandler(_BaseHandler):
                     store.CALLER_MACHINE.reset(stamp)
                 self._send(status, answer)
         who = self.machine["name"] if self.machine else "-"
-        route = self.path.removeprefix("/v1/op/")
+        route = registry.printable(self.path.removeprefix("/v1/op/"), 120)
         _log(f"{who} {route} {status} {time.monotonic() - started:.3f}s")
 
     def do_GET(self) -> None:
@@ -455,6 +485,12 @@ class _PairHandler(_BaseHandler):
             status, answer = _bad(403, "pairing is not open from this network.")
             self.close_connection = True
             self._send(status, answer)
+        elif not self.server.admit(source):
+            # Unauthenticated: each request may take the writer lock of the
+            # bus, so it is rationed per source address.
+            status, answer = _bad(429, "too many pairing requests — slow down.")
+            self.close_connection = True
+            self._send(status, answer)
         else:
             body = self._body()
             request = _json_object(body) if body is not None else None
@@ -480,7 +516,8 @@ class _PairHandler(_BaseHandler):
                     _log(f"pairing {self.path}: internal error {type(exc).__name__}")
                     status, answer = _bad(500, "hub internal error.")
                 self._send(status, answer)
-        _log(f"pairing {self.path} from {source} {status} {time.monotonic() - started:.3f}s")
+        _log(f"pairing {registry.printable(self.path, 120)} from {source} {status} "
+             f"{time.monotonic() - started:.3f}s")
 
 
 class HubServer(ThreadingHTTPServer):
@@ -496,11 +533,16 @@ class HubServer(ThreadingHTTPServer):
         self.max_body = max_body
         self.pair_allow = pair_allow
         self.authz = authz.Authz(authority.config.get("policy"))
-        limits = authority.config.get("rate") or {}
-        self.rate = float(limits.get("per_second", RATE_PER_SECOND))
-        self.burst = float(limits.get("burst", RATE_BURST))
+        pairing_listener = handler is _PairHandler
+        limits = authority.config.get("pair_rate" if pairing_listener else "rate") or {}
+        self.rate = float(limits.get(
+            "per_second", PAIR_RATE_PER_SECOND if pairing_listener else RATE_PER_SECOND))
+        self.burst = float(limits.get(
+            "burst", PAIR_RATE_BURST if pairing_listener else RATE_BURST))
         self._buckets: dict[str, tuple[float, float]] = {}
         self._bucket_lock = threading.Lock()
+        self._open: dict[str, int] = {}
+        self._open_total = 0
         self.address_family = socket.AF_INET6 if ":" in address[0] else socket.AF_INET
         super().__init__(address, handler)
 
@@ -516,6 +558,50 @@ class HubServer(ThreadingHTTPServer):
                 return False
             self._buckets[machine] = (tokens - 1, now)
             return True
+
+    def _source_allowed(self, source: str) -> bool:
+        if not self.pair_allow:
+            return True
+        try:
+            address = ipaddress.ip_address(source)
+        except ValueError:
+            return False
+        if getattr(address, "ipv4_mapped", None):
+            address = address.ipv4_mapped
+        return any(address in network for network in self.pair_allow)
+
+    def verify_request(self, request, client_address) -> bool:
+        """Before any TLS work, in the accept loop: the pairing listener's
+        network filter, and a cap on open connections (each one holds a
+        thread) — overall and per source address. A refused connection is
+        closed at once."""
+        source = client_address[0]
+        if not self._source_allowed(source):
+            return False
+        with self._bucket_lock:
+            if (self._open_total >= MAX_CONNECTIONS
+                    or self._open.get(source, 0) >= MAX_CONNECTIONS_PER_SOURCE):
+                refused = True
+            else:
+                refused = False
+                self._open_total += 1
+                self._open[source] = self._open.get(source, 0) + 1
+        if refused:
+            _log(f"- connection from {source} refused: too many open connections")
+        return not refused
+
+    def process_request_thread(self, request, client_address) -> None:
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            source = client_address[0]
+            with self._bucket_lock:
+                self._open_total -= 1
+                left = self._open.get(source, 1) - 1
+                if left:
+                    self._open[source] = left
+                else:
+                    self._open.pop(source, None)
 
     def handle_error(self, request, client_address) -> None:
         # A client hanging up mid-exchange is routine on a network service:
@@ -562,6 +648,9 @@ def serve(home: Path | None = None, listen: tuple[str, int] | None = None,
     except (RuntimeError, OSError, ssl.SSLError, ValueError) as exc:
         _log(f"ERROR: {exc}")
         return 1
+    threading.Thread(target=_keep_server_cert_fresh,
+                     args=(home or hub_home(), load_config(home or hub_home()), bus),
+                     daemon=True).start()
     host, port = bus.server_address[:2]
     _log(f"serving the bus on {host}:{port} "
          f"(database {store.dialect.describe(os.environ['IAB_DB'])})")

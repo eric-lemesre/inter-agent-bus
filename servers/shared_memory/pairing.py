@@ -79,10 +79,6 @@ class Authority:
         token_id = body.get("invitation")
         if not token_id:
             return "ERROR: an invited join needs its invitation id."
-        existing = registry.get(name)
-        if existing and existing["status"] == "active":
-            # Checked before redeeming: a refused join keeps its invitation.
-            return f"ERROR: machine '{name}' is already paired — revoke it first."
         invitation = registry.redeem_invitation(
             str(token_id), name, str(body.get("csr", "")).encode("utf-8"),
             str(body.get("mac", "")))
@@ -99,7 +95,7 @@ class Authority:
         self._announce(f"machine '{name}' paired as {invitation['role']} by invitation "
                        f"of {invitation['created_by']} (from {source})")
         return {**common, "status": "approved", "name": name, "certificate": cert_pem,
-                "proof": pki.invitation_proof(invitation["key"], self.ca_cert)}
+                "proof": pki.invitation_proof(invitation["key"], self.ca_cert, self.bus_url)}
 
     def commit(self, body: dict, source: str) -> dict | str:
         """Pairing by code, step 1: the machine commits to its request."""
@@ -134,7 +130,7 @@ class Authority:
         except (ValueError, UnicodeEncodeError) as exc:
             return f"ERROR: unusable certificate request: {exc}."
         words = pki.check_words(self.ca_cert, csr.public_key(), nonce_joiner,
-                                waiting["nonce_hub"])
+                                waiting["nonce_hub"], self.bus_url)
         return registry.reveal_request(device_code, csr_text, words)
 
     def poll(self, body: dict) -> dict:
@@ -147,7 +143,10 @@ class Authority:
         if found is None:
             return (f"ERROR: no pending pairing request with code "
                     f"{registry.normalize_code(user_code)} (mistyped, expired or decided).")
-        return found
+        # A name paired before (then revoked) still owns its instances: the
+        # approver is shown what the new machine would inherit.
+        inherits = sorted(a for a, m in registry.bindings().items() if m == found["name"])
+        return {**found, "inherits": inherits}
 
     def approve(self, user_code: str, name: str | None, role: str, approver: str) -> dict | str:
         found = registry.lookup_request(user_code)
@@ -210,7 +209,8 @@ class Authority:
         current = pki.load_cert_der(peer_der)
         cert_pem, fingerprint, serial, expires = self._issue(current.public_key(),
                                                               machine["name"])
-        done = registry.renew(machine["name"], fingerprint, serial, expires)
+        done = registry.renew(machine["name"], fingerprint, serial, expires,
+                              presented=pki.cert_sha256(peer_der))
         if done.startswith("ERROR"):
             return done
         return {"certificate": cert_pem, "expires_at": expires}

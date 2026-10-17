@@ -117,26 +117,29 @@ def commitment(csr_pem: bytes, nonce_joiner: str) -> str:
 
 
 def check_words(ca_cert: x509.Certificate, machine_key, nonce_joiner: str,
-                nonce_hub: str) -> str:
+                nonce_hub: str, bus_url: str) -> str:
     """The four check words of a pairing, bound to the bus CA, the joining
     machine's key and both nonces. Commit-then-reveal, as in Bluetooth
     numeric comparison: the machine commits to its request before it sees
     the hub's nonce, the hub draws that nonce after the commitment, the
     machine reveals only then. Nobody in between can choose a key to make
     both sides' words agree: one try per pairing, 2^-32 — and a person
-    must still confirm it."""
+    must still confirm it. The hub's address the machine will save is
+    bound too: nobody in between can redirect it."""
     digest = hashlib.sha256(
-        b"iab-pair-v2\0" + spki_der(ca_cert.public_key()) + b"\0" + spki_der(machine_key)
+        b"iab-pair-v3\0" + spki_der(ca_cert.public_key()) + b"\0" + spki_der(machine_key)
         + b"\0" + nonce_joiner.encode("ascii") + b"\0" + nonce_hub.encode("ascii")
+        + b"\0" + bus_url.encode("utf-8")
     ).digest()
     return "-".join(WORDS[b] for b in digest[:4])
 
 
-def invitation_proof(key: bytes, ca_cert: x509.Certificate) -> str:
-    """The hub's proof, for an invited machine, that the CA it sends comes
-    from whoever issued the invitation (`key` derives from the token)."""
-    return hmac.new(key, b"iab-invite-ca\0" + spki_der(ca_cert.public_key()),
-                    hashlib.sha256).hexdigest()
+def invitation_proof(key: bytes, ca_cert: x509.Certificate, bus_url: str) -> str:
+    """The hub's proof, for an invited machine, that the CA it sends — and
+    the hub address it will save — come from whoever issued the invitation
+    (`key` derives from the token)."""
+    return hmac.new(key, b"iab-invite-ca-v2\0" + spki_der(ca_cert.public_key())
+                    + b"\0" + bus_url.encode("utf-8"), hashlib.sha256).hexdigest()
 
 
 def same_key(a, b) -> bool:
@@ -288,8 +291,10 @@ def load_csr(data: bytes) -> x509.CertificateSigningRequest:
     csr = x509.load_pem_x509_csr(data)
     if not csr.is_signature_valid:
         raise ValueError("CSR signature is invalid")
-    if not isinstance(csr.public_key(), ec.EllipticCurvePublicKey):
-        raise ValueError("CSR key must be an elliptic-curve key")
+    key = csr.public_key()
+    if not isinstance(key, ec.EllipticCurvePublicKey) or not isinstance(key.curve,
+                                                                        ec.SECP256R1):
+        raise ValueError("CSR key must be an elliptic-curve P-256 key")
     return csr
 
 

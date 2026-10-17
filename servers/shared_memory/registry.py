@@ -158,7 +158,12 @@ def authenticate(fingerprint: str) -> dict | None:
         return dict(row)
 
 
-def renew(name: str, fingerprint: str, serial: str, expires_at: str) -> str:
+def renew(name: str, fingerprint: str, serial: str, expires_at: str,
+          presented: str) -> str:
+    """Record a renewed certificate. The one kept valid until the new one
+    is first used is the certificate the machine PRESENTED to renew — the
+    one it surely holds — not the registry's current one: two renewals
+    whose answers are lost in a row must not lock the machine out."""
     with closing(_connect()) as conn, store._write(conn):
         row = conn.execute(
             "SELECT fingerprint FROM machines WHERE name=? AND status='active'", (name,)
@@ -168,7 +173,7 @@ def renew(name: str, fingerprint: str, serial: str, expires_at: str) -> str:
         conn.execute(
             "UPDATE machines SET prev_fingerprint=?, fingerprint=?, serial=?, "
             "renewed_at=?, expires_at=? WHERE name=?",
-            (row["fingerprint"], fingerprint, serial, store._now(), expires_at, name),
+            (presented, fingerprint, serial, store._now(), expires_at, name),
         )
         store._log_event(conn, "machine", detail=f"renewed {name} until {expires_at}")
     return f"OK: certificate of '{name}' renewed until {expires_at}."
@@ -248,6 +253,10 @@ def _expire(conn) -> None:
     conn.execute("UPDATE pairing_requests SET status='expired', csr='', cert='' "
                  "WHERE status IN ('committed', 'pending', 'approved') AND expires_at < ?",
                  (store._now(),))
+    # Settled requests are kept a day for the record, then purged.
+    day_ago = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+    conn.execute("DELETE FROM pairing_requests WHERE status IN "
+                 "('expired', 'denied', 'delivered') AND created_at < ?", (day_ago,))
 
 
 def printable(text: str, limit: int = 80) -> str:
@@ -336,11 +345,19 @@ def poll_request(device_code: str) -> dict:
     """What the joining machine learns when it polls: `pending`,
     `slow_down` (polled faster than the interval), `approved` with its
     certificate (handed out once), `denied` or `expired`."""
+    # Unauthenticated and frequent: an unknown or expired code is answered
+    # from a plain read, without taking the writer lock of the bus.
+    with closing(_connect()) as conn:
+        row = conn.execute("SELECT status, expires_at FROM pairing_requests "
+                           "WHERE device_hash=?", (_hash(device_code),)).fetchone()
+    if row is None or row["status"] in ("expired", "denied", "delivered", "committed") \
+            or row["expires_at"] < store._now():
+        return {"status": "denied" if row is not None and row["status"] == "denied"
+                else "expired"}
     with closing(_connect()) as conn, store._write(conn):
-        _expire(conn)
         row = conn.execute("SELECT * FROM pairing_requests WHERE device_hash=?",
                            (_hash(device_code),)).fetchone()
-        if row is None:
+        if row is None or row["expires_at"] < store._now():
             return {"status": "expired"}
         now = datetime.now(timezone.utc)
         if row["last_poll"] and row["status"] == "pending":
@@ -464,6 +481,11 @@ def redeem_invitation(token_id: str, name: str, signed: bytes, mac: str) -> dict
             return "ERROR: invitation unknown, already used or expired."
         if row["name"] != name:
             return f"ERROR: this invitation is for '{row['name']}', not '{name}'."
+        # Only a holder of a valid invitation learns that the name is taken
+        # (no oracle of paired names), and the invitation is kept for later.
+        machine = conn.execute("SELECT status FROM machines WHERE name=?", (name,)).fetchone()
+        if machine is not None and machine["status"] == "active":
+            return f"ERROR: machine '{name}' is already paired — revoke it first."
         conn.execute("UPDATE invitations SET used_at=? WHERE token_hash=?",
                      (store._now(), row["token_hash"]))
     return {"name": row["name"], "role": row["role"], "created_by": row["created_by"],
@@ -543,15 +565,25 @@ def pin(agent: str, machine: str, admin: str) -> str:
     return f"OK: agent '{agent}' bound to machine '{machine}'."
 
 
-def rename_binding(old: str, new: str, keep_pin: bool) -> None:
-    """Move a binding with its renamed instance. When `new` is already
-    bound (necessarily to the same machine, authz checked it), that binding
-    stays and the old one goes. The pin follows only if `keep_pin`."""
+def rename_binding(old: str, new: str, keep_pin: bool, machine: str) -> None:
+    """Move a binding with its renamed instance (`machine` renamed it). The
+    instance keeps its owner: a binding of `new` to the same machine stays
+    (the old one goes); a binding of `new` to ANOTHER machine can only have
+    been slipped in between the authorization check and this move (a
+    touch_presence) — it is discarded, loudly. The pin follows only if
+    `keep_pin`."""
     old, new = old.strip().lower(), new.strip().lower()
     with closing(_connect()) as conn, store._write(conn):
-        if conn.execute("SELECT 1 FROM agent_machines WHERE agent=?", (new,)).fetchone():
+        current = conn.execute("SELECT machine FROM agent_machines WHERE agent=?",
+                               (new,)).fetchone()
+        if current is not None and current["machine"] == machine:
             conn.execute("DELETE FROM agent_machines WHERE agent=?", (old,))
             return
+        if current is not None:
+            conn.execute("DELETE FROM agent_machines WHERE agent=?", (new,))
+            store._log_event(conn, "bind", agent=new,
+                             detail=f"binding to {current['machine']} discarded: raced the "
+                                    f"rename of {old} by {machine}")
         conn.execute("UPDATE agent_machines SET agent=?, pinned=CASE WHEN ? THEN pinned "
                      "ELSE 0 END WHERE agent=?", (new, bool(keep_pin), old))
 

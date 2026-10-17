@@ -65,6 +65,9 @@ with tempfile.TemporaryDirectory() as tmp:
 
     server, pair_server = hub.serve_in_thread(home, ("127.0.0.1", port),
                                               ("127.0.0.1", pair_port))
+    # Every request of this file comes from 127.0.0.1: the pairing ration
+    # is lifted here and checked on its own below.
+    pair_server.rate, pair_server.burst = 1000, 1000
     url = f"https://127.0.0.1:{port}"
     os.environ["IAB_HUB"] = url
     bus = access.bus
@@ -292,15 +295,25 @@ with tempfile.TemporaryDirectory() as tmp:
     other_ca = pki.new_ca("intruder")[1]
     some_key = pki.new_key().public_key()
     ca_cert = pki.load_cert(home / "ca.pem")
-    nj, nh = "1" * 64, "2" * 64
-    base_words = pki.check_words(ca_cert, some_key, nj, nh)
+    nj, nh, at = "1" * 64, "2" * 64, "https://hub:7443"
+    base_words = pki.check_words(ca_cert, some_key, nj, nh, at)
     check("check words change when the CA is swapped",
-          base_words != pki.check_words(other_ca, some_key, nj, nh))
+          base_words != pki.check_words(other_ca, some_key, nj, nh, at))
     check("check words change when the machine key is swapped",
-          base_words != pki.check_words(ca_cert, pki.new_key().public_key(), nj, nh))
+          base_words != pki.check_words(ca_cert, pki.new_key().public_key(), nj, nh, at))
     check("check words change with either side's nonce",
-          base_words != pki.check_words(ca_cert, some_key, "3" * 64, nh)
-          and base_words != pki.check_words(ca_cert, some_key, nj, "4" * 64))
+          base_words != pki.check_words(ca_cert, some_key, "3" * 64, nh, at)
+          and base_words != pki.check_words(ca_cert, some_key, nj, "4" * 64, at))
+    check("check words change when the hub address is redirected",
+          base_words != pki.check_words(ca_cert, some_key, nj, nh, "https://evil:7443"))
+    from cryptography.hazmat.primitives.asymmetric import ec as _ec
+    odd = pki.csr_pem(pki.new_csr(_ec.generate_private_key(_ec.SECP384R1()), "odd"))
+    try:
+        pki.load_csr(odd)
+        odd_refused = False
+    except ValueError:
+        odd_refused = True
+    check("a request with a key other than P-256 is refused", odd_refused)
 
     # A person who does not confirm the words denies the request.
     lines = []
@@ -334,6 +347,11 @@ with tempfile.TemporaryDirectory() as tmp:
         "mac": "00" * 32})
     check("an invitation id without the token's MAC is refused",
           status == 409 and "invitation" in answer["error"], answer)
+    status, answer = forged.post("/v1/pair/invited", {
+        "name": "gamma", "csr": csr, "invitation": registry.invitation_id(token),
+        "mac": "00" * 32})
+    check("without a valid invitation nobody learns which names are paired",
+          status == 409 and "already paired" not in answer["error"], answer)
     rc = join.join(pair_target, "zeta", token, tmp / "machine-zeta", say=lines.append)
     check("the refused attempts did not consume the invitation", rc == 0, lines[-2:])
     # Commit-then-reveal: a reveal must match the commitment made before
@@ -365,11 +383,53 @@ with tempfile.TemporaryDirectory() as tmp:
     # Pairing only from allowed networks; requests limited per source.
     saved_allow = pair_server.pair_allow
     pair_server.pair_allow = (hub.ipaddress.ip_network("10.0.0.0/8"),)
-    status, answer = forged.post("/v1/pair/commit", {"name": "iota",
-                                                     "commitment": commitment})
-    check("pairing is refused from a network outside the allow list",
-          status == 403 and "not open" in answer["error"], answer)
+    try:
+        forged.post("/v1/pair/commit", {"name": "iota", "commitment": commitment})
+        closed = False
+    except join.JoinError:
+        closed = True
+    check("a network outside the allow list is closed before any TLS work", closed)
     pair_server.pair_allow = saved_allow
+
+    # Pairing requests are rationed per source address (unauthenticated,
+    # each may take the writer lock); polling an unknown code is cheap.
+    saved_rate = (pair_server.rate, pair_server.burst)
+    pair_server.rate, pair_server.burst = 0.001, 1
+    pair_server._buckets.clear()
+    first = forged.post("/v1/pair/poll", {"device_code": "nope"})
+    second = forged.post("/v1/pair/poll", {"device_code": "nope"})
+    check("an unknown pairing code is answered as expired",
+          first[0] == 200 and first[1]["result"]["status"] == "expired", first)
+    check("pairing requests beyond a source's budget are refused",
+          second[0] == 429, second)
+    pair_server.rate, pair_server.burst = saved_rate
+    pair_server._buckets.clear()
+
+    # Connections are capped per source before TLS, and a handshake that
+    # does not complete is cut after HANDSHAKE_SECONDS.
+    saved_cap, saved_hs = hub.MAX_CONNECTIONS_PER_SOURCE, hub.HANDSHAKE_SECONDS
+    hub.MAX_CONNECTIONS_PER_SOURCE, hub.HANDSHAKE_SECONDS = 2, 1
+    held = [socket.create_connection(("127.0.0.1", port), timeout=5) for _ in range(2)]
+    time.sleep(0.2)
+    extra = socket.create_connection(("127.0.0.1", port), timeout=5)
+    extra.settimeout(3)
+    try:
+        cut = extra.recv(1) == b""
+    except OSError:
+        cut = True
+    check("a source over its connection cap is closed at once", cut)
+    extra.close()
+    started = time.monotonic()
+    try:
+        silent = held[0].recv(1) == b""
+    except OSError:
+        silent = True
+    check("a silent client is cut after the handshake timeout",
+          silent and time.monotonic() - started < 4, f"{time.monotonic() - started:.1f}s")
+    for s in held:
+        s.close()
+    hub.MAX_CONNECTIONS_PER_SOURCE, hub.HANDSHAKE_SECONDS = saved_cap, saved_hs
+    time.sleep(0.3)
     saved_limit = registry.MAX_REQUESTS_PER_SOURCE
     registry.MAX_REQUESTS_PER_SOURCE = 1
     status, answer = forged.post("/v1/pair/commit", {"name": "iota",
@@ -384,6 +444,14 @@ with tempfile.TemporaryDirectory() as tmp:
     backend = access.backend()
     check("no renewal while the certificate is far from its end",
           "no renewal needed" in backend.renew())
+    # Two renewals whose answers are lost in a row: the certificate the
+    # machine holds must still be accepted.
+    gamma_der = pki.cert_der(pki.load_cert(gamma_dir / "machine.pem"))
+    authority = server.authority
+    for _ in range(2):
+        authority.renew(registry.get("gamma"), gamma_der)  # answers never reach gamma
+    check("two lost renewal answers in a row do not lock the machine out",
+          bus.list_presence().startswith("["))
     old_cert = (gamma_dir / "machine.pem").read_bytes()
     out = backend.renew(force=True)
     check("a forced renewal replaces the certificate",
@@ -547,6 +615,18 @@ with tempfile.TemporaryDirectory() as tmp:
     check("a hub refusal during a wake is an ERROR line, never an exception",
           r.startswith("ERROR") and "belongs to machine" in r, r)
     bus.cancel_task("w1")
+
+    # The approver is told when a name paired before still owns instances.
+    k2 = pki.new_key()
+    csr2 = pki.csr_pem(pki.new_csr(k2, "gamma")).decode("ascii")
+    status, answer = forged.post("/v1/pair/commit", {
+        "name": "gamma", "commitment": pki.commitment(csr2.encode("ascii"), "ef" * 32)})
+    reveal = forged.post("/v1/pair/reveal", {"device_code": answer["result"]["device_code"],
+                                             "csr": csr2, "nonce": "ef" * 32})
+    seen = admin.call("pairing/lookup", {"user_code": reveal[1]["result"]["user_code"]})
+    check("the approver sees the instances a reused name would inherit",
+          "kimi@lab" in seen.get("inherits", []), seen)
+    admin.call("pairing/deny", {"user_code": seen["user_code"]})
 
     server.rate, server.burst = 0.001, 2
     server._buckets.clear()

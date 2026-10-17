@@ -44,6 +44,9 @@ DEFAULT_PORT = 7443
 # Upper bound of one long-poll round trip; the hub caps waits the same way.
 LONG_POLL_SECONDS = 50
 CALL_TIMEOUT = 30  # seconds, any non-waiting call
+# Bound on one answer: a payload or result (32 MiB at most on the way in)
+# JSON-escaped, with room to spare; anything bigger is refused.
+MAX_RESPONSE = 128 * 1024 * 1024
 # Operations that do not return a string: a failure raises HubError
 # instead of returning an `ERROR:` line their callers would not read.
 _NON_STRING = frozenset({"touch_presence", "touch_identity", "record_wake", "wake_count"})
@@ -195,12 +198,15 @@ class RemoteBackend:
                          headers={"Content-Type": "application/json",
                                   "X-IAB-Caller": self.caller})
             response = conn.getresponse()
-            raw = response.read()
+            raw = response.read(MAX_RESPONSE + 1)
             status = response.status
         except (OSError, http.client.HTTPException) as exc:
             raise HubError(describe_failure(self.url, exc)) from exc
         finally:
             conn.close()
+        if len(raw) > MAX_RESPONSE:
+            raise HubError(f"ERROR: the hub at {self.url} sent an answer over "
+                           f"{MAX_RESPONSE} bytes — refused.")
         try:
             return status, json.loads(raw.decode("utf-8"))
         except ValueError as exc:
