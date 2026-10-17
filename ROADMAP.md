@@ -325,7 +325,9 @@ Internet closed at first, TPM mandatory for admin machines.
   calling machine is journaled with every event. `iab hub import`
   brings a machine's local bus over in one transaction, its instances
   bound to that machine (`--bind`) or to none.
-- **9e** — TPM keys, per-machine policy.
+- **9e** — TPM keys, per-machine policy. Owner's decision: keys are
+  attested (EK certified by the manufacturer, credential activation),
+  never declared; a virtual TPM's EK is trusted by an admin, once.
 - **9f** — PostgreSQL dialect, tests on two engines — **shipped**.
   `IAB_DB=postgresql://…` (extra `[postgres]`, psycopg): the same SQL as
   SQLite (placeholders translated), a transaction-level advisory lock as

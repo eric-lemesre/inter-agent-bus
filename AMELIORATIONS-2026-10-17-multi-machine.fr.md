@@ -356,6 +356,17 @@ fermé au départ (6) ; TPM obligatoire pour les machines admin (7) ;
 Headscale validé, porté par le dépôt HomeLab (8). Reste ouvert : la
 machine du moyeu (2), à trancher côté HomeLab avec le rôle `iab_hub`.
 
+**Tranché le 2026-10-17 (9e)** : une clé TPM est **attestée**, jamais
+crue sur parole. Une machine qui se contente de *déclarer* `clé : tpm`
+pourrait garder sa clé dans un fichier et devenir admin quand même — la
+règle (7) reposerait sur la parole de la machine contre laquelle elle
+protège. Le moyeu vérifie, par activation de justificatif
+(TPM2_MakeCredential / ActivateCredential), que la clé de la machine vit
+dans la même puce qu'une clé d'endossement (EK) certifiée par son
+fabricant (Infineon, Intel, AMD — leurs CA livrées avec le moyeu). Un
+TPM virtuel (VM sur odin) n'a pas de certificat de fabricant : un admin
+fait confiance à son EK explicitement, une fois, par son empreinte.
+
 1. **Moyeu unique ou haute disponibilité ?** Unique : si sa machine
    tombe, la coordination entre machines s'arrête (erreur explicite), les
    agents isolés continuent ; quelques minutes d'arrêt au redémarrage,

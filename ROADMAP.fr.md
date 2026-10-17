@@ -349,7 +349,10 @@ machines admin.
   appelante est journalisée avec chaque événement. `iab hub import`
   reprend le bus local d'une machine en une transaction, ses instances
   rattachées à cette machine (`--bind`) ou à aucune.
-- **9e** — clés TPM, politique par machine.
+- **9e** — clés TPM, politique par machine. Décision du porteur : les
+  clés sont attestées (EK certifiée par le fabricant, activation de
+  justificatif), jamais déclarées ; l'EK d'un TPM virtuel est approuvée
+  par un admin, une fois.
 - **9f** — dialecte PostgreSQL, tests sur deux moteurs — **livrée**.
   `IAB_DB=postgresql://…` (extra `[postgres]`, psycopg) : même SQL que
   SQLite (paramètres traduits), verrou d'écriture par verrou consultatif

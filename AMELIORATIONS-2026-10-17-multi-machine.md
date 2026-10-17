@@ -349,6 +349,17 @@ closed at first (6); TPM mandatory for admin machines (7); Headscale
 approved, carried by the HomeLab repository (8). Still open: the hub
 machine (2), to settle on the HomeLab side with the `iab_hub` role.
 
+**Decided on 2026-10-17 (9e)**: a TPM key is **attested**, never taken
+on the machine's word. A machine that merely *declares* `key: tpm`
+could hold its key in a file and still become admin — the rule (7)
+would rest on the word of the machine it is meant to guard against.
+The hub checks, by credential activation (TPM2_MakeCredential /
+ActivateCredential), that the machine key lives in the same chip as an
+endorsement key (EK) certified by its manufacturer (Infineon, Intel,
+AMD — their CAs shipped with the hub). A virtual TPM (a VM on odin) has
+no manufacturer certificate: an admin trusts its EK explicitly, once,
+by its fingerprint.
+
 1. **Single hub or high availability?** Single: if its machine goes
    down, cross-machine coordination stops (explicit error), standalone
    agents carry on; a few minutes of downtime on reboot, restore from
