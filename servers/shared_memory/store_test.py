@@ -1122,6 +1122,29 @@ with tempfile.TemporaryDirectory() as tmp:
     check("system announcements keep the topic rule",
           store.system_announce("Bad Topic", "x").startswith("ERROR"))
 
+    # 9f — portable SQL translation (pure, checked on both engines).
+    tr = store.dialect._translate
+    check("placeholders become %s outside literals, literal % is doubled",
+          tr("SELECT 1 FROM t WHERE a=? AND d LIKE 'start%' AND q='?'")
+          == "SELECT 1 FROM t WHERE a=%s AND d LIKE 'start%%' AND q='?'")
+    check("an escaped quote inside a literal keeps the literal open",
+          tr("SELECT 'it''s ?' , ?") == "SELECT 'it''s ?' , %s")
+
+    # Wake locks: an expired lock cannot be renewed (another supervisor may
+    # hold it already); renew and release are write transactions.
+    lock = json.loads(store.acquire_wake_lock("wl@test", lease_seconds=1))
+    time.sleep(1.2)
+    check("an expired wake lock cannot be renewed",
+          store.renew_wake_lock("wl@test", lock["token"]).startswith("ERROR"))
+    store.release_wake_lock("wl@test", lock["token"])
+
+    # The declared model is an upsert: a presence row written by someone
+    # else in between never makes register_agent fail.
+    store.touch_presence("upsert@test")
+    check("register_agent(model=) over an existing presence row succeeds",
+          store.register_agent("upsert@test", "x", model="m1").startswith("OK")
+          and json.loads(store.heartbeat("upsert@test"))["model"] == "m1")
+
     # 9f — on PostgreSQL a blocking wait wakes at the writer's COMMIT
     # (LISTEN/NOTIFY), not at its next poll.
     if PG:
@@ -1139,6 +1162,20 @@ with tempfile.TemporaryDirectory() as tmp:
         check("a PostgreSQL wait wakes at the commit, long before its poll interval",
               snap["signalled"] and waited < 3, f"{waited:.2f}s")
         store.cancel_task("t-pg")
+        pools = store.dialect._POOLS.get(os.environ["IAB_DB"], [])
+        check("a connection that LISTENed is never put back in the pool",
+              not any(c.listening for c in pools), str(len(pools)))
+        import psycopg
+        watcher = psycopg.connect(os.environ["IAB_DB"], autocommit=True)
+        watcher.execute("LISTEN iab_bus")
+        check("a write transaction that changed nothing notifies nobody",
+              store.claim_task("pgwait") == "NO_TASK"
+              and not list(watcher.notifies(timeout=0.5, stop_after=1)))
+        store.push_task("pgwait", "t-pg2", "x")
+        check("a write transaction that changed rows notifies the waiters",
+              len(list(watcher.notifies(timeout=2, stop_after=1))) == 1)
+        watcher.close()
+        store.cancel_task("t-pg2")
         shown = store.dialect.describe(
             "postgresql://u:secret@h:5433/db?password=other&sslpassword=x")
         check("the database URL is shown without any credential",

@@ -563,7 +563,8 @@ def serve(home: Path | None = None, listen: tuple[str, int] | None = None,
         _log(f"ERROR: {exc}")
         return 1
     host, port = bus.server_address[:2]
-    _log(f"serving the bus on {host}:{port} (database {os.environ['IAB_DB']})")
+    _log(f"serving the bus on {host}:{port} "
+         f"(database {store.dialect.describe(os.environ['IAB_DB'])})")
     if pair is not None:
         phost, pport = pair.server_address[:2]
         _log(f"pairing open on {phost}:{pport} from {', '.join(map(str, pair.pair_allow))}")

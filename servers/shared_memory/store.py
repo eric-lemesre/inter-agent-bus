@@ -265,16 +265,20 @@ def _setup(conn: Connection) -> None:
     _migrate(conn)
 
 
+def _add_column(conn: Connection, table: str, declaration: str) -> None:
+    conn.execute(conn.dialect.ddl(f"ALTER TABLE {table} ADD COLUMN {declaration}"))
+
+
 def _migrate(conn: Connection) -> None:
     """Additive migrations only — the database is a long-lived rendezvous
     shared by several clients; existing files must keep working."""
     columns = conn.dialect.columns(conn, "tasks")
     if "max_attempts" not in columns:
-        conn.execute("ALTER TABLE tasks ADD COLUMN max_attempts INTEGER NOT NULL DEFAULT 3")
+        _add_column(conn, "tasks", "max_attempts INTEGER NOT NULL DEFAULT 3")
     columns = conn.dialect.columns(conn, "agents")
     for column in ("harness", "workspace", "cwd"):
         if column not in columns:
-            conn.execute(f"ALTER TABLE agents ADD COLUMN {column} TEXT NOT NULL DEFAULT ''")
+            _add_column(conn, "agents", f"{column} TEXT NOT NULL DEFAULT ''")
     # Rows registered before the composed identity: their harness is their
     # name (a legacy bare name stays addressable, see _resolve_target).
     # Split in Python: string functions differ between engines.
@@ -284,16 +288,16 @@ def _migrate(conn: Connection) -> None:
                      (harness, workspace, row["name"]))
     columns = conn.dialect.columns(conn, "presence")
     if "model" not in columns:
-        conn.execute("ALTER TABLE presence ADD COLUMN model TEXT NOT NULL DEFAULT ''")
+        _add_column(conn, "presence", "model TEXT NOT NULL DEFAULT ''")
     columns = conn.dialect.columns(conn, "notifications")
     if "broadcast_id" not in columns:
-        conn.execute("ALTER TABLE notifications ADD COLUMN broadcast_id INTEGER")
+        _add_column(conn, "notifications", "broadcast_id INTEGER")
     if "reply_to" not in columns:
-        conn.execute("ALTER TABLE notifications ADD COLUMN reply_to INTEGER")
+        _add_column(conn, "notifications", "reply_to INTEGER")
     if "wake" not in columns:
-        conn.execute("ALTER TABLE notifications ADD COLUMN wake INTEGER NOT NULL DEFAULT 0")
+        _add_column(conn, "notifications", "wake INTEGER NOT NULL DEFAULT 0")
     if "machine" not in conn.dialect.columns(conn, "events"):
-        conn.execute("ALTER TABLE events ADD COLUMN machine TEXT NOT NULL DEFAULT ''")
+        _add_column(conn, "events", "machine TEXT NOT NULL DEFAULT ''")
 
 
 def _log_event(
@@ -767,15 +771,14 @@ def _set_model(conn: Connection, agent: str, model: str, force: bool) -> None:
     at default TTL if absent). `force` overwrites a stored value — an
     explicit declaration; without it (environment echo) a declared model
     is kept."""
-    row = conn.execute("SELECT model FROM presence WHERE agent=?", (agent,)).fetchone()
-    if row is None:
-        conn.execute(
-            "INSERT INTO presence(agent, last_seen, ttl_seconds, capabilities, model) "
-            "VALUES(?,?,?,?,?)",
-            (agent, _now(), DEFAULT_PRESENCE_TTL, "{}", model),
-        )
-    elif force or not row["model"]:
-        conn.execute("UPDATE presence SET model=? WHERE agent=?", (model, agent))
+    # One upsert: a heartbeat written meanwhile outside the writer lock (an
+    # autocommit statement) must not make this INSERT collide.
+    conn.execute(
+        "INSERT INTO presence(agent, last_seen, ttl_seconds, capabilities, model) "
+        "VALUES(?,?,?,?,?) ON CONFLICT(agent) DO UPDATE SET model = CASE "
+        "WHEN ? OR presence.model = '' THEN excluded.model ELSE presence.model END",
+        (agent, _now(), DEFAULT_PRESENCE_TTL, "{}", model, bool(force)),
+    )
 
 
 def heartbeat(
@@ -852,7 +855,7 @@ def touch_identity(identity: dict) -> None:
     presence exist under its own composed name — a client named by its
     environment never has to call register_agent — then refreshes its
     presence. Failures must not break the tool call: callers swallow them."""
-    name = identity.get("agent_name")
+    name = str(identity.get("agent_name") or "").strip().lower()
     if not name or not _NAME_RE.match(name):
         return
     with _db() as conn, _write(conn):
@@ -1336,18 +1339,20 @@ def acquire_wake_lock(agent: str, lease_seconds: int = 600, holder: str = "") ->
 
 
 def renew_wake_lock(agent: str, token: str, lease_seconds: int = 600) -> str:
+    """Extend a wake lock still held (an expired lock may already belong to
+    another supervisor: renewing it would let two of them launch)."""
     target = agent.strip().lower()
     until = (datetime.now(timezone.utc) + timedelta(seconds=lease_seconds)).isoformat()
-    with _db() as conn:
+    with _db() as conn, _write(conn):
         held = conn.execute(
-            "UPDATE wake_locks SET until=? WHERE agent=? AND token=?",
-            (until, target, token)).rowcount
-    return "OK" if held else "ERROR: wake lock not held with this token."
+            "UPDATE wake_locks SET until=? WHERE agent=? AND token=? AND until > ?",
+            (until, target, token, _now())).rowcount
+    return "OK" if held else "ERROR: wake lock not held with this token (or expired)."
 
 
 def release_wake_lock(agent: str, token: str) -> str:
     target = agent.strip().lower()
-    with _db() as conn:
+    with _db() as conn, _write(conn):
         held = conn.execute(
             "DELETE FROM wake_locks WHERE agent=? AND token=?", (target, token)).rowcount
     return "OK" if held else "ERROR: wake lock not held with this token."

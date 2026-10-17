@@ -176,9 +176,19 @@ class SQLiteDialect:
         try:
             yield conn
         except BaseException:
-            conn.execute("ROLLBACK")
+            _rollback(conn)
             raise
         conn.execute("COMMIT")
+
+
+def _rollback(conn: Connection) -> None:
+    """Roll back without masking the error that caused it: on a dead
+    connection the ROLLBACK itself fails, and the original exception is
+    the one worth propagating (the connection is discarded anyway)."""
+    try:
+        conn.execute("ROLLBACK")
+    except Exception:
+        pass
 
 
 # -- PostgreSQL -------------------------------------------------------------
@@ -236,9 +246,13 @@ class _PGConnection:
         self.raw = raw
         self.dialect = dialect
         self.listening = False
+        self.dirty = False  # a row changed in the current write transaction
 
     def execute(self, sql: str, params=()):
-        return self.raw.execute(_translate(sql), tuple(params))
+        cursor = self.raw.execute(_translate(sql), tuple(params))
+        if cursor.rowcount > 0 and sql.lstrip()[:6].upper() in ("INSERT", "UPDATE", "DELETE"):
+            self.dirty = True
+        return cursor
 
     def close(self) -> None:
         self.dialect._release(self)
@@ -273,7 +287,11 @@ class PostgresDialect:
         return _PGConnection(raw, self)
 
     def _release(self, conn: _PGConnection) -> None:
-        healthy = (not conn.raw.closed and conn.raw.info.transaction_status
+        # A connection that LISTENed is never pooled: idle, it would keep
+        # queueing every NOTIFY of the bus (psycopg's backlog is unbounded)
+        # and wake its next waiter in a burst of stale signals.
+        healthy = (not conn.raw.closed and not conn.listening
+                   and conn.raw.info.transaction_status
                    == self._psycopg.pq.TransactionStatus.IDLE)
         with _POOL_LOCK:
             idle = _POOLS.setdefault(self.url, [])
@@ -319,14 +337,18 @@ class PostgresDialect:
     def write(self, conn: Connection) -> Iterator[Connection]:
         """Same contract as SQLite's: the writer lock from the first
         statement, commit on normal exit, rollback on exception. Waiters
-        are notified at commit (a NOTIFY is delivered only then)."""
+        are notified at commit (a NOTIFY is delivered only then) — and only
+        when a row changed: a claim that found nothing, an empty poll, a
+        refusal wake nobody."""
         conn.execute("BEGIN")
+        conn.dirty = False
         try:
             conn.execute("SELECT pg_advisory_xact_lock(?)", (_WRITER_LOCK,))
             yield conn
-            conn.execute(f"NOTIFY {_CHANNEL}")
+            if conn.dirty:
+                conn.execute(f"NOTIFY {_CHANNEL}")
         except BaseException:
-            conn.execute("ROLLBACK")
+            _rollback(conn)
             raise
         conn.execute("COMMIT")
 
