@@ -25,9 +25,10 @@ import sys
 from pathlib import Path
 
 try:  # installed package (`iab` maps to this directory)
-    from . import store, worker
+    from . import worker
+    from .access import bus
 except ImportError:  # bare script usage
-    import store
+    from access import bus
     import worker
 
 SEVERITIES = ("critical", "major", "minor")
@@ -163,12 +164,12 @@ def run_review(
         )
         return 1
     task_id = task_id or f"review-{secrets.token_hex(4)}"
-    print(store.register_agent(agent, "review driver"), file=sys.stderr)
-    pushed = store.push_task(agent, task_id, prompt)
+    print(bus.register_agent(agent, "review driver"), file=sys.stderr)
+    pushed = bus.push_task(agent, task_id, prompt)
     if pushed.startswith("ERROR"):
         print(pushed)
         return 1
-    claimed = store.claim_task(agent, lease_seconds, task_id)
+    claimed = bus.claim_task(agent, lease_seconds, task_id)
     if claimed.startswith("ERROR") or claimed == "NO_TASK":
         print(claimed)
         return 1
@@ -189,6 +190,6 @@ def run_review(
                       f"{reason}. Raw output kept for the record:\n{out.strip()}")
         else:
             result = json.dumps(review, indent=2, ensure_ascii=False)
-    print(store.publish_result(agent, task_id, result, attempt=attempt), file=sys.stderr)
+    print(bus.publish_result(agent, task_id, result, attempt=attempt), file=sys.stderr)
     print(result)
     return 1 if result.startswith("ERROR") else 0

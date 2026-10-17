@@ -25,7 +25,9 @@ clôt une demande.
    sans le SDK MCP.
 3. **Transport stdio, bus SQLite.** Une instance de serveur par client,
    partage par la base commune (WAL, transactions immédiates). Aucun
-   démon à superviser.
+   démon à superviser. Le moyeu multi-machine (phase 9) est un ajout
+   opt-in : sans `IAB_HUB`, rien de ceci ne change ; avec lui, le moyeu
+   est le seul démon du dispositif et la logique reste dans `store.py`.
 4. **Multiplateforme.** Linux, macOS et Windows sont tous de premier
    rang. L'outillage est en pur Python (aucun chemin réservé aux
    scripts shell), les chemins passent par `pathlib`, les défauts par
@@ -300,6 +302,75 @@ vingt heures.
   task|notification|any`, `iab signals`, `iab wake`, `iab supervise`.
 - **Skill** `worker-wake` réécrite autour du lanceur au roster et de la
   voie « session ouverte » (`iab watch --on any` en tâche de fond).
+
+## Phase 9 — Bus multi-machine
+
+Étude et décisions du 2026-10-17 :
+[`AMELIORATIONS-2026-10-17-multi-machine.fr.md`](AMELIORATIONS-2026-10-17-multi-machine.fr.md).
+Un moyeu (`iab hub`) expose `store.py` en HTTPS avec mTLS ; les
+machines s'y appairent par code, à la manière de Plex. Décisions :
+moyeu unique, une seule base, `cryptography` dans l'extra `[hub]`,
+appairage depuis Internet fermé au départ, TPM obligatoire pour les
+machines admin.
+
+- **9a** — couches d'accès et de dialecte, `LocalBackend` + SQLite, sans
+  changement de comportement — **livrée**. `dialect.py` (connexion,
+  schéma, transaction d'écriture, identifiants, introspection),
+  `access.py` (`bus.<opération>`). Correctifs trouvés en chemin :
+  écritures multiples désormais atomiques (`push_task` et sa
+  notification…), balayage des baux expirés sans course.
+- **9b** — moyeu : `iab hub init/serve`, mTLS, `RemoteBackend`,
+  long-poll, détection d'inspection TLS — **livrée**. Une route par
+  opération ; registre des machines (révocation effective à la requête
+  suivante) ; certificat du port du bus émis par la CA du bus, seule
+  ancre de confiance du client : un proxy d'inspection échoue à la
+  négociation, rien n'est envoyé ; attentes découpées en long-polls
+  bornés ; `hub_test.py`, `smoke.py` rejoué à travers un moyeu.
+- **9c** — appairage : `iab join`, `iab approve`, invitation interne,
+  renouvellement, `iab machines`, `iab revoke` — **livrée**. Port
+  d'appairage distinct (réseaux privés seulement par défaut) ; quatre
+  mots liés à la clé de la machine, à la CA du moyeu et aux aléas des
+  deux côtés, par engagement puis révélation (comparaison numérique
+  Bluetooth : aucune recherche de clé par force brute possible) ; invitation dont le jeton ne voyage
+  jamais (identifiant + code d'authentification lié à la demande) ;
+  renouvellement sans CSR, l'ancien certificat retiré au premier usage
+  du nouveau ; dernière admin non révocable ; annonces sur le canal
+  `machines` ; rôle admin réservé aux clés TPM (politique). Guide :
+  [`MULTI-MACHINE.fr.md`](MULTI-MACHINE.fr.md).
+- **9d** — autorisation : instance ↔ machine, rôles d'orchestrateur,
+  `accepts_from`, limites — **livrée**. `authz.py` : une instance
+  nouvelle appartient à la machine qui la crée, une instance existante
+  sans propriétaire exige `iab bind` (pas de squat), une opération
+  refusée ne laisse aucun rattachement ; seule une instance rattachée
+  par un admin compte dans la politique ; annuler, re-proposer, renommer, publier en force
+  et diffuser vers un motif exigent un principal de
+  `policy.orchestrators` (défaut : machines admin) ; `accepts_from`
+  borne qui pousse du travail ou envoie un message à qui ; débit par machine ; la machine
+  appelante est journalisée avec chaque événement. `iab hub import`
+  reprend le bus local d'une machine en une transaction, ses instances
+  rattachées à cette machine (`--bind`) ou à aucune.
+- **9e** — clés TPM, politique par machine. Décision du porteur : les
+  clés sont attestées (EK certifiée par le fabricant, activation de
+  justificatif), jamais déclarées ; l'EK d'un TPM virtuel est approuvée
+  par un admin, une fois.
+- **9f** — dialecte PostgreSQL, tests sur deux moteurs — **livrée**.
+  `IAB_DB=postgresql://…` (extra `[postgres]`, psycopg) : même SQL que
+  SQLite (paramètres traduits), verrou d'écriture par verrou consultatif
+  de transaction, clés étrangères différées au COMMIT, colonnes texte en
+  collation « C » (dates ISO comparées octet par octet), petit pool de
+  connexions, mise en place une fois par processus et par base, réveil
+  des attentes par LISTEN/NOTIFY au COMMIT ; mot de passe masqué dans
+  `whoami`. `store_test.py` et `hub_test.py` tournent sur les deux
+  moteurs (`IAB_TEST_POSTGRES`).
+- **9g** — `host` dans `launch`, superviseur par machine — **livrée**.
+  `iab supervise` tourne sur chaque machine et ne réveille que les
+  entrées dont `host` est cette machine (nom d'appairage, `--host` pour
+  forcer) ; `iab wake` répond `NOT_HERE` ailleurs ; une entrée sans
+  `host` reste réveillable partout, le verrou arbitre. Côté moyeu, le
+  rattachement interdit de prendre le verrou de réveil d'une instance
+  d'une autre machine. Une session ouverte se réveille par `iab watch
+  --on any`, en long-poll vers le moyeu.
+- **9h** — MCP streamable HTTP : **reportée**.
 
 ## Critère d'acceptation global
 

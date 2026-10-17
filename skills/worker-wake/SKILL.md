@@ -44,6 +44,7 @@ the project:
 
 ```json
 "launch": {
+  "host": "mimir",
   "cwd": "~/Dev/git/eric-lemesre/HomeLab",
   "command": ["codewhale", "exec", "--auto", "-"],
   "prompt": "worker-wake",
@@ -54,6 +55,13 @@ the project:
 }
 ```
 
+- `host` (several machines, through a hub): the machine that launches
+  the agent — its CLI and `cwd` live there. `iab supervise` runs on
+  **each** machine and wakes only the entries whose `host` is that
+  machine (its paired name; `--host` overrides). Give every entry a
+  `host`: the hub lets only the machine an instance is bound to take its
+  wake lock, so an entry without `host` is refused on the other machines
+  (an `ERROR` line each round).
 - `command`: the client's **non-interactive agent mode with
   auto-approvals**, reading the prompt on stdin (`-`). If an argument
   contains `{prompt_file}`, the prompt is written to a 0600 temp file and

@@ -22,9 +22,9 @@ import sys
 import time
 
 try:  # installed package (`iab` maps to this directory)
-    from . import store
+    from .access import bus
 except ImportError:  # bare script usage
-    import store
+    from access import bus
 
 STDERR_TAIL = 2000
 MAX_POLL_SECONDS = 60
@@ -68,7 +68,7 @@ def _run_command(
                 proc.kill()
                 out, err = proc.communicate()
                 return None, out, err
-            renewed = store.extend_lease(task_id, lease_seconds)
+            renewed = bus.extend_lease(task_id, lease_seconds)
             _log(renewed if renewed.startswith("ERROR")
                  else f"heartbeat: lease of '{task_id}' extended")
 
@@ -83,15 +83,15 @@ def run_worker(
     model: str | None = None,
 ) -> int:
     agent = agent.strip().lower()
-    registered = store.register_agent(
+    registered = bus.register_agent(
         agent, "headless worker (iab worker)", cwd=os.getcwd(), model=model)
     _log(registered)
     if registered.startswith("ERROR"):
         return 1
     delay = poll_seconds
     while True:
-        _log(store.heartbeat(agent, ttl_seconds=2 * poll_seconds + 60, model=model))
-        claimed = store.claim_task(agent, lease_seconds)
+        _log(bus.heartbeat(agent, ttl_seconds=2 * poll_seconds + 60, model=model))
+        claimed = bus.claim_task(agent, lease_seconds)
         if claimed == "NO_TASK":
             if once:
                 _log("queue drained — exiting (--once)")
@@ -120,10 +120,10 @@ def run_worker(
                       f"stderr: {_tail(err)}")
         else:
             result = out
-        published = store.publish_result(agent, task_id, result, attempt=attempt)
+        published = bus.publish_result(agent, task_id, result, attempt=attempt)
         _log(published)
         try:
-            channel = store.read_channel(agent=agent)
+            channel = bus.read_channel(agent=agent)
             if channel.startswith("ERROR"):
                 _log(f"channel read failed: {channel}")
             else:

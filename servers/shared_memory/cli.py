@@ -15,6 +15,7 @@ import argparse
 import importlib.util
 import json
 import os
+import platform
 import shutil
 import subprocess
 import sys
@@ -22,11 +23,13 @@ from pathlib import Path
 
 try:  # installed package: `iab` maps to this directory (pyproject.toml)
     from . import review, store, wake, worker
+    from .access import bus
 except ImportError:  # bare script: python servers/shared_memory/cli.py
     import review
     import store
     import wake
     import worker
+    from access import bus
 
 
 def _version() -> str:
@@ -45,7 +48,7 @@ def _content(arg: str | None) -> str:
 
 
 def _whoami() -> str:
-    return json.dumps({**store.resolve_identity(), **json.loads(store.db_info())})
+    return json.dumps({**store.resolve_identity(), **json.loads(bus.db_info())})
 
 
 def _server_config(agent_name: str) -> dict:
@@ -110,6 +113,88 @@ def _install(scope: str, agent_name: str, print_only: bool) -> str:
     )
 
 
+def _hub_module():
+    """hub.py needs the `[hub]` extra (cryptography): imported on demand so
+    the rest of the CLI works without it."""
+    try:
+        if __package__:
+            from . import hub
+        else:  # bare script: python servers/shared_memory/cli.py
+            import hub
+    except ImportError as exc:  # the extra is missing: say how to get it
+        raise SystemExit(f"ERROR: {exc}")
+    return hub
+
+
+def _hub(args) -> int:
+    hub = _hub_module()
+    if args.hub_command == "init":
+        out = hub.init(args.name, args.machine, Path(args.home) if args.home else None,
+                       args.db, args.port)
+        print(out)
+        return 1 if out.startswith("ERROR") else 0
+    if args.hub_command == "import":
+        out = hub.import_bus(args.source, args.bind, args.dry_run,
+                             Path(args.home) if args.home else None)
+        print(out)
+        return 1 if out.startswith("ERROR") else 0
+    try:
+        listen = hub.parse_listen(args.listen) if args.listen else None
+        if args.pair_listen == "off":
+            pair = False
+        else:
+            pair = hub.parse_listen(args.pair_listen) if args.pair_listen else None
+    except ValueError as exc:
+        print(f"ERROR: {exc}")
+        return 2
+    return hub.serve(Path(args.home) if args.home else None, listen, pair)
+
+
+def _pairing(args) -> int:
+    """join / approve / deny / invite / machines / revoke / renew / ping —
+    the pairing and admin commands (need the [hub] extra)."""
+    _hub_module()  # fail early with the install hint when the extra is missing
+    if __package__:
+        from . import admin, join
+    else:
+        import admin
+        import join
+    if args.command == "join":
+        hub = args.hub or os.environ.get("IAB_HUB", "")
+        if not hub:
+            print("ERROR: give the hub's address: iab join <host>[:port]")
+            return 2
+        if hub.startswith("https://") and args.hub is None:
+            hub = hub.split("://", 1)[1].split("/", 1)[0].rsplit(":", 1)[0]
+        try:
+            token = join.read_token(args.token)
+        except join.JoinError as exc:
+            print(f"ERROR: {exc}")
+            return 2
+        return join.join(hub, args.machine_name, token)
+    if args.command == "approve":
+        return admin.approve(args.code, args.machine_name, args.role)
+    if args.command == "deny":
+        return admin.show(admin.call("pairing/deny", {"user_code": args.code}))
+    if args.command == "invite":
+        result = admin.call("invite", {"name": args.name, "role": args.role,
+                                       "ttl": args.ttl})
+        if isinstance(result, str):
+            print(result)
+            return 1
+        print(result["token"])  # alone on stdout: piped to `iab join --token -`
+        return 0
+    if args.command == "machines":
+        return admin.show(admin.call("machines"))
+    if args.command == "revoke":
+        return admin.show(admin.call("revoke", {"name": args.name}))
+    if args.command == "bind":
+        return admin.show(admin.call("bind", {"agent": args.agent, "machine": args.machine}))
+    if args.command == "renew":
+        return admin.renew(args.force)
+    return join.ping()
+
+
 def _watch(agent: str, timeout: float, interval: float, on: str) -> str:
     """Supervisor primitive. `--on task` (default): task_ids one per line so
     a shell/timer unit can consume them without a JSON parser; silent empty
@@ -117,11 +202,11 @@ def _watch(agent: str, timeout: float, interval: float, on: str) -> str:
     signal snapshot as JSON (`signalled` tells timeout from arrival) — the
     wake-up of an open interactive session run as a background task."""
     if on == "task":
-        out = store.wait_for_task(agent, timeout, interval)
+        out = bus.wait_for_task(agent, timeout, interval)
         if out.startswith("ERROR"):
             return out
         return "\n".join(json.loads(out))
-    return store.wait_signal(agent, on, timeout, interval)
+    return bus.wait_signal(agent, on, timeout, interval)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -249,12 +334,15 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("agent")
     p.add_argument("--dry-run", action="store_true",
                    help="print the decision and the command, launch nothing")
+    p.add_argument("--host", help="this machine's name, matched against launch.host")
 
     p = sub.add_parser("supervise", help="the single watcher: wake every roster agent "
                                          "with a `launch` block when a signal waits")
     p.add_argument("--interval", type=float, default=60.0, metavar="SECONDS")
     p.add_argument("--once", action="store_true", help="one pass, then exit")
     p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--host", help="this machine's name, matched against launch.host "
+                                  "(default: its paired name in hub mode, else the host name)")
 
     sub.add_parser("presence", help="list all known agents and their presence status")
 
@@ -299,6 +387,70 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("review_cmd", nargs=argparse.REMAINDER, metavar="-- command...",
                    help="the reviewer command, after `--`; receives the prompt on stdin")
 
+    p = sub.add_parser("hub", help="multi-machine hub: create it, serve the bus over "
+                                   "mutual TLS (needs the [hub] extra)")
+    hub_sub = p.add_subparsers(dest="hub_command", required=True)
+    h = hub_sub.add_parser("init", help="create the hub (bus CA, server certificate, "
+                                        "database) and pair this machine as its first admin")
+    h.add_argument("--name", action="append", required=True,
+                   help="DNS name or IP address machines reach the hub by (repeatable; "
+                        "the first one goes into IAB_HUB)")
+    h.add_argument("--machine", default=platform.node().split(".")[0].lower(),
+                   help="name of this machine (default: its host name)")
+    h.add_argument("--home", help="hub directory (default: IAB_HUB_HOME or <data dir>/hub)")
+    h.add_argument("--db", help="bus database of the hub (default: <home>/bus.db)")
+    h.add_argument("--port", type=int, default=7443, help="bus listener port (default: 7443)")
+    h = hub_sub.add_parser("serve", help="run the bus listener (mutual TLS)")
+    h.add_argument("--home", help="hub directory (default: IAB_HUB_HOME or <data dir>/hub)")
+    h.add_argument("--listen", metavar="HOST:PORT",
+                   help="listen address (default: 0.0.0.0 and the port given at init)")
+
+    h.add_argument("--pair-listen", metavar="HOST:PORT|off",
+                   help="pairing listener (default: same host, the pair port of hub.json; "
+                        "'off' to close pairing)")
+    h = hub_sub.add_parser("import", help="bring an existing local bus (agents, queues, "
+                                          "results, channel, journal) into the hub's database")
+    h.add_argument("source", help="the local bus file (see `iab whoami` on its machine)")
+    h.add_argument("--bind", metavar="MACHINE",
+                   help="bind the imported instances to this paired machine (the one they "
+                        "come from); without it an admin binds each one with `iab bind`")
+    h.add_argument("--dry-run", action="store_true",
+                   help="check and count, write nothing")
+    h.add_argument("--home", help="hub directory (default: IAB_HUB_HOME or <data dir>/hub)")
+
+    p = sub.add_parser("join", help="pair this machine with a hub: shows a code and four "
+                                    "check words to confirm on an admin machine")
+    p.add_argument("hub", nargs="?", help="hub address host[:pairing port] "
+                                          "(default: the host of IAB_HUB)")
+    p.add_argument("--name", dest="machine_name", help="name of this machine "
+                                                       "(default: its host name)")
+    p.add_argument("--token", metavar="-",
+                   help="'-' to read an invitation token on stdin (else IAB_INVITE_TOKEN); "
+                        "never pass the token itself as an argument")
+    p = sub.add_parser("approve", help="approve a pairing request (admin machine, "
+                                       "interactive: compare the check words)")
+    p.add_argument("code", nargs="?", help="the code shown by `iab join`")
+    p.add_argument("--name", dest="machine_name", help="pair under this name instead")
+    p.add_argument("--role", choices=["member", "admin"], default="member")
+    p = sub.add_parser("deny", help="deny a pairing request (admin machine)")
+    p.add_argument("code")
+    p = sub.add_parser("invite", help="one-time token pairing NAME without a person "
+                                      "(Ansible); prints the token alone")
+    p.add_argument("name")
+    p.add_argument("--role", choices=["member", "admin"], default="member")
+    p.add_argument("--ttl", type=int, default=900, metavar="SECONDS")
+    sub.add_parser("machines", help="machines paired with the hub (admin machine)")
+    p = sub.add_parser("revoke", help="revoke a machine: refused from its next request")
+    p.add_argument("name")
+    p = sub.add_parser("bind", help="bind an agent instance to a machine (admin): moves it, "
+                                    "or vouches for it in the hub policy")
+    p.add_argument("agent")
+    p.add_argument("machine")
+    p = sub.add_parser("renew", help="renew this machine's certificate (automatic when "
+                                     "less than 10 days remain)")
+    p.add_argument("--force", action="store_true", help="renew now")
+    sub.add_parser("ping", help="check this machine's pairing with its hub")
+
     p = sub.add_parser(
         "install",
         help="register the MCP server in the client (Claude Code: claude mcp add-json)",
@@ -312,8 +464,13 @@ def main(argv: list[str] | None = None) -> int:
                    help="print the JSON registration instead of applying it")
 
     args = parser.parse_args(argv)
+    if args.command == "hub":
+        return _hub(args)
+    if args.command in ("join", "approve", "deny", "invite", "machines", "revoke",
+                        "bind", "renew", "ping"):
+        return _pairing(args)
     if args.command == "supervise":
-        return wake.supervise(args.interval, args.once, args.dry_run)
+        return wake.supervise(args.interval, args.once, args.dry_run, args.host)
     if args.command == "review":
         cmd = args.review_cmd
         if cmd and cmd[0] == "--":
@@ -350,39 +507,39 @@ def main(argv: list[str] | None = None) -> int:
             model=args.model or os.environ.get("IAB_MODEL") or None,
         )
     out = {
-        "register": lambda: store.register_agent(
+        "register": lambda: bus.register_agent(
             args.name, args.description, args.cwd, args.model),
-        "rename": lambda: store.rename_agent(args.old, args.new),
-        "push": lambda: store.push_task(
+        "rename": lambda: bus.rename_agent(args.old, args.new),
+        "push": lambda: bus.push_task(
             args.agent, args.task_id, _content(args.payload), args.priority,
             args.max_attempts, not args.no_notify,
         ),
         "watch": lambda: _watch(args.agent, args.timeout, args.interval, args.on),
-        "signals": lambda: store.pending_signals(args.agent),
-        "wake": lambda: wake.wake_agent(args.agent, dry_run=args.dry_run),
-        "claim": lambda: store.claim_task(args.agent, args.lease, args.task_id),
-        "publish": lambda: store.publish_result(
+        "signals": lambda: bus.pending_signals(args.agent),
+        "wake": lambda: wake.wake_agent(args.agent, dry_run=args.dry_run, host=args.host),
+        "claim": lambda: bus.claim_task(args.agent, args.lease, args.task_id),
+        "publish": lambda: bus.publish_result(
             args.agent, args.task_id, _content(args.content), args.attempt, args.force
         ),
-        "cancel": lambda: store.cancel_task(args.task_id),
-        "requeue": lambda: store.requeue_task(args.task_id),
-        "extend": lambda: store.extend_lease(args.task_id, args.lease),
-        "result": lambda: store.read_result(args.task_id),
-        "state": lambda: store.get_system_state(),
-        "heartbeat": lambda: store.heartbeat(
+        "cancel": lambda: bus.cancel_task(args.task_id),
+        "requeue": lambda: bus.requeue_task(args.task_id),
+        "extend": lambda: bus.extend_lease(args.task_id, args.lease),
+        "result": lambda: bus.read_result(args.task_id),
+        "state": lambda: bus.get_system_state(),
+        "heartbeat": lambda: bus.heartbeat(
             args.agent, args.ttl, args.capabilities, args.model),
-        "announce": lambda: store.announce(args.author, args.topic, _content(args.message)),
-        "channel": lambda: store.read_channel(
+        "announce": lambda: bus.announce(args.author, args.topic, _content(args.message)),
+        "channel": lambda: bus.read_channel(
             args.agent, args.since_seq, args.topic, args.limit
         ),
-        "notify": lambda: store.notify(args.author, args.agent, _content(args.message),
+        "notify": lambda: bus.notify(args.author, args.agent, _content(args.message),
                                        args.reply_to, args.wake),
-        "broadcast": lambda: store.broadcast(args.author, _content(args.message), args.scope,
+        "broadcast": lambda: bus.broadcast(args.author, _content(args.message), args.scope,
                                              args.alive_only, args.wake),
-        "replies": lambda: store.replies(args.broadcast_id),
-        "poll": lambda: store.poll(args.agent, args.limit),
-        "presence": lambda: store.list_presence(),
-        "log": lambda: store.get_events(args.task_id, args.agent, args.limit),
+        "replies": lambda: bus.replies(args.broadcast_id),
+        "poll": lambda: bus.poll(args.agent, args.limit),
+        "presence": lambda: bus.list_presence(),
+        "log": lambda: bus.get_events(args.task_id, args.agent, args.limit),
         "whoami": _whoami,
         "install": lambda: _install(args.scope, args.agent_name, args.print_only),
     }[args.command]()

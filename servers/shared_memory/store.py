@@ -32,6 +32,7 @@ journaled in the append-only `events` table (get_events).
 """
 from __future__ import annotations
 
+import contextvars
 import fnmatch
 import hashlib
 import json
@@ -40,8 +41,24 @@ import re
 import sqlite3
 import sys
 import time
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Iterator
+
+try:  # installed package: `iab` maps to this directory (pyproject.toml)
+    from . import dialect
+except ImportError:  # bare script or test: the directory is on sys.path
+    import dialect
+
+Connection = dialect.Connection
+
+# The machine a hub is serving the current operation for (empty in local
+# mode): journaled with every event, so the history says WHERE an action
+# came from. Set by the hub per request; a context variable, so one
+# thread's request never stamps another's events.
+CALLER_MACHINE: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "iab_caller_machine", default="")
 
 
 def _data_dir() -> Path:
@@ -184,11 +201,12 @@ def project_key(cwd: str | os.PathLike | None = None) -> str:
     return f"{slug}-{digest}"
 
 
-def _resolve_db(cwd: str | os.PathLike | None = None) -> tuple[Path, str]:
+def _resolve_db(cwd: str | os.PathLike | None = None) -> tuple[Path | str, str]:
     for var in ("IAB_DB", "ORCHESTRATOR_DB"):
         value = os.environ.get(var)
         if value:
-            return Path(value), f"env:{var}"
+            # A postgresql:// URL stays a string; anything else is a file.
+            return (value if dialect.is_url(value) else Path(value)), f"env:{var}"
     if GLOBAL_DB.exists():
         return GLOBAL_DB, "global (pre-isolation bus kept — set IAB_DB to opt out)"
     if LEGACY_DB.exists():
@@ -196,7 +214,7 @@ def _resolve_db(cwd: str | os.PathLike | None = None) -> tuple[Path, str]:
     return DATA_DIR / "projects" / f"{project_key(cwd)}.db", "project"
 
 
-def db_path(cwd: str | os.PathLike | None = None) -> Path:
+def db_path(cwd: str | os.PathLike | None = None) -> Path | str:
     return _resolve_db(cwd)[0]
 
 
@@ -205,143 +223,94 @@ def db_info() -> str:
     diagnosis: participants of one project must all see the same path."""
     path, source = _resolve_db()
     return json.dumps(
-        {"db": str(path), "db_source": source, "project_key": project_key()},
+        {"db": dialect.describe(path), "db_source": source, "project_key": project_key()},
         ensure_ascii=False,
     )
 
 
-def connect() -> sqlite3.Connection:
-    path = db_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(path, timeout=10, isolation_level=None)
-    if os.name == "posix":
-        # Writing the bus is prompt-injection-adjacent (payloads reach
-        # autonomous agents): keep the file owner-only. Hardening, not
-        # correctness — an exotic filesystem may refuse, the bus still works.
-        try:
-            os.chmod(path, 0o600)
-        except OSError:
-            pass
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=10000")
-    conn.executescript(
-        """
-        CREATE TABLE IF NOT EXISTS agents (
-            name          TEXT PRIMARY KEY,
-            description   TEXT NOT NULL DEFAULT '',
-            registered_at TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS tasks (
-            task_id        TEXT PRIMARY KEY,
-            agent          TEXT NOT NULL REFERENCES agents(name),
-            payload        TEXT NOT NULL,
-            priority       INTEGER NOT NULL DEFAULT 1,
-            status         TEXT NOT NULL DEFAULT 'queued',
-            attempts       INTEGER NOT NULL DEFAULT 0,
-            created_at     TEXT NOT NULL,
-            claimed_at     TEXT,
-            lease_deadline TEXT
-        );
-        CREATE TABLE IF NOT EXISTS results (
-            task_id    TEXT PRIMARY KEY,
-            author     TEXT NOT NULL,
-            content    TEXT NOT NULL,
-            updated_at TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS events (
-            id      INTEGER PRIMARY KEY AUTOINCREMENT,
-            task_id TEXT,
-            agent   TEXT,
-            event   TEXT NOT NULL,
-            at      TEXT NOT NULL,
-            detail  TEXT NOT NULL DEFAULT ''
-        );
-        CREATE INDEX IF NOT EXISTS events_task ON events(task_id);
-        CREATE TABLE IF NOT EXISTS presence (
-            agent        TEXT PRIMARY KEY,
-            last_seen    TEXT NOT NULL,
-            ttl_seconds  INTEGER NOT NULL,
-            capabilities TEXT NOT NULL DEFAULT '{}'
-        );
-        CREATE TABLE IF NOT EXISTS channel (
-            seq     INTEGER PRIMARY KEY AUTOINCREMENT,
-            author  TEXT NOT NULL,
-            at      TEXT NOT NULL,
-            topic   TEXT NOT NULL,
-            message TEXT NOT NULL
-        );
-        CREATE INDEX IF NOT EXISTS channel_topic ON channel(topic);
-        CREATE TABLE IF NOT EXISTS channel_cursor (
-            agent    TEXT PRIMARY KEY,
-            last_seq INTEGER NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS notifications (
-            seq     INTEGER PRIMARY KEY AUTOINCREMENT,
-            target  TEXT NOT NULL,
-            author  TEXT NOT NULL,
-            at      TEXT NOT NULL,
-            message TEXT NOT NULL
-        );
-        CREATE INDEX IF NOT EXISTS notifications_target ON notifications(target);
-        CREATE TABLE IF NOT EXISTS notification_cursor (
-            target   TEXT PRIMARY KEY,
-            last_seq INTEGER NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS wake_locks (
-            agent  TEXT PRIMARY KEY,
-            token  TEXT NOT NULL,
-            until  TEXT NOT NULL,
-            holder TEXT NOT NULL DEFAULT ''
-        );
-        """
-    )
-    _migrate(conn)
+def connect() -> Connection:
+    """Open the bus database through its dialect, schema and additive
+    migrations applied. The caller closes it (see _db)."""
+    conn = dialect.for_target(db_path()).connect()
+    try:
+        conn.dialect.prepare(conn, _setup)
+    except BaseException:
+        conn.close()
+        raise
     return conn
 
 
-def _migrate(conn: sqlite3.Connection) -> None:
+@contextmanager
+def _db() -> Iterator[Connection]:
+    """One connection for one operation, closed on the way out."""
+    conn = connect()
+    try:
+        yield conn
+    finally:
+        conn.close()
+
+
+def _write(conn: Connection):
+    """The write transaction of the engine (writer lock held from the first
+    statement; commit on normal exit, rollback on exception)."""
+    return conn.dialect.write(conn)
+
+
+def _insert_id(conn: Connection, sql: str, params: tuple) -> int:
+    return conn.dialect.insert_id(conn, sql, params)
+
+
+def _setup(conn: Connection) -> None:
+    """The bus tables, then their additive migrations."""
+    conn.dialect.create_schema(conn)
+    _migrate(conn)
+
+
+def _add_column(conn: Connection, table: str, declaration: str) -> None:
+    conn.execute(conn.dialect.ddl(f"ALTER TABLE {table} ADD COLUMN {declaration}"))
+
+
+def _migrate(conn: Connection) -> None:
     """Additive migrations only — the database is a long-lived rendezvous
     shared by several clients; existing files must keep working."""
-    columns = {r["name"] for r in conn.execute("PRAGMA table_info(tasks)")}
+    columns = conn.dialect.columns(conn, "tasks")
     if "max_attempts" not in columns:
-        conn.execute("ALTER TABLE tasks ADD COLUMN max_attempts INTEGER NOT NULL DEFAULT 3")
-    columns = {r["name"] for r in conn.execute("PRAGMA table_info(agents)")}
+        _add_column(conn, "tasks", "max_attempts INTEGER NOT NULL DEFAULT 3")
+    columns = conn.dialect.columns(conn, "agents")
     for column in ("harness", "workspace", "cwd"):
         if column not in columns:
-            conn.execute(f"ALTER TABLE agents ADD COLUMN {column} TEXT NOT NULL DEFAULT ''")
+            _add_column(conn, "agents", f"{column} TEXT NOT NULL DEFAULT ''")
     # Rows registered before the composed identity: their harness is their
     # name (a legacy bare name stays addressable, see _resolve_target).
-    conn.execute(
-        "UPDATE agents SET harness = CASE WHEN instr(name, '@') > 0 "
-        "THEN substr(name, 1, instr(name, '@') - 1) ELSE name END, "
-        "workspace = CASE WHEN instr(name, '@') > 0 "
-        "THEN substr(name, instr(name, '@') + 1) ELSE '' END "
-        "WHERE harness = ''"
-    )
-    columns = {r["name"] for r in conn.execute("PRAGMA table_info(presence)")}
+    # Split in Python: string functions differ between engines.
+    for row in conn.execute("SELECT name FROM agents WHERE harness = ''").fetchall():
+        harness, workspace = split_name(row["name"])
+        conn.execute("UPDATE agents SET harness=?, workspace=? WHERE name=?",
+                     (harness, workspace, row["name"]))
+    columns = conn.dialect.columns(conn, "presence")
     if "model" not in columns:
-        conn.execute("ALTER TABLE presence ADD COLUMN model TEXT NOT NULL DEFAULT ''")
-    columns = {r["name"] for r in conn.execute("PRAGMA table_info(notifications)")}
+        _add_column(conn, "presence", "model TEXT NOT NULL DEFAULT ''")
+    columns = conn.dialect.columns(conn, "notifications")
     if "broadcast_id" not in columns:
-        conn.execute("ALTER TABLE notifications ADD COLUMN broadcast_id INTEGER")
+        _add_column(conn, "notifications", "broadcast_id INTEGER")
     if "reply_to" not in columns:
-        conn.execute("ALTER TABLE notifications ADD COLUMN reply_to INTEGER")
+        _add_column(conn, "notifications", "reply_to INTEGER")
     if "wake" not in columns:
-        conn.execute("ALTER TABLE notifications ADD COLUMN wake INTEGER NOT NULL DEFAULT 0")
+        _add_column(conn, "notifications", "wake INTEGER NOT NULL DEFAULT 0")
+    if "machine" not in conn.dialect.columns(conn, "events"):
+        _add_column(conn, "events", "machine TEXT NOT NULL DEFAULT ''")
 
 
 def _log_event(
-    conn: sqlite3.Connection,
+    conn: Connection,
     event: str,
     task_id: str | None = None,
     agent: str | None = None,
     detail: str = "",
 ) -> None:
     conn.execute(
-        "INSERT INTO events(task_id, agent, event, at, detail) VALUES(?,?,?,?,?)",
-        (task_id, agent, event, _now(), detail),
+        "INSERT INTO events(task_id, agent, event, at, detail, machine) VALUES(?,?,?,?,?,?)",
+        (task_id, agent, event, _now(), detail, CALLER_MACHINE.get()),
     )
 
 
@@ -361,7 +330,7 @@ def register_agent(
             "each component [a-z0-9][a-z0-9._-]{0,39}."
         )
     harness, workspace = split_name(name)
-    with connect() as conn:
+    with _db() as conn, _write(conn):
         known = conn.execute("SELECT 1 FROM agents WHERE name=?", (name,)).fetchone()
         conn.execute(
             "INSERT INTO agents(name, description, registered_at, harness, workspace, cwd) "
@@ -389,14 +358,11 @@ def rename_agent(old: str, new: str) -> str:
     if not _NAME_RE.match(new):
         return f"ERROR: invalid agent name '{new}' — expected harness[@workspace]."
     harness, workspace = split_name(new)
-    with connect() as conn:
-        conn.execute("BEGIN IMMEDIATE")
-        try:
+    with _db() as conn:
+        with _write(conn):
             if conn.execute("SELECT 1 FROM agents WHERE name=?", (old,)).fetchone() is None:
-                conn.execute("COMMIT")
                 return f"ERROR: agent '{old}' not registered."
             if conn.execute("SELECT 1 FROM agents WHERE name=?", (new,)).fetchone():
-                conn.execute("COMMIT")
                 return f"ERROR: agent '{new}' already exists — rename refused."
             conn.execute(
                 "UPDATE agents SET name=?, harness=?, workspace=? WHERE name=?",
@@ -414,18 +380,236 @@ def rename_agent(old: str, new: str) -> str:
             else:
                 conn.execute("UPDATE presence SET agent=? WHERE agent=?", (new, old))
             _log_event(conn, "rename", agent=new, detail=f"was {old}")
-            conn.execute("COMMIT")
-        except Exception:
-            conn.execute("ROLLBACK")
-            raise
     return f"OK: agent '{old}' renamed to '{new}'."
 
 
-def _known_agents(conn: sqlite3.Connection) -> list[str]:
+# What an import copies. Keyed tables keep their keys and refuse a key
+# present on both sides; serial tables are renumbered after the target's
+# own rows (their references and the cursors follow).
+_IMPORT_KEYED = (("agents", "name"), ("tasks", "task_id"), ("results", "task_id"),
+                 ("presence", "agent"), ("channel_cursor", "agent"),
+                 ("notification_cursor", "target"))
+_IMPORT_ORDER = {"channel": "seq", "notifications": "seq", "events": "id"}
+
+
+class _Abort(Exception):
+    """Leave an import's write transaction by rolling it back (a dry run,
+    or a refusal from the caller's hook)."""
+
+    def __init__(self, answer: str) -> None:
+        super().__init__(answer)
+        self.answer = answer
+
+
+def _read_source(path: Path) -> dict[str, list[dict]] | str:
+    """Every row an import needs from a bus file, read in one snapshot,
+    without writing to it (no migration, no WAL checkpoint: the file may be
+    the live bus of local agents)."""
+    try:
+        src = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True,
+                              isolation_level=None)
+    except sqlite3.Error as exc:
+        return f"ERROR: cannot open {path}: {exc}"
+    src.row_factory = sqlite3.Row
+    try:
+        src.execute("BEGIN")
+        tables = {r["name"] for r in src.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+        if not {"agents", "tasks"} <= tables:
+            return f"ERROR: {path} is not a bus database."
+        if "machines" in tables and src.execute("SELECT 1 FROM machines").fetchone():
+            return (f"ERROR: {path} is a hub database (it has machines) — importing a "
+                    "hub into another is not supported.")
+        data = {}
+        for table, _ in _IMPORT_KEYED:
+            data[table] = ([dict(r) for r in src.execute(f"SELECT * FROM {table}")]
+                           if table in tables else [])
+        for table, order in _IMPORT_ORDER.items():
+            data[table] = ([dict(r) for r in src.execute(
+                f"SELECT * FROM {table} ORDER BY {order}")] if table in tables else [])
+        data["wake_locks"] = ([dict(r) for r in src.execute("SELECT agent FROM wake_locks")]
+                              if "wake_locks" in tables else [])
+        return data
+    except sqlite3.Error as exc:
+        return f"ERROR: cannot read {path}: {exc}"
+    finally:
+        src.close()
+
+
+def _insert_row(conn: Connection, known: dict[str, set[str]], table: str, row: dict,
+                skip: str | None = None):
+    """INSERT the columns of `row` the target knows (`known`: its columns
+    per table — a source of an older schema lacks some, the target's
+    defaults apply), but `skip` — a serial column, whose new value is
+    returned."""
+    if table not in known:
+        known[table] = conn.dialect.columns(conn, table)
+    columns = [c for c in row if c in known[table] and c != skip]
+    sql = (f"INSERT INTO {table}({', '.join(columns)}) "
+           f"VALUES({', '.join('?' for _ in columns)})")
+    params = tuple(row[c] for c in columns)
+    if skip:
+        return conn.dialect.insert_id(conn, sql, params, column=skip)
+    conn.execute(sql, params)
+    return None
+
+
+def _foreign_rows(data: dict[str, list[dict]]) -> list[str]:
+    """Rows of a source that reach beyond it. The file comes from another
+    machine and is untrusted: each row must concern the source's own
+    agents and tasks — else it would queue work for, settle the task of,
+    or speak to or as an instance of the hub (or a name not registered
+    yet, which would inherit it), around accepts_from. The core resolves
+    every author to a registered agent, so an honest bus passes; `bus`
+    authors the mechanism's own notices and events."""
+    agents = {r["name"] for r in data["agents"]}
+    tasks = {r["task_id"] for r in data["tasks"]}
+    # Names exactly as the core writes them (`$` would let a trailing
+    # newline through), keys as text: a value the target would store or
+    # compare differently must not pass the check below.
+    problems = [f"agents.name={n!r}" for n in agents
+                if not (isinstance(n, str) and _NAME_RE.fullmatch(n))]
+    problems += [f"tasks.task_id={t!r}" for t in tasks if not isinstance(t, str)]
+    rules = (("tasks", "agent", agents), ("results", "task_id", tasks),
+             ("results", "author", agents), ("presence", "agent", agents),
+             ("channel", "author", agents), ("channel_cursor", "agent", agents),
+             ("notifications", "target", agents),
+             ("notifications", "author", agents | {"bus"}),
+             ("notification_cursor", "target", agents),
+             ("events", "agent", agents | {"bus", None}),
+             ("events", "task_id", tasks | {None}))
+    for table, column, allowed in rules:
+        problems += sorted({f"{table}.{column}={r.get(column)}" for r in data[table]
+                            if r.get(column) not in allowed})
+    return problems
+
+
+def _remap(mapping: dict[int, int], last_seq: int) -> int:
+    """A cursor's new position: the new number of the last row it had read."""
+    return max((new for old, new in mapping.items() if old <= last_seq), default=0)
+
+
+def import_database(source: str | os.PathLike, dry_run: bool = False, after=None) -> str:
+    """Copy a local bus (a SQLite file) into the current database — the
+    migration of an existing bus to a hub. Agents, queues, results,
+    presence, channel, notifications, cursors and journal come over in one
+    transaction; channel, notification and journal entries are renumbered
+    after the target's own, references and cursors following (a cursor
+    that had read anything also counts the target's earlier entries as
+    read). Wake locks stay behind: they belong to the old machine's
+    supervisor. Refused, nothing written, when a name or task id exists on
+    both sides — rename it first (`IAB_DB=<source> iab rename`) — or when
+    a row refers to anything but the source's own agents and tasks.
+    `after(conn, agents, flows)` runs inside the transaction and may
+    refuse with an `ERROR:` string — the hub checks the flows (kind,
+    sender, recipient) against its policy and binds the imported
+    instances there."""
+    if dialect.is_url(source):
+        return "ERROR: the source must be a local bus file (SQLite), not a URL."
+    path = Path(source).expanduser()
+    if not path.is_file():
+        return f"ERROR: no bus database at {path}."
+    target = db_path()
+    if not dialect.is_url(target) and Path(target).resolve() == path.resolve():
+        return "ERROR: the source is the current bus database itself."
+    data = _read_source(path)
+    if isinstance(data, str):
+        return data
+    foreign = _foreign_rows(data)
+    if foreign:
+        shown = ", ".join(foreign[:10]) + (" …" if len(foreign) > 10 else "")
+        return (f"ERROR: {len(foreign)} reference(s) outside the source's own agents and "
+                f"tasks: {shown} — import refused, nothing written.")
+    agents = sorted(r["name"] for r in data["agents"])
+    with _db() as conn:
+        try:
+            with _write(conn):
+                clashes = []
+                for table, key in _IMPORT_KEYED:
+                    existing = {r[key] for r in conn.execute(f"SELECT {key} FROM {table}")}
+                    clashes += [f"{table}.{key}={r[key]}" for r in data[table]
+                                if r[key] in existing]
+                if clashes:
+                    shown = ", ".join(clashes[:10]) + (" …" if len(clashes) > 10 else "")
+                    return (f"ERROR: {len(clashes)} key(s) exist on both sides: {shown} — "
+                            "rename on the source first (IAB_DB=<source> iab rename).")
+                known: dict[str, set[str]] = {}
+                for row in data["agents"]:
+                    # Always from the name: bare names and `harness@*` scopes
+                    # resolve through these columns — a forged harness would
+                    # capture what is addressed to another instance.
+                    row["harness"], row["workspace"] = split_name(row["name"])
+                    _insert_row(conn, known, "agents", row)
+                for table in ("tasks", "results", "presence"):
+                    for row in data[table]:
+                        _insert_row(conn, known, table, row)
+                channel = {row["seq"]: _insert_row(conn, known, "channel", row, skip="seq")
+                           for row in data["channel"]}
+                notices = {}
+                for row in data["notifications"]:
+                    for ref in ("broadcast_id", "reply_to"):
+                        if row.get(ref) is not None:
+                            row[ref] = channel.get(row[ref])
+                    notices[row["seq"]] = _insert_row(conn, known, "notifications", row,
+                                                      skip="seq")
+                for row in data["channel_cursor"]:
+                    _insert_row(conn, known, "channel_cursor",
+                                {**row, "last_seq": _remap(channel, row["last_seq"])})
+                for row in data["notification_cursor"]:
+                    _insert_row(conn, known, "notification_cursor",
+                                {**row, "last_seq": _remap(notices, row["last_seq"])})
+                for row in data["events"]:
+                    _insert_row(conn, known, "events", row, skip="id")
+                counts = {t: len(data[t]) for t in (
+                    "agents", "tasks", "results", "presence", "channel", "notifications",
+                    "events")}
+                _log_event(conn, "import", detail=f"from {path.name}: " + ", ".join(
+                    f"{n} {t}" for t, n in counts.items()))
+                if after is not None:
+                    # Who sends what to whom, for the hub's accepts_from:
+                    # work has no recorded sender (the source machine sent
+                    # it), the channel reaches everybody. A `bus` author in
+                    # a file proves nothing: such a notice is checked as
+                    # sent by the source machine itself.
+                    flows = ([("work", None, r["agent"]) for r in data["tasks"]]
+                             + [("message", None if r["author"] == "bus" else r["author"],
+                                 r["target"]) for r in data["notifications"]]
+                             + [("channel", r["author"], None) for r in data["channel"]])
+                    refused = after(conn, agents, flows)
+                    if refused:
+                        raise _Abort(refused)
+                answer = json.dumps(
+                    {"source": str(path), "dry_run": dry_run, "agents": agents,
+                     "imported": counts, "left_behind": {"wake_locks": len(data["wake_locks"])}},
+                    ensure_ascii=False)
+                if dry_run:
+                    raise _Abort(answer)
+        except _Abort as stop:
+            return stop.answer
+        except conn.dialect.integrity_error as exc:
+            return f"ERROR: import refused by the database, nothing written: {exc}"
+    return answer
+
+
+def resolve_agent(text: str) -> tuple[str | None, str | None]:
+    """Read-only: the registered instance an address designates, with the
+    same rules as every operation (see _resolve_target)."""
+    with _db() as conn:
+        return _resolve_target(conn, text)
+
+
+def task_agent(task_id: str) -> str | None:
+    """Read-only: the queue a task belongs to, or None."""
+    with _db() as conn:
+        row = conn.execute("SELECT agent FROM tasks WHERE task_id=?", (task_id,)).fetchone()
+    return row["agent"] if row else None
+
+
+def _known_agents(conn: Connection) -> list[str]:
     return [r["name"] for r in conn.execute("SELECT name FROM agents ORDER BY name")]
 
 
-def _resolve_target(conn: sqlite3.Connection, text: str) -> tuple[str | None, str | None]:
+def _resolve_target(conn: Connection, text: str) -> tuple[str | None, str | None]:
     """Turn an address into one registered instance: an exact name, or a
     bare harness that designates exactly one registered instance (a legacy
     bare name counts). Ambiguity is refused with the candidates — a message
@@ -479,21 +663,20 @@ def push_task(
     the agent. The notification is a hint for claim_task, not a delivery
     channel: at-least-once still rules, and a woken worker may find an empty
     queue (lease expiry, cancellation) and must tolerate it."""
-    with connect() as conn:
+    with _db() as conn, _write(conn):
         # Explicit refusal of an unregistered or ambiguous agent: keeps the
         # typo detection that hard-coded queues provided, without freezing
         # the cast.
         target, error = _resolve_target(conn, target_agent)
         if error:
             return error
-        try:
-            conn.execute(
-                "INSERT INTO tasks(task_id, agent, payload, priority, created_at, "
-                "max_attempts) VALUES(?,?,?,?,?,?)",
-                (task_id, target, payload, priority, _now(), max_attempts),
-            )
-        except sqlite3.IntegrityError:
+        if conn.execute("SELECT 1 FROM tasks WHERE task_id=?", (task_id,)).fetchone():
             return f"ERROR: task_id '{task_id}' already exists."
+        conn.execute(
+            "INSERT INTO tasks(task_id, agent, payload, priority, created_at, "
+            "max_attempts) VALUES(?,?,?,?,?,?)",
+            (task_id, target, payload, priority, _now(), max_attempts),
+        )
         _log_event(conn, "push", task_id, target, f"priority {priority}")
         if notify:
             # Same transaction as the insert: a task never exists without its
@@ -537,33 +720,43 @@ def wait_for_task(agent: str, timeout_s: float = 300.0, interval_s: float = 2.0)
                 return json.dumps([r["task_id"] for r in rows], ensure_ascii=False)
             if time.monotonic() >= deadline:
                 return "[]"
-            time.sleep(min(interval_s, max(0.0, deadline - time.monotonic())))
+            conn.dialect.pause(conn, min(interval_s, max(0.0, deadline - time.monotonic())))
     finally:
         conn.close()
 
 
-def _requeue_expired(conn: sqlite3.Connection) -> None:
+def _requeue_expired(conn: Connection) -> None:
+    """Re-offer (or dead-letter) the tasks whose lease expired. Callers
+    outside a write transaction race each other: every UPDATE re-checks
+    the row it read (still claimed, still expired, same attempt), so a
+    task claimed again in between is left alone and each transition is
+    journaled once."""
+    now = _now()
     expired = conn.execute(
         "SELECT task_id, agent, attempts, max_attempts FROM tasks "
         "WHERE status='claimed' AND lease_deadline < ?",
-        (_now(),),
+        (now,),
     ).fetchall()
     for row in expired:
         if row["attempts"] >= row["max_attempts"]:
-            conn.execute(
+            if not conn.execute(
                 "UPDATE tasks SET status='dead', claimed_at=NULL, lease_deadline=NULL "
-                "WHERE task_id=?",
-                (row["task_id"],),
-            )
+                "WHERE task_id=? AND status='claimed' AND lease_deadline < ? "
+                "AND attempts=?",
+                (row["task_id"], now, row["attempts"]),
+            ).rowcount:
+                continue
             _log_event(conn, "dead", row["task_id"], row["agent"],
                        f"lease expired after attempt {row['attempts']}/"
                        f"{row['max_attempts']} — dead-lettered (requeue to revive)")
         else:
-            conn.execute(
+            if not conn.execute(
                 "UPDATE tasks SET status='queued', claimed_at=NULL, lease_deadline=NULL "
-                "WHERE task_id=?",
-                (row["task_id"],),
-            )
+                "WHERE task_id=? AND status='claimed' AND lease_deadline < ? "
+                "AND attempts=?",
+                (row["task_id"], now, row["attempts"]),
+            ).rowcount:
+                continue
             _log_event(conn, "expire", row["task_id"], row["agent"],
                        "lease expired — task re-offered")
 
@@ -573,12 +766,10 @@ def claim_task(agent_name: str, lease_seconds: int = 900, task_id: str | None = 
     under lease — or one specific queued task of one's own queue when
     task_id is given (logged escape hatch; no cross-queue poaching)."""
     deadline = (datetime.now(timezone.utc) + timedelta(seconds=lease_seconds)).isoformat()
-    with connect() as conn:
-        conn.execute("BEGIN IMMEDIATE")
-        try:
+    with _db() as conn:
+        with _write(conn):
             target, error = _resolve_target(conn, agent_name)
             if error:
-                conn.execute("COMMIT")
                 return error
             _requeue_expired(conn)
             if task_id is None:
@@ -589,7 +780,6 @@ def claim_task(agent_name: str, lease_seconds: int = 900, task_id: str | None = 
                     (target,),
                 ).fetchone()
                 if row is None:
-                    conn.execute("COMMIT")
                     return "NO_TASK"
             else:
                 row = conn.execute(
@@ -598,16 +788,13 @@ def claim_task(agent_name: str, lease_seconds: int = 900, task_id: str | None = 
                     (task_id,),
                 ).fetchone()
                 if row is None:
-                    conn.execute("COMMIT")
                     return f"ERROR: unknown task '{task_id}'."
                 if row["agent"] != target:
-                    conn.execute("COMMIT")
                     return (
                         f"ERROR: task '{task_id}' belongs to {row['agent']}'s queue — "
                         "no cross-queue claiming."
                     )
                 if row["status"] != "queued":
-                    conn.execute("COMMIT")
                     return f"ERROR: task '{task_id}' is not queued (status: {row['status']})."
             conn.execute(
                 "UPDATE tasks SET status='claimed', claimed_at=?, lease_deadline=?, "
@@ -617,10 +804,6 @@ def claim_task(agent_name: str, lease_seconds: int = 900, task_id: str | None = 
             _log_event(conn, "claim", row["task_id"], target,
                        f"attempt {row['attempts'] + 1}, lease until {deadline}"
                        + (" (targeted)" if task_id is not None else ""))
-            conn.execute("COMMIT")
-        except Exception:
-            conn.execute("ROLLBACK")
-            raise
     return json.dumps(
         {
             "task_id": row["task_id"],
@@ -648,28 +831,24 @@ def publish_result(
     the worker that took the task over. `force` is the orchestrator's
     explicit override for all three checks."""
     author = agent_name.strip().lower()
-    with connect() as conn:
-        conn.execute("BEGIN IMMEDIATE")
-        try:
+    with _db() as conn:
+        with _write(conn):
             row = conn.execute(
                 "SELECT agent, status, attempts FROM tasks WHERE task_id=?",
                 (task_id,),
             ).fetchone()
             if not force:
                 if row is None:
-                    conn.execute("COMMIT")
                     return (
                         f"ERROR: unknown task '{task_id}' — nothing to settle "
                         "(force=True to store a result anyway)."
                     )
                 if row["agent"] != author:
-                    conn.execute("COMMIT")
                     return (
                         f"ERROR: task '{task_id}' belongs to {row['agent']}'s queue; "
                         f"'{author}' cannot settle it (force=True to override)."
                     )
                 if attempt is not None and attempt < row["attempts"]:
-                    conn.execute("COMMIT")
                     return (
                         f"ERROR: stale attempt token {attempt} < {row['attempts']} — "
                         f"the lease expired and task '{task_id}' was re-offered; "
@@ -688,26 +867,19 @@ def publish_result(
             if force:
                 detail += " (forced)"
             _log_event(conn, "publish", task_id, author, detail)
-            conn.execute("COMMIT")
-        except Exception:
-            conn.execute("ROLLBACK")
-            raise
     return f"OK: result for '{task_id}' published by {author}."
 
 
 def cancel_task(task_id: str) -> str:
     """Cancel a task that is not settled yet (terminal status `cancelled`)."""
-    with connect() as conn:
-        conn.execute("BEGIN IMMEDIATE")
-        try:
+    with _db() as conn:
+        with _write(conn):
             row = conn.execute(
                 "SELECT agent, status FROM tasks WHERE task_id=?", (task_id,)
             ).fetchone()
             if row is None:
-                conn.execute("COMMIT")
                 return f"ERROR: unknown task '{task_id}'."
             if row["status"] in ("done", "cancelled"):
-                conn.execute("COMMIT")
                 return f"ERROR: task '{task_id}' is already {row['status']}."
             conn.execute(
                 "UPDATE tasks SET status='cancelled', claimed_at=NULL, "
@@ -716,10 +888,6 @@ def cancel_task(task_id: str) -> str:
             )
             _log_event(conn, "cancel", task_id, row["agent"],
                        f"was {row['status']}")
-            conn.execute("COMMIT")
-        except Exception:
-            conn.execute("ROLLBACK")
-            raise
     return f"OK: task '{task_id}' cancelled."
 
 
@@ -728,21 +896,17 @@ def requeue_task(task_id: str) -> str:
     attempts (the attempt counter itself never goes backwards: it is the
     fencing token of publish_result). A done task stays done — push a new
     task_id instead of rewriting history."""
-    with connect() as conn:
-        conn.execute("BEGIN IMMEDIATE")
-        try:
+    with _db() as conn:
+        with _write(conn):
             row = conn.execute(
                 "SELECT agent, status, attempts, max_attempts FROM tasks WHERE task_id=?",
                 (task_id,),
             ).fetchone()
             if row is None:
-                conn.execute("COMMIT")
                 return f"ERROR: unknown task '{task_id}'."
             if row["status"] == "queued":
-                conn.execute("COMMIT")
                 return f"ERROR: task '{task_id}' is already queued."
             if row["status"] == "done":
-                conn.execute("COMMIT")
                 return (
                     f"ERROR: task '{task_id}' is settled — push a new task_id "
                     "instead of requeueing a done task."
@@ -755,10 +919,6 @@ def requeue_task(task_id: str) -> str:
             )
             _log_event(conn, "requeue", task_id, row["agent"],
                        f"was {row['status']}; max_attempts re-armed to {rearmed}")
-            conn.execute("COMMIT")
-        except Exception:
-            conn.execute("ROLLBACK")
-            raise
     return f"OK: task '{task_id}' requeued."
 
 
@@ -766,17 +926,14 @@ def extend_lease(task_id: str, lease_seconds: int = 900) -> str:
     """Renew the lease of a claimed task (deadline = now + lease_seconds):
     long work extends instead of overshooting and being re-offered."""
     deadline = (datetime.now(timezone.utc) + timedelta(seconds=lease_seconds)).isoformat()
-    with connect() as conn:
-        conn.execute("BEGIN IMMEDIATE")
-        try:
+    with _db() as conn:
+        with _write(conn):
             row = conn.execute(
                 "SELECT agent, status FROM tasks WHERE task_id=?", (task_id,)
             ).fetchone()
             if row is None:
-                conn.execute("COMMIT")
                 return f"ERROR: unknown task '{task_id}'."
             if row["status"] != "claimed":
-                conn.execute("COMMIT")
                 return (
                     f"ERROR: task '{task_id}' is not claimed "
                     f"(status: {row['status']}) — no lease to extend."
@@ -787,15 +944,11 @@ def extend_lease(task_id: str, lease_seconds: int = 900) -> str:
             )
             _log_event(conn, "extend", task_id, row["agent"],
                        f"lease until {deadline}")
-            conn.execute("COMMIT")
-        except Exception:
-            conn.execute("ROLLBACK")
-            raise
     return f"OK: lease of '{task_id}' extended until {deadline}."
 
 
 def read_result(task_id: str) -> str:
-    with connect() as conn:
+    with _db() as conn:
         row = conn.execute(
             "SELECT author, content, updated_at FROM results WHERE task_id=?",
             (task_id,),
@@ -822,20 +975,19 @@ def _parse_capabilities(capabilities: str | None) -> dict | str:
     return parsed
 
 
-def _set_model(conn: sqlite3.Connection, agent: str, model: str, force: bool) -> None:
+def _set_model(conn: Connection, agent: str, model: str, force: bool) -> None:
     """Record the model carrying an instance in its presence row (created
     at default TTL if absent). `force` overwrites a stored value — an
     explicit declaration; without it (environment echo) a declared model
     is kept."""
-    row = conn.execute("SELECT model FROM presence WHERE agent=?", (agent,)).fetchone()
-    if row is None:
-        conn.execute(
-            "INSERT INTO presence(agent, last_seen, ttl_seconds, capabilities, model) "
-            "VALUES(?,?,?,?,?)",
-            (agent, _now(), DEFAULT_PRESENCE_TTL, "{}", model),
-        )
-    elif force or not row["model"]:
-        conn.execute("UPDATE presence SET model=? WHERE agent=?", (model, agent))
+    # One upsert: a heartbeat written meanwhile outside the writer lock (an
+    # autocommit statement) must not make this INSERT collide.
+    conn.execute(
+        "INSERT INTO presence(agent, last_seen, ttl_seconds, capabilities, model) "
+        "VALUES(?,?,?,?,?) ON CONFLICT(agent) DO UPDATE SET model = CASE "
+        "WHEN ? OR presence.model = '' THEN excluded.model ELSE presence.model END",
+        (agent, _now(), DEFAULT_PRESENCE_TTL, "{}", model, bool(force)),
+    )
 
 
 def heartbeat(
@@ -850,7 +1002,7 @@ def heartbeat(
     parsed = _parse_capabilities(capabilities)
     if isinstance(parsed, str):
         return parsed
-    with connect() as conn:
+    with _db() as conn:
         agent, error = _resolve_target(conn, agent)
         if error:
             return error
@@ -887,7 +1039,7 @@ def touch_presence(agent: str, model: str | None = None) -> None:
     agent = agent.strip().lower()
     if not agent:
         return
-    with connect() as conn:
+    with _db() as conn:
         row = conn.execute(
             "SELECT ttl_seconds, capabilities, model FROM presence WHERE agent=?", (agent,)
         ).fetchone()
@@ -912,15 +1064,15 @@ def touch_identity(identity: dict) -> None:
     presence exist under its own composed name — a client named by its
     environment never has to call register_agent — then refreshes its
     presence. Failures must not break the tool call: callers swallow them."""
-    name = identity.get("agent_name")
+    name = str(identity.get("agent_name") or "").strip().lower()
     if not name or not _NAME_RE.match(name):
         return
-    with connect() as conn:
+    with _db() as conn, _write(conn):
         if conn.execute("SELECT 1 FROM agents WHERE name=?", (name,)).fetchone() is None:
             harness, workspace = split_name(name)
             conn.execute(
-                "INSERT OR IGNORE INTO agents(name, description, registered_at, harness, "
-                "workspace, cwd) VALUES(?,?,?,?,?,?)",
+                "INSERT INTO agents(name, description, registered_at, harness, "
+                "workspace, cwd) VALUES(?,?,?,?,?,?) ON CONFLICT(name) DO NOTHING",
                 (name, "", _now(), harness, workspace, identity.get("cwd") or ""),
             )
             _log_event(conn, "register", agent=name, detail="auto (connected client)")
@@ -931,7 +1083,7 @@ def touch_identity(identity: dict) -> None:
 
 def list_presence() -> str:
     """Return every known agent (registered or seen) with a computed status."""
-    with connect() as conn:
+    with _db() as conn:
         rows = conn.execute(
             """
             SELECT a.name, a.description, a.harness, a.workspace, a.cwd,
@@ -984,16 +1136,35 @@ def announce(author: str, topic: str, message: str) -> str:
         return "ERROR: topic must match ^[a-z0-9-]{1,64}$."
     if len(message.encode("utf-8")) > 16 * 1024:
         return "ERROR: message exceeds 16 KiB."
-    with connect() as conn:
+    with _db() as conn, _write(conn):
         author, error = _resolve_target(conn, author)
         if error:
             return error.replace("agent", "author", 1)
-        cur = conn.execute(
+        seq = _insert_id(
+            conn,
             "INSERT INTO channel(author, at, topic, message) VALUES(?,?,?,?)",
             (author, _now(), topic, message),
         )
         _log_event(conn, "announce", agent=author, detail=topic)
-        seq = cur.lastrowid
+    return json.dumps({"seq": seq}, ensure_ascii=False)
+
+
+def system_announce(topic: str, message: str) -> str:
+    """A channel entry written by the mechanism itself — author `bus`, like
+    the task-queued notifications — for events no agent authored (a machine
+    paired or revoked on a hub). Same limits as announce."""
+    topic = topic.strip().lower()
+    if not _TOPIC_RE.match(topic):
+        return "ERROR: topic must match ^[a-z0-9-]{1,64}$."
+    if len(message.encode("utf-8")) > 16 * 1024:
+        return "ERROR: message exceeds 16 KiB."
+    with _db() as conn, _write(conn):
+        seq = _insert_id(
+            conn,
+            "INSERT INTO channel(author, at, topic, message) VALUES(?,?,?,?)",
+            ("bus", _now(), topic, message),
+        )
+        _log_event(conn, "announce", agent="bus", detail=topic)
     return json.dumps({"seq": seq}, ensure_ascii=False)
 
 
@@ -1013,7 +1184,7 @@ def read_channel(
         return "ERROR: provide either agent or since_seq."
     if agent is not None and since_seq is None and topic is not None:
         return "ERROR: topic filter is not allowed with a cursor read."
-    with connect() as conn:
+    with _db() as conn:
         if agent is not None and since_seq is None:
             agent, error = _resolve_target(conn, agent)
             if error:
@@ -1032,8 +1203,7 @@ def read_channel(
                     (since_seq, limit),
                 ).fetchall()
         else:
-            conn.execute("BEGIN IMMEDIATE")
-            try:
+            with _write(conn):
                 cursor = conn.execute(
                     "SELECT last_seq FROM channel_cursor WHERE agent=?", (agent,)
                 ).fetchone()
@@ -1050,10 +1220,6 @@ def read_channel(
                         "ON CONFLICT(agent) DO UPDATE SET last_seq=excluded.last_seq",
                         (agent, new_last),
                     )
-                conn.execute("COMMIT")
-            except Exception:
-                conn.execute("ROLLBACK")
-                raise
     return json.dumps([dict(r) for r in rows], ensure_ascii=False)
 
 
@@ -1074,7 +1240,7 @@ def notify(
         return "ERROR: empty target agent."
     if len(message.encode("utf-8")) > 16 * 1024:
         return "ERROR: message exceeds 16 KiB."
-    with connect() as conn:
+    with _db() as conn, _write(conn):
         author, error = _resolve_target(conn, author)
         if error:
             return error.replace("agent", "author", 1)
@@ -1084,7 +1250,8 @@ def notify(
         if reply_to is not None:
             if not _is_broadcast(conn, reply_to):
                 return f"ERROR: reply_to {reply_to} is not a broadcast id."
-        cur = conn.execute(
+        seq = _insert_id(
+            conn,
             "INSERT INTO notifications(target, author, at, message, reply_to, wake) "
             "VALUES(?,?,?,?,?,?)",
             (target, author, _now(), message, reply_to, 1 if wake else 0),
@@ -1092,17 +1259,16 @@ def notify(
         _log_event(conn, "notify", agent=author,
                    detail=target + (f" (reply to broadcast {reply_to})" if reply_to else "")
                    + (" (wake)" if wake else ""))
-        seq = cur.lastrowid
     return json.dumps({"seq": seq}, ensure_ascii=False)
 
 
-def _is_broadcast(conn: sqlite3.Connection, broadcast_id: int) -> bool:
+def _is_broadcast(conn: Connection, broadcast_id: int) -> bool:
     return conn.execute(
         "SELECT 1 FROM channel WHERE seq=? AND topic='broadcast'", (broadcast_id,)
     ).fetchone() is not None
 
 
-def _alive_set(conn: sqlite3.Connection) -> set[str]:
+def _alive_set(conn: Connection) -> set[str]:
     now = datetime.fromisoformat(_now())
     alive = set()
     for r in conn.execute("SELECT agent, last_seen, ttl_seconds FROM presence"):
@@ -1112,7 +1278,7 @@ def _alive_set(conn: sqlite3.Connection) -> set[str]:
     return alive
 
 
-def _expand_scope(conn: sqlite3.Connection, scope: str | list) -> tuple[list[str], str | None]:
+def _expand_scope(conn: Connection, scope: str | list) -> tuple[list[str], str | None]:
     """Recipients of a broadcast: `*` (every registered agent), `harness@*`
     (every instance of a harness, a legacy bare row included), `*@workspace`
     (every agent of a workspace), `model:<glob>` (instances whose declared
@@ -1162,6 +1328,12 @@ def _expand_scope(conn: sqlite3.Connection, scope: str | list) -> tuple[list[str
     return names, None if names else "ERROR: empty scope."
 
 
+def broadcast_recipients(scope: str | list) -> tuple[list[str], str | None]:
+    """Read-only: who a broadcast scope designates (see _expand_scope)."""
+    with _db() as conn:
+        return _expand_scope(conn, scope)
+
+
 def broadcast(
     author: str, message: str, scope: str | list = "*",
     alive_only: bool = False, wake: bool = False,
@@ -1178,29 +1350,25 @@ def broadcast(
         return "ERROR: empty author."
     if len(message.encode("utf-8")) > 16 * 1024:
         return "ERROR: message exceeds 16 KiB."
-    with connect() as conn:
-        conn.execute("BEGIN IMMEDIATE")
-        try:
+    with _db() as conn:
+        with _write(conn):
             author_name, error = _resolve_target(conn, author)
             if error:
-                conn.execute("COMMIT")
                 return error.replace("agent", "author", 1)
             names, error = _expand_scope(conn, scope)
             if error:
-                conn.execute("COMMIT")
                 return error
             alive = _alive_set(conn)
             if alive_only:
                 names = [n for n in names if n in alive]
                 if not names:
-                    conn.execute("COMMIT")
                     return "ERROR: no alive recipient in scope."
             scope_text = scope if isinstance(scope, str) else ",".join(scope)
-            cur = conn.execute(
+            broadcast_id = _insert_id(
+                conn,
                 "INSERT INTO channel(author, at, topic, message) VALUES(?,?,?,?)",
                 (author_name, _now(), "broadcast", message),
             )
-            broadcast_id = cur.lastrowid
             now = _now()
             for name in names:
                 conn.execute(
@@ -1211,10 +1379,6 @@ def broadcast(
             _log_event(conn, "broadcast", agent=author_name,
                        detail=f"id {broadcast_id}, scope {scope_text} → {len(names)} recipient(s)"
                        + (" (wake)" if wake else ""))
-            conn.execute("COMMIT")
-        except Exception:
-            conn.execute("ROLLBACK")
-            raise
     delivered = [n for n in names if n in alive]
     asleep = [n for n in names if n not in alive]
     return json.dumps(
@@ -1228,7 +1392,7 @@ def replies(broadcast_id: int) -> str:
     """Answers to a broadcast (notifications sent with reply_to=id), oldest
     first — a pure read, no cursor moves. Refused for an id that is not a
     broadcast."""
-    with connect() as conn:
+    with _db() as conn:
         if not _is_broadcast(conn, broadcast_id):
             return f"ERROR: {broadcast_id} is not a broadcast id."
         rows = conn.execute(
@@ -1248,12 +1412,10 @@ def poll(agent: str, limit: int = 100) -> str:
         limit = 1
     elif limit > 1000:
         limit = 1000
-    with connect() as conn:
-        conn.execute("BEGIN IMMEDIATE")
-        try:
+    with _db() as conn:
+        with _write(conn):
             target, error = _resolve_target(conn, agent)
             if error:
-                conn.execute("COMMIT")
                 return error
             cursor = conn.execute(
                 "SELECT last_seq FROM notification_cursor WHERE target=?", (target,)
@@ -1270,16 +1432,12 @@ def poll(agent: str, limit: int = 100) -> str:
                     "ON CONFLICT(target) DO UPDATE SET last_seq=excluded.last_seq",
                     (target, rows[-1]["seq"]),
                 )
-            conn.execute("COMMIT")
-        except Exception:
-            conn.execute("ROLLBACK")
-            raise
     return json.dumps(
         [{**dict(r), "wake": bool(r["wake"])} for r in rows], ensure_ascii=False
     )
 
 
-def _pending(conn: sqlite3.Connection, target: str) -> dict:
+def _pending(conn: Connection, target: str) -> dict:
     """Signals waiting for an instance, without moving any cursor: queued
     task ids (highest priority first), unread notifications (total, those
     flagged `wake`, and the broadcast ids among the flagged ones)."""
@@ -1322,7 +1480,7 @@ def _signalled(pending: dict, wanted: set[str]) -> bool:
 
 def pending_signals(agent: str) -> str:
     """Snapshot of what waits for an instance (see _pending) — read only."""
-    with connect() as conn:
+    with _db() as conn:
         target, error = _resolve_target(conn, agent)
         if error:
             return error
@@ -1358,7 +1516,7 @@ def wait_signal(
                 return json.dumps({"signalled": True, **pending}, ensure_ascii=False)
             if time.monotonic() >= deadline:
                 return json.dumps({"signalled": False, **pending}, ensure_ascii=False)
-            time.sleep(min(interval_s, max(0.0, deadline - time.monotonic())))
+            conn.dialect.pause(conn, min(interval_s, max(0.0, deadline - time.monotonic())))
     finally:
         conn.close()
 
@@ -1374,13 +1532,11 @@ def acquire_wake_lock(agent: str, lease_seconds: int = 600, holder: str = "") ->
         return "ERROR: empty agent."
     token = hashlib.sha256(f"{target}{time.time_ns()}{os.getpid()}".encode()).hexdigest()[:16]
     until = (datetime.now(timezone.utc) + timedelta(seconds=lease_seconds)).isoformat()
-    with connect() as conn:
-        conn.execute("BEGIN IMMEDIATE")
-        try:
+    with _db() as conn:
+        with _write(conn):
             row = conn.execute(
                 "SELECT token, until FROM wake_locks WHERE agent=?", (target,)).fetchone()
             if row is not None and row["until"] > _now():
-                conn.execute("COMMIT")
                 return "BUSY"
             conn.execute(
                 "INSERT INTO wake_locks(agent, token, until, holder) VALUES(?,?,?,?) "
@@ -1388,34 +1544,33 @@ def acquire_wake_lock(agent: str, lease_seconds: int = 600, holder: str = "") ->
                 "until=excluded.until, holder=excluded.holder",
                 (target, token, until, holder),
             )
-            conn.execute("COMMIT")
-        except Exception:
-            conn.execute("ROLLBACK")
-            raise
     return json.dumps({"token": token, "until": until}, ensure_ascii=False)
 
 
 def renew_wake_lock(agent: str, token: str, lease_seconds: int = 600) -> str:
+    """Extend a wake lock still held (an expired lock may already belong to
+    another supervisor: renewing it would let two of them launch)."""
     target = agent.strip().lower()
     until = (datetime.now(timezone.utc) + timedelta(seconds=lease_seconds)).isoformat()
-    with connect() as conn:
-        cur = conn.execute(
-            "UPDATE wake_locks SET until=? WHERE agent=? AND token=?", (until, target, token))
-    return "OK" if cur.rowcount else "ERROR: wake lock not held with this token."
+    with _db() as conn, _write(conn):
+        held = conn.execute(
+            "UPDATE wake_locks SET until=? WHERE agent=? AND token=? AND until > ?",
+            (until, target, token, _now())).rowcount
+    return "OK" if held else "ERROR: wake lock not held with this token (or expired)."
 
 
 def release_wake_lock(agent: str, token: str) -> str:
     target = agent.strip().lower()
-    with connect() as conn:
-        cur = conn.execute(
-            "DELETE FROM wake_locks WHERE agent=? AND token=?", (target, token))
-    return "OK" if cur.rowcount else "ERROR: wake lock not held with this token."
+    with _db() as conn, _write(conn):
+        held = conn.execute(
+            "DELETE FROM wake_locks WHERE agent=? AND token=?", (target, token)).rowcount
+    return "OK" if held else "ERROR: wake lock not held with this token."
 
 
 def record_wake(agent: str, detail: str) -> None:
     """Journal a wake-up transition (`wake` event: start/end/refused) — the
     budget `wake_count` is computed from these starts."""
-    with connect() as conn:
+    with _db() as conn:
         _log_event(conn, "wake", agent=agent.strip().lower(), detail=detail)
 
 
@@ -1423,7 +1578,7 @@ def wake_count(agent: str, window_seconds: int = 3600) -> int:
     """Launches of an instance within the window (events `wake` whose detail
     starts with `start`)."""
     since = (datetime.now(timezone.utc) - timedelta(seconds=window_seconds)).isoformat()
-    with connect() as conn:
+    with _db() as conn:
         row = conn.execute(
             "SELECT COUNT(*) c FROM events WHERE event='wake' AND agent=? AND at >= ? "
             "AND detail LIKE 'start%'", (agent.strip().lower(), since)).fetchone()
@@ -1431,7 +1586,7 @@ def wake_count(agent: str, window_seconds: int = 3600) -> int:
 
 
 def get_system_state() -> str:
-    with connect() as conn:
+    with _db() as conn:
         _requeue_expired(conn)
         agents = {
             r["name"]: {
@@ -1489,8 +1644,9 @@ def get_system_state() -> str:
 
 def get_events(task_id: str | None = None, agent: str | None = None, limit: int = 100) -> str:
     """Chronological transition history (register/push/claim/expire/publish),
-    filterable by task and/or agent; the `limit` most recent, oldest first."""
-    query = "SELECT task_id, agent, event, at, detail FROM events"
+    filterable by task and/or agent; the `limit` most recent, oldest first.
+    Events written through a hub carry the calling `machine`."""
+    query = "SELECT task_id, agent, event, at, detail, machine FROM events"
     conds: list[str] = []
     params: list[object] = []
     if task_id:
@@ -1503,7 +1659,10 @@ def get_events(task_id: str | None = None, agent: str | None = None, limit: int 
         query += " WHERE " + " AND ".join(conds)
     query += " ORDER BY id DESC LIMIT ?"
     params.append(limit)
-    with connect() as conn:
+    with _db() as conn:
         rows = [dict(r) for r in conn.execute(query, params)]
     rows.reverse()
+    for row in rows:
+        if not row["machine"]:
+            del row["machine"]  # local mode: the history reads as before
     return json.dumps(rows, indent=2, ensure_ascii=False)

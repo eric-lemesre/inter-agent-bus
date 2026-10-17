@@ -20,6 +20,29 @@ every change and are summarized below.
 
 - `servers/shared_memory/store.py` — storage core. **All state logic
   lives here.** No MCP dependency, ever.
+- `servers/shared_memory/dialect.py` — SQL dialect layer: connection,
+  schema, write transaction, generated ids, introspection, wait pauses.
+  store.py writes portable SQL and asks the dialect for the rest; SQLite
+  by default, PostgreSQL for a `postgresql://` target (extra
+  `[postgres]`). A change to the SQL must pass both engines.
+- `servers/shared_memory/access.py` — access layer: `bus.<operation>`
+  forwards to the backend of the moment (store.py locally, a hub client
+  when `IAB_HUB` is set). **Wrappers and drivers call operations through
+  `bus`, never `store.` directly**; only pure helpers (identity, names)
+  are called on store.py.
+- `servers/shared_memory/hub.py` — multi-machine hub (`iab hub init`,
+  `iab hub serve`): store.py over HTTPS with mutual TLS, one route per
+  operation. Thin like the MCP server; machines live in `registry.py`,
+  certificates in `pki.py` (needs the `[hub]` extra, `cryptography`).
+- `servers/shared_memory/pairing.py` — the hub's pairing authority
+  (requests, approvals, invitations, renewal → certificates); `join.py`
+  and `admin.py` are the client drivers (`iab join`, `iab approve`,
+  `iab invite`, `iab machines`, `iab revoke`, `iab renew`).
+- `servers/shared_memory/authz.py` — the hub's authorization rules
+  (instance ↔ machine binding, orchestrator operations, `accepts_from`),
+  driven by the `policy` of hub.json — never by code.
+- `servers/shared_memory/remote.py` — the hub client behind `bus` when
+  `IAB_HUB` is set (stdlib `ssl` + `http.client`; trusts the bus CA only).
 - `servers/shared_memory/server.py` — MCP wrapper (SDK >= 2.0,
   `MCPServer`). Thin: one `@mcp.tool()` per store function, no logic.
 - `servers/shared_memory/cli.py` — console entry point (`iab`, see
@@ -37,6 +60,9 @@ every change and are summarized below.
 - `servers/shared_memory/store_test.py` — tests for the core, runnable
   **without** the MCP SDK, including cross-process sharing and claim
   contention.
+- `servers/shared_memory/hub_test.py` — tests of the hub on the loopback
+  interface (mTLS, refusals, revocation, TLS inspection, long-poll);
+  need the `[hub]` extra, not the MCP SDK.
 - `skills/` — agent-facing skills (router and worker sides).
 - `mcp.json`, `plugin.json` — Agent Plugins manifests.
 
@@ -73,7 +99,8 @@ every change and are summarized below.
    `ORCHESTRATOR_*` names (plus the pre-rename default DB path) must
    remain honored — do not remove the fallbacks.
 6. **No new dependencies lightly.** The core currently needs only the
-   standard library; the server needs only the MCP SDK. Keep it that
+   standard library; the server needs only the MCP SDK; the hub and the
+   pairing client need only `cryptography` (extra `[hub]`). Keep it that
    way unless a dependency removes real complexity (e.g.
    `platformdirs`).
 
@@ -95,6 +122,10 @@ every change and are summarized below.
 python3 -m venv .venv                          # py -m venv .venv on Windows
 .venv/bin/pip install -r requirements.txt -e . # .venv\Scripts\pip on Windows
 .venv/bin/python servers/shared_memory/store_test.py
+.venv/bin/pip install -e '.[hub]'              # hub tests and hub smoke
+.venv/bin/python servers/shared_memory/hub_test.py
+# Both suites again on PostgreSQL (extra [postgres]; an EMPTY test database):
+IAB_TEST_POSTGRES=postgresql://… .venv/bin/python servers/shared_memory/store_test.py
 python3 scripts/smoke.py       # end-to-end acceptance, CLI only
 ```
 

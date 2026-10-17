@@ -3,18 +3,23 @@
 executable on any platform: from a clean bus, push a task, have a
 headless `iab worker` execute it, read the result, run a guarded
 review on a diff, and consult the history — without a single
-`python -c` against the store. Stand-in commands (this interpreter)
-play the worker and reviewer CLIs so the script runs anywhere.
+`python -c` against the store. The same scenario then runs through a
+hub on the loopback interface (when the [hub] extra is installed).
+Stand-in commands (this interpreter) play the worker and reviewer CLIs
+so the script runs anywhere.
 
     python3 scripts/smoke.py        # py scripts\\smoke.py on Windows
 """
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
+import socket
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -46,29 +51,114 @@ def run(step: str, args: list[str], stdin: str | None = None) -> str:
     return done.stdout
 
 
-with tempfile.TemporaryDirectory() as tmp:
-    env = os.environ.copy()
-    env["IAB_DB"] = str(Path(tmp) / "smoke.db")
-    env.pop("ORCHESTRATOR_DB", None)
-
-    run("register the worker agent", ["register", "kimi", "-d", "smoke stand-in"])
-    run("push a task, payload on stdin", ["push", "kimi", "T1", "-"],
+def scenario(tmp: Path, where: str) -> None:
+    run(f"register the worker agent ({where})", ["register", "kimi", "-d", "smoke stand-in"])
+    run(f"push a task, payload on stdin ({where})", ["push", "kimi", "T1", "-"],
         stdin="do the thing")
-    run("headless worker claims, executes, publishes",
+    run(f"headless worker claims, executes, publishes ({where})",
         ["worker", "--agent", "kimi", "--once", "--",
          sys.executable, "-c", WORKER_STANDIN])
-    out = run("read the result", ["result", "T1"])
+    out = run(f"read the result ({where})", ["result", "T1"])
     assert json.loads(out)["content"].strip() == "executed: do the thing", out
 
     diff_path = Path(tmp) / "change.diff"
     diff_path.write_text(DIFF, encoding="utf-8")
-    out = run("guarded review of a diff",
+    out = run(f"guarded review of a diff ({where})",
               ["review", "--agent", "kimi", "--diff", str(diff_path),
                "--task-id", "R1", "--", sys.executable, "-c", REVIEWER_STANDIN])
     assert json.loads(out)["verdict"] == "approve", out
 
-    out = run("consult the transition history", ["log", "T1"])
+    out = run(f"consult the transition history ({where})", ["log", "T1"])
     assert [e["event"] for e in json.loads(out)] == ["push", "claim", "publish"], out
 
+
+def free_port() -> int:
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+base = {k: v for k, v in os.environ.items()
+        if k not in ("IAB_DB", "ORCHESTRATOR_DB", "IAB_HUB", "IAB_HUB_HOME",
+                     "IAB_MACHINE_DIR")}
+
+with tempfile.TemporaryDirectory() as tmp:
+    env = {**base, "IAB_DB": str(Path(tmp) / "smoke.db")}
+    scenario(Path(tmp), "local bus")
+
+if importlib.util.find_spec("cryptography") is None:
+    print("smoke: hub scenario skipped — the [hub] extra (cryptography) is not installed.")
+else:
+    with tempfile.TemporaryDirectory() as tmp:
+        port = free_port()
+        env = {**base, "IAB_HUB_HOME": str(Path(tmp) / "hub"),
+               "IAB_MACHINE_DIR": str(Path(tmp) / "machine")}
+        run("create a hub on the loopback interface",
+            ["hub", "init", "--name", "127.0.0.1", "--machine", "smoke", "--port", str(port)])
+        hub_proc = subprocess.Popen(CLI + ["hub", "serve", "--listen", f"127.0.0.1:{port}"],
+                                    env=env, stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.DEVNULL)
+        try:
+            env["IAB_HUB"] = f"https://127.0.0.1:{port}"
+            for _ in range(50):
+                ping = subprocess.run(CLI + ["whoami"], env=env, capture_output=True, text=True)
+                if '"db_source": "hub"' in ping.stdout and '"error"' not in ping.stdout:
+                    break
+                time.sleep(0.1)
+            scenario(Path(tmp), "through the hub")
+
+            # A second machine joins by invitation (the Ansible path: token
+            # on stdin, never in argv) and works a task the first pushed.
+            token = run("invite a second machine", ["invite", "second"]).strip()
+            first = dict(env)
+            env = {**first, "IAB_MACHINE_DIR": str(Path(tmp) / "second")}
+            run("the second machine joins with the invitation",
+                ["join", f"127.0.0.1:{port + 1}", "--name", "second", "--token", "-"],
+                stdin=token + "\n")
+            run("the second machine registers its own instance",
+                ["register", "kimi@second", "-d", "worker on the second machine"])
+            refused = subprocess.run(CLI + ["publish", "kimi", "T1", "forged"], env=env,
+                                     capture_output=True, text=True)
+            print(("ok — " if refused.returncode != 0 and "belongs to machine" in refused.stdout
+                   else "FAIL: ") + "the second machine cannot act as the first one's agent")
+            if refused.returncode == 0:
+                sys.exit(1)
+            env = first
+            run("the first machine pushes work for the second",
+                ["push", "kimi@second", "T2", "-"], stdin="cross-machine")
+            env = {**first, "IAB_MACHINE_DIR": str(Path(tmp) / "second")}
+            run("the second machine's worker executes it",
+                ["worker", "--agent", "kimi@second", "--once", "--",
+                 sys.executable, "-c", WORKER_STANDIN])
+            env = first
+            out = run("the first machine reads the result", ["result", "T2"])
+            assert json.loads(out)["content"].strip() == "executed: cross-machine", out
+            out = run("the admin lists both machines", ["machines"])
+            assert {m["name"] for m in json.loads(out)} == {"smoke", "second"}, out
+
+            # The second machine's local bus moves to the running hub, its
+            # instance bound to it; its queue is then worked through the hub.
+            local = {k: v for k, v in first.items() if k != "IAB_HUB"}
+            env = {**local, "IAB_DB": str(Path(tmp) / "second-local.db")}
+            run("the second machine had a local bus",
+                ["register", "local@second", "-d", "before the hub"])
+            run("with work still queued in it", ["push", "local@second", "T3", "-"],
+                stdin="migrated")
+            env = local
+            run("the hub imports that bus, bound to the second machine",
+                ["hub", "import", str(Path(tmp) / "second-local.db"), "--bind", "second"])
+            env = {**first, "IAB_MACHINE_DIR": str(Path(tmp) / "second")}
+            run("the second machine works its migrated queue through the hub",
+                ["worker", "--agent", "local@second", "--once", "--",
+                 sys.executable, "-c", WORKER_STANDIN])
+            env = first
+            out = run("the migrated task's result is on the hub", ["result", "T3"])
+            assert json.loads(out)["content"].strip() == "executed: migrated", out
+        finally:
+            hub_proc.terminate()
+            hub_proc.wait(timeout=10)
+
 print("smoke: OK — push → worker → result → guarded review → log, "
-      "all through the CLI.")
+      "all through the CLI, on the local bus and through a hub; "
+      "a second machine paired by invitation works across machines; "
+      "a local bus migrates into the hub.")

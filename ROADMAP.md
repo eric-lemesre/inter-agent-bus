@@ -23,7 +23,9 @@ change that violates an invariant is wrong even if it closes a request.
    `store_test.py` runnable without the MCP SDK.
 3. **stdio transport, SQLite bus.** One server instance per client,
    sharing through the common database (WAL, immediate transactions).
-   No daemon to supervise.
+   No daemon to supervise. The multi-machine hub (phase 9) is an opt-in
+   addition: without `IAB_HUB` none of this changes; with it, the hub is
+   the only daemon of the setup and the logic stays in `store.py`.
 4. **Cross-platform.** Linux, macOS and Windows are all first-class.
    Tooling is pure Python (no shell-script-only path), file paths go
    through `pathlib`, platform defaults through a `platformdirs`-style
@@ -280,6 +282,68 @@ unnoticed for six weeks, and a reply sat unread for twenty hours.
   task|notification|any`, `iab signals`, `iab wake`, `iab supervise`.
 - **Skill** `worker-wake` rewritten around the roster launcher and the
   open-session path (`iab watch --on any` as a background task).
+
+## Phase 9 — Multi-machine bus
+
+Study and decisions of 2026-10-17:
+[`AMELIORATIONS-2026-10-17-multi-machine.md`](AMELIORATIONS-2026-10-17-multi-machine.md).
+A hub (`iab hub`) exposes `store.py` over HTTPS with mTLS; machines
+pair with it by code, Plex style. Decisions: single hub, one single
+database, `cryptography` in the `[hub]` extra, pairing from the
+Internet closed at first, TPM mandatory for admin machines.
+
+- **9a** — access and dialect layers, `LocalBackend` + SQLite, no
+  behaviour change — **shipped**. `dialect.py` (connection, schema, write
+  transaction, ids, introspection), `access.py` (`bus.<operation>`).
+  Fixes found on the way: multiple writes now atomic (`push_task` and its
+  notification…), expiry sweep without race.
+- **9b** — hub: `iab hub init/serve`, mTLS, `RemoteBackend`, long-poll,
+  TLS inspection detection — **shipped**. One route per operation;
+  machine registry (revocation effective at the next request); the bus
+  listener's certificate is issued by the bus CA, the client's only
+  trust anchor: an inspecting proxy fails the handshake, nothing is
+  sent; waits split into bounded long-polls; `hub_test.py`, `smoke.py`
+  replayed through a hub.
+- **9c** — pairing: `iab join`, `iab approve`, internal invitation,
+  renewal, `iab machines`, `iab revoke` — **shipped**. Separate pairing
+  listener (private networks only by default); four words bound to the
+  machine's key, the hub's CA and both sides' nonces, commit-then-reveal
+  (Bluetooth numeric comparison: no key grinding possible);
+  invitation whose token never travels (id + authentication code bound
+  to the request); renewal without CSR, the old certificate retired at
+  the first use of the new one; the last admin cannot be revoked;
+  announcements on the `machines` channel; admin role reserved to TPM
+  keys (policy). Guide: [`MULTI-MACHINE.md`](MULTI-MACHINE.md).
+- **9d** — authorization: instance ↔ machine, orchestrator roles,
+  `accepts_from`, limits — **shipped**. `authz.py`: a new instance
+  belongs to the machine creating it, an existing unowned one needs
+  `iab bind` (no squatting), a refused operation leaves no binding; only
+  an instance bound by an admin counts in the policy; cancel,
+  requeue, rename, forced publish and broadcast to a pattern need a
+  principal of `policy.orchestrators` (default: admin machines);
+  `accepts_from` bounds who pushes work or sends a message to whom; rate per machine; the
+  calling machine is journaled with every event. `iab hub import`
+  brings a machine's local bus over in one transaction, its instances
+  bound to that machine (`--bind`) or to none.
+- **9e** — TPM keys, per-machine policy. Owner's decision: keys are
+  attested (EK certified by the manufacturer, credential activation),
+  never declared; a virtual TPM's EK is trusted by an admin, once.
+- **9f** — PostgreSQL dialect, tests on two engines — **shipped**.
+  `IAB_DB=postgresql://…` (extra `[postgres]`, psycopg): the same SQL as
+  SQLite (placeholders translated), a transaction-level advisory lock as
+  the writer lock, foreign keys deferred to COMMIT, text columns in the
+  "C" collation (ISO dates compared byte-wise), a small connection pool,
+  setup once per process and database, waits woken by LISTEN/NOTIFY at
+  COMMIT; password masked in `whoami`. `store_test.py` and `hub_test.py`
+  run on both engines (`IAB_TEST_POSTGRES`).
+- **9g** — `host` in `launch`, per-machine supervisor — **shipped**.
+  `iab supervise` runs on each machine and wakes only the entries whose
+  `host` is that machine (paired name, `--host` to force); `iab wake`
+  answers `NOT_HERE` elsewhere; an entry without `host` stays wakable
+  anywhere, the lock arbitrates. On the hub side, binding forbids taking
+  the wake lock of another machine's instance. An open session wakes up
+  with `iab watch --on any`, long-polling the hub.
+- **9h** — MCP streamable HTTP: **deferred**.
 
 ## Global acceptance criterion
 
