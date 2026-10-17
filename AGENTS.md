@@ -36,6 +36,9 @@ every change and are summarized below.
   (requests, approvals, invitations, renewal → certificates); `join.py`
   and `admin.py` are the client drivers (`iab join`, `iab approve`,
   `iab invite`, `iab machines`, `iab revoke`, `iab renew`).
+- `servers/shared_memory/authz.py` — the hub's authorization rules
+  (instance ↔ machine binding, orchestrator operations, `accepts_from`),
+  driven by the `policy` of hub.json — never by code.
 - `servers/shared_memory/remote.py` — the hub client behind `bus` when
   `IAB_HUB` is set (stdlib `ssl` + `http.client`; trusts the bus CA only).
 - `servers/shared_memory/server.py` — MCP wrapper (SDK >= 2.0,

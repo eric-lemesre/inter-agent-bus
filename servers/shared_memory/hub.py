@@ -49,9 +49,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 try:  # installed package (`iab` maps to this directory)
-    from . import pairing, pki, registry, remote, store
+    from . import authz, pairing, pki, registry, remote, store
     from .access import OPERATIONS
 except ImportError:  # bare script usage
+    import authz
     import pairing
     import pki
     import registry
@@ -66,6 +67,9 @@ MAX_PAIR_BODY = 64 * 1024
 # A blocking wait is served for at most this long; the client chains waits.
 LONG_POLL_SECONDS = remote.LONG_POLL_SECONDS
 SERVER_RENEW_BEFORE_DAYS = 60
+# Requests per machine (token bucket), configurable as "rate" in hub.json.
+RATE_PER_SECOND = 50
+RATE_BURST = 200
 _WAIT_TIMEOUT = {"wait_signal": "timeout_s", "wait_for_task": "timeout_s"}
 # Where a pairing request may come from by default: loopback, private
 # networks, CGNAT (a tailnet), link-local — never the open Internet.
@@ -225,8 +229,11 @@ def _json_object(body: bytes) -> dict | None:
     return value if isinstance(value, dict) else None
 
 
-def dispatch(name: str, body: bytes, machine: dict) -> tuple[int, dict]:
-    """Run one bus operation for an authenticated machine."""
+def dispatch(name: str, body: bytes, machine: dict, caller: str = "",
+             policy: authz.Authz | None = None) -> tuple[int, dict]:
+    """Run one bus operation for an authenticated machine, after the
+    authorization rules (authz.py) — `caller` is the instance the client
+    says it is (checked against the machine's bindings there)."""
     if name not in OPERATIONS:
         return _bad(404, f"'{name}' is not a bus operation.")
     request = _json_object(body)
@@ -240,11 +247,17 @@ def dispatch(name: str, body: bytes, machine: dict) -> tuple[int, dict]:
         bound = inspect.signature(function).bind(**arguments)
     except TypeError as exc:
         return _bad(400, f"bad arguments for {name}: {exc}.")
+    bound.apply_defaults()  # the rules see what the operation will see
     key = _WAIT_TIMEOUT.get(name)
     if key is not None:
-        requested = bound.arguments.get(key, inspect.signature(function).parameters[key].default)
-        bound.arguments[key] = max(0.0, min(float(requested), LONG_POLL_SECONDS))
-    return 200, {"result": function(*bound.args, **bound.kwargs)}
+        bound.arguments[key] = max(0.0, min(float(bound.arguments[key]), LONG_POLL_SECONDS))
+    policy = policy or authz.Authz()
+    refused = policy.check(name, dict(bound.arguments), machine, caller)
+    if refused:
+        return _bad(403, refused)
+    result = function(*bound.args, **bound.kwargs)
+    policy.after(name, dict(bound.arguments), result)
+    return 200, {"result": result}
 
 
 def _answer(result) -> tuple[int, dict]:
@@ -283,6 +296,8 @@ def admin_dispatch(action: str, body: bytes, machine: dict,
         return _answer(authority.machines())
     if action == "revoke":
         return _answer(authority.revoke(str(request.get("name", "")), who))
+    if action == "unbind":
+        return _answer(registry.unbind(str(request.get("agent", ""))))
     return _bad(404, f"unknown admin action '{action}'.")
 
 
@@ -353,7 +368,8 @@ class _BusHandler(_BaseHandler):
 
     def _route(self, body: bytes) -> tuple[int, dict]:
         if self.path.startswith("/v1/op/"):
-            return dispatch(self.path[len("/v1/op/"):], body, self.machine)
+            return dispatch(self.path[len("/v1/op/"):], body, self.machine,
+                            self.headers.get("X-IAB-Caller", ""), self.server.authz)
         if self.path.startswith("/v1/admin/"):
             return admin_dispatch(self.path[len("/v1/admin/"):], body, self.machine,
                                   self.server.authority)
@@ -369,17 +385,25 @@ class _BusHandler(_BaseHandler):
                                        "paired with the hub.")
             self.close_connection = True
             self._send(status, answer)
+        elif not self.server.admit(self.machine["name"]):
+            status, answer = _bad(429, f"too many requests from machine "
+                                       f"'{self.machine['name']}' — slow down.")
+            self._send(status, answer)
         else:
             body = self._body()
             if body is None:
                 status = 413
             else:
+                # Events written while serving this request name its machine.
+                stamp = store.CALLER_MACHINE.set(self.machine["name"])
                 try:
                     status, answer = self._route(body)
                 except Exception as exc:  # report, keep serving
                     _log(f"{self.machine['name']} {self.path}: internal error "
                          f"{type(exc).__name__}")
                     status, answer = _bad(500, "hub internal error.")
+                finally:
+                    store.CALLER_MACHINE.reset(stamp)
                 self._send(status, answer)
         who = self.machine["name"] if self.machine else "-"
         route = self.path.removeprefix("/v1/op/")
@@ -457,8 +481,27 @@ class HubServer(ThreadingHTTPServer):
         self.names = authority.config["names"]
         self.max_body = max_body
         self.pair_allow = pair_allow
+        self.authz = authz.Authz(authority.config.get("policy"))
+        limits = authority.config.get("rate") or {}
+        self.rate = float(limits.get("per_second", RATE_PER_SECOND))
+        self.burst = float(limits.get("burst", RATE_BURST))
+        self._buckets: dict[str, tuple[float, float]] = {}
+        self._bucket_lock = threading.Lock()
         self.address_family = socket.AF_INET6 if ":" in address[0] else socket.AF_INET
         super().__init__(address, handler)
+
+    def admit(self, machine: str) -> bool:
+        """Token bucket per machine: a runaway agent on one machine cannot
+        starve the others (a refused request says so, never waits)."""
+        now = time.monotonic()
+        with self._bucket_lock:
+            tokens, last = self._buckets.get(machine, (self.burst, now))
+            tokens = min(self.burst, tokens + (now - last) * self.rate)
+            if tokens < 1:
+                self._buckets[machine] = (tokens, now)
+                return False
+            self._buckets[machine] = (tokens - 1, now)
+            return True
 
     def handle_error(self, request, client_address) -> None:
         # A client hanging up mid-exchange is routine on a network service:

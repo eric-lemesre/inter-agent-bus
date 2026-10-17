@@ -149,6 +149,9 @@ class RemoteBackend:
     def __init__(self, url: str, directory: Path | None = None) -> None:
         self.url = url
         self.creds = credentials(directory)
+        # Who this process is (its environment and launch directory): the
+        # hub counts it as a principal only if bound to this machine.
+        self.caller = store.resolve_identity().get("agent_name") or ""
         try:
             self.host, self.port = parse_hub(url)
             self.error = ""
@@ -189,7 +192,8 @@ class RemoteBackend:
         conn = open_connection(self.host, self.port, ctx, timeout)
         try:
             conn.request(method, path, body=data,
-                         headers={"Content-Type": "application/json"})
+                         headers={"Content-Type": "application/json",
+                                  "X-IAB-Caller": self.caller})
             response = conn.getresponse()
             raw = response.read()
             status = response.status

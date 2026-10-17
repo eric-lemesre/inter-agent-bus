@@ -338,7 +338,13 @@ machines admin.
   `machines` ; rôle admin réservé aux clés TPM (politique). Guide :
   [`MULTI-MACHINE.fr.md`](MULTI-MACHINE.fr.md).
 - **9d** — autorisation : instance ↔ machine, rôles d'orchestrateur,
-  `accepts_from`, limites.
+  `accepts_from`, limites — **livrée**. `authz.py` : une instance
+  appartient à la première machine qui agit en son nom (`iab unbind`
+  pour la déplacer) ; annuler, re-proposer, renommer, publier en force
+  et diffuser vers un motif exigent un principal de
+  `policy.orchestrators` (défaut : machines admin) ; `accepts_from`
+  borne qui pousse du travail à qui ; débit par machine ; la machine
+  appelante est journalisée avec chaque événement.
 - **9e** — clés TPM, politique par machine.
 - **9f** — dialecte PostgreSQL, tests sur deux moteurs.
 - **9g** — `host` dans `launch`, superviseur par machine.

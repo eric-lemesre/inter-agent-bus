@@ -115,12 +115,20 @@ else:
             run("the second machine joins with the invitation",
                 ["join", f"127.0.0.1:{port + 1}", "--name", "second", "--token", "-"],
                 stdin=token + "\n")
+            run("the second machine registers its own instance",
+                ["register", "kimi@second", "-d", "worker on the second machine"])
+            refused = subprocess.run(CLI + ["publish", "kimi", "T1", "forged"], env=env,
+                                     capture_output=True, text=True)
+            print(("ok — " if refused.returncode != 0 and "belongs to machine" in refused.stdout
+                   else "FAIL: ") + "the second machine cannot act as the first one's agent")
+            if refused.returncode == 0:
+                sys.exit(1)
             env = first
             run("the first machine pushes work for the second",
-                ["push", "kimi", "T2", "-"], stdin="cross-machine")
+                ["push", "kimi@second", "T2", "-"], stdin="cross-machine")
             env = {**first, "IAB_MACHINE_DIR": str(Path(tmp) / "second")}
             run("the second machine's worker executes it",
-                ["worker", "--agent", "kimi", "--once", "--",
+                ["worker", "--agent", "kimi@second", "--once", "--",
                  sys.executable, "-c", WORKER_STANDIN])
             env = first
             out = run("the first machine reads the result", ["result", "T2"])

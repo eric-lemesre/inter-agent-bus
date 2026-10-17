@@ -32,6 +32,7 @@ journaled in the append-only `events` table (get_events).
 """
 from __future__ import annotations
 
+import contextvars
 import fnmatch
 import hashlib
 import json
@@ -50,6 +51,13 @@ except ImportError:  # bare script or test: the directory is on sys.path
     import dialect
 
 Connection = dialect.Connection
+
+# The machine a hub is serving the current operation for (empty in local
+# mode): journaled with every event, so the history says WHERE an action
+# came from. Set by the hub per request; a context variable, so one
+# thread's request never stamps another's events.
+CALLER_MACHINE: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "iab_caller_machine", default="")
 
 
 def _data_dir() -> Path:
@@ -274,6 +282,8 @@ def _migrate(conn: Connection) -> None:
         conn.execute("ALTER TABLE notifications ADD COLUMN reply_to INTEGER")
     if "wake" not in columns:
         conn.execute("ALTER TABLE notifications ADD COLUMN wake INTEGER NOT NULL DEFAULT 0")
+    if "machine" not in conn.dialect.columns(conn, "events"):
+        conn.execute("ALTER TABLE events ADD COLUMN machine TEXT NOT NULL DEFAULT ''")
 
 
 def _log_event(
@@ -284,8 +294,8 @@ def _log_event(
     detail: str = "",
 ) -> None:
     conn.execute(
-        "INSERT INTO events(task_id, agent, event, at, detail) VALUES(?,?,?,?,?)",
-        (task_id, agent, event, _now(), detail),
+        "INSERT INTO events(task_id, agent, event, at, detail, machine) VALUES(?,?,?,?,?,?)",
+        (task_id, agent, event, _now(), detail, CALLER_MACHINE.get()),
     )
 
 
@@ -356,6 +366,20 @@ def rename_agent(old: str, new: str) -> str:
                 conn.execute("UPDATE presence SET agent=? WHERE agent=?", (new, old))
             _log_event(conn, "rename", agent=new, detail=f"was {old}")
     return f"OK: agent '{old}' renamed to '{new}'."
+
+
+def resolve_agent(text: str) -> tuple[str | None, str | None]:
+    """Read-only: the registered instance an address designates, with the
+    same rules as every operation (see _resolve_target)."""
+    with _db() as conn:
+        return _resolve_target(conn, text)
+
+
+def task_agent(task_id: str) -> str | None:
+    """Read-only: the queue a task belongs to, or None."""
+    with _db() as conn:
+        row = conn.execute("SELECT agent FROM tasks WHERE task_id=?", (task_id,)).fetchone()
+    return row["agent"] if row else None
 
 
 def _known_agents(conn: Connection) -> list[str]:
@@ -1390,8 +1414,9 @@ def get_system_state() -> str:
 
 def get_events(task_id: str | None = None, agent: str | None = None, limit: int = 100) -> str:
     """Chronological transition history (register/push/claim/expire/publish),
-    filterable by task and/or agent; the `limit` most recent, oldest first."""
-    query = "SELECT task_id, agent, event, at, detail FROM events"
+    filterable by task and/or agent; the `limit` most recent, oldest first.
+    Events written through a hub carry the calling `machine`."""
+    query = "SELECT task_id, agent, event, at, detail, machine FROM events"
     conds: list[str] = []
     params: list[object] = []
     if task_id:
@@ -1407,4 +1432,7 @@ def get_events(task_id: str | None = None, agent: str | None = None, limit: int 
     with _db() as conn:
         rows = [dict(r) for r in conn.execute(query, params)]
     rows.reverse()
+    for row in rows:
+        if not row["machine"]:
+            del row["machine"]  # local mode: the history reads as before
     return json.dumps(rows, indent=2, ensure_ascii=False)

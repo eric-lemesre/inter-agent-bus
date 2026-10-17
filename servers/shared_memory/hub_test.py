@@ -40,6 +40,7 @@ with tempfile.TemporaryDirectory() as tmp:
     os.environ["IAB_MACHINE_DIR"] = str(tmp / "machine-alpha")
     import access
     import admin
+    import authz
     import hub
     import join
     import pki
@@ -399,6 +400,76 @@ with tempfile.TemporaryDirectory() as tmp:
     os.environ["IAB_MACHINE_DIR"] = str(tmp / "machine-delta")
     check("the revoked machine is refused at once",
           bus.list_presence().startswith("ERROR"))
+
+    # -- 9d: authorization -------------------------------------------------
+    alpha_dir = str(tmp / "machine-alpha")
+    os.environ["IAB_MACHINE_DIR"] = str(gamma_dir)
+    r = bus.claim_task("kimi@lab", 60)
+    check("another machine cannot claim an instance's queue",
+          r.startswith("ERROR") and "belongs to machine 'alpha'" in r, r)
+    for label, out in [("publish", bus.publish_result("kimi@lab", "h1", "forged")),
+                       ("beat the heart", bus.heartbeat("kimi@lab")),
+                       ("read the mailbox", bus.poll("kimi@lab")),
+                       ("notify", bus.notify("kimi@lab", "claude@lab", "hi")),
+                       ("take the wake lock", bus.acquire_wake_lock("kimi@lab"))]:
+        check(f"another machine cannot {label} in an instance's name",
+              out.startswith("ERROR") and "belongs to machine" in out, out)
+    check("reads are not restricted", bus.read_result("h1").startswith("{"))
+    r = bus.register_agent("worker@gamma", "gamma's own")
+    check("a machine registers its own instance", r.startswith("OK"), r)
+    bus.push_task("worker@gamma", "g1", "x")
+    r = bus.cancel_task("g1")
+    check("a member machine cannot run orchestrator operations",
+          r.startswith("ERROR") and "orchestrator" in r, r)
+    r = bus.broadcast("worker@gamma", "hello", "*")
+    check("a broadcast to a pattern is an orchestrator operation", r.startswith("ERROR"), r)
+    r = bus.broadcast("worker@gamma", "hello", "claude@lab")
+    check("a broadcast to an explicit list is allowed", r.startswith("{"), r)
+    events = json.loads(bus.get_events("g1"))
+    check("events written through the hub name their machine",
+          events and events[0].get("machine") == "gamma", events)
+    os.environ["IAB_MACHINE_DIR"] = alpha_dir
+    r = bus.cancel_task("g1")
+    check("an admin machine runs orchestrator operations", r.startswith("OK"), r)
+
+    server.authz = authz.Authz({"accepts_from": {"worker@*": ["machine:alpha"]}})
+    os.environ["IAB_MACHINE_DIR"] = str(gamma_dir)
+    r = bus.push_task("worker@gamma", "g2", "x")
+    check("accepts_from refuses a sender outside the list",
+          r.startswith("ERROR") and "accepts_from" in r, r)
+    os.environ["IAB_MACHINE_DIR"] = alpha_dir
+    r = bus.push_task("worker@gamma", "g2", "x")
+    check("accepts_from admits a listed sender", r.startswith("OK"), r)
+    server.authz = authz.Authz({"orchestrators": ["worker@gamma"]})
+    as_gamma = remote.RemoteBackend(url, gamma_dir)
+    as_gamma.caller = "worker@gamma"
+    r = as_gamma.cancel_task("g2")
+    check("an instance listed as orchestrator may run orchestrator operations",
+          r.startswith("OK"), r)
+    bus.push_task("worker@gamma", "g3", "x")
+    as_gamma.caller = "kimi@lab"  # bound to alpha: claiming it proves nothing
+    r = as_gamma.cancel_task("g3")
+    check("a caller name bound to another machine is not a principal", r.startswith("ERROR"), r)
+    server.authz = authz.Authz(None)
+    bus.cancel_task("g3")
+
+    r = admin.call("unbind", {"agent": "kimi@lab"})
+    check("an admin unbinds an instance that moved", str(r).startswith("OK"), r)
+    os.environ["IAB_MACHINE_DIR"] = str(gamma_dir)
+    r = bus.heartbeat("kimi@lab")
+    check("the next machine acting as it becomes its owner", r.startswith("{"), r)
+    os.environ["IAB_MACHINE_DIR"] = alpha_dir
+    listed = {m["name"]: m["agents"] for m in admin.call("machines")}
+    check("machines list the instances bound to them",
+          {"kimi@lab", "worker@gamma"} <= set(listed["gamma"]), listed)
+
+    server.rate, server.burst = 0.001, 2
+    server._buckets.clear()
+    burst = [bus.list_presence() for _ in range(3)]
+    check("requests beyond a machine's budget are refused, not queued",
+          burst[2].startswith("ERROR") and "slow down" in burst[2], burst[2])
+    server.rate, server.burst = hub.RATE_PER_SECOND, hub.RATE_BURST
+    server._buckets.clear()
 
     # A machine that never paired, and a hub that is down.
     os.environ["IAB_MACHINE_DIR"] = str(tmp / "nowhere")

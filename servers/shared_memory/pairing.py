@@ -197,7 +197,11 @@ class Authority:
         return done
 
     def machines(self) -> list[dict]:
-        return registry.list_machines()
+        """Paired machines, each with the agent instances bound to it."""
+        bound: dict[str, list[str]] = {}
+        for agent, machine in sorted(registry.bindings().items()):
+            bound.setdefault(machine, []).append(agent)
+        return [{**m, "agents": bound.get(m["name"], [])} for m in registry.list_machines()]
 
     def renew(self, machine: dict, peer_der: bytes) -> dict | str:
         """A fresh certificate for the key the machine just proved it holds

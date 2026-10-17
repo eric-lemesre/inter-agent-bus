@@ -315,7 +315,12 @@ Internet closed at first, TPM mandatory for admin machines.
   announcements on the `machines` channel; admin role reserved to TPM
   keys (policy). Guide: [`MULTI-MACHINE.md`](MULTI-MACHINE.md).
 - **9d** — authorization: instance ↔ machine, orchestrator roles,
-  `accepts_from`, limits.
+  `accepts_from`, limits — **shipped**. `authz.py`: an instance belongs
+  to the first machine acting as it (`iab unbind` to move it); cancel,
+  requeue, rename, forced publish and broadcast to a pattern need a
+  principal of `policy.orchestrators` (default: admin machines);
+  `accepts_from` bounds who pushes work to whom; rate per machine; the
+  calling machine is journaled with every event.
 - **9e** — TPM keys, per-machine policy.
 - **9f** — PostgreSQL dialect, tests on two engines.
 - **9g** — `host` in `launch`, per-machine supervisor.

@@ -138,11 +138,45 @@ session's workspace is still derived from its local directory.
 | `iab machines` | paired machines, role, key kind, last seen |
 | `iab revoke <machine>` | refused from its next request (the last admin cannot be) |
 | `iab deny <code>` | refuses a pending request |
+| `iab unbind <instance>` | frees an instance from its machine (it moved) |
 | `iab renew [--force]` | renews the certificate (automatic with less than 10 days left) |
 
 Every pairing and revocation is journaled and announced on the channel
 (topic `machines`, author `bus`). A machine offline for more than 30
 days must pair again.
+
+## Authorization
+
+Every request comes from an authenticated machine, which lets the hub
+enforce three rules:
+
+1. **Binding**: a `harness@workspace` instance belongs to the first
+   machine acting as it; no other machine may then claim its queue,
+   publish, beat its heart, read its mailbox or take its wake lock.
+   `iab unbind <instance>` (admin) frees it when it moves. `iab machines`
+   lists each machine's instances.
+2. **Orchestrator operations**: cancel, requeue, rename, forced publish,
+   broadcast to a pattern (`*`, `harness@*`…). Reserved to the
+   principals of `policy.orchestrators` — the admin machines by default.
+3. **`accepts_from`**: who may push work to whom, the main defence
+   against a prompt injection travelling from one machine's agents to
+   another's.
+
+The policy is set in `hub.json`, never in code:
+
+```json
+"policy": {
+  "orchestrators": ["role:admin", "claude@homelab"],
+  "accepts_from": {"kimi@*": ["claude@*", "machine:yggdrasil"]}
+},
+"rate": {"per_second": 50, "burst": 200}
+```
+
+Principals of a request: `machine:<name>`, `role:<role>`, and the
+instance the client declares (its `IAB_AGENT_NAME`) when it is bound to
+that same machine. Reads (state, results, journal, presence) stay open
+to every paired machine. The journal names the machine of every event
+(`iab log`).
 
 ## Security: what is guaranteed, what is not
 
