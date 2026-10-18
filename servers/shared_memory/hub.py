@@ -194,8 +194,10 @@ def import_bus(source: str, bind: str | None = None, dry_run: bool = False,
     local access to its home is the authority, as for init). Imported
     instances belong to no machine — refused until an admin binds them —
     unless `bind` names the machine they come from: they are then bound to
-    it, in the same transaction. What the import brings obeys the hub's
-    accepts_from as if that machine had sent it live."""
+    it, in the same transaction, as on first use (they work from that
+    machine; they count in the policy only once an admin binds them with
+    `iab bind`). What the import brings obeys the hub's accepts_from as
+    if that machine had sent it live."""
     home = home or hub_home()
     try:
         config = load_config(home)
@@ -217,11 +219,12 @@ def import_bus(source: str, bind: str | None = None, dry_run: bool = False,
         if refused:
             return refused
         for agent in agents if machine else ():
-            refused = registry.pin_in(conn, agent, machine["name"], "hub import")
+            refused = registry.bind_in(conn, agent, machine["name"], "hub import")
             if refused:
                 return refused
         return None
-    out = store.import_database(source, dry_run=dry_run, after=after)
+    origin = f"import:{machine['name']}" if machine else "import"
+    out = store.import_database(source, dry_run=dry_run, after=after, origin=origin)
     if out.startswith("ERROR"):
         return out
     summary = json.loads(out)
@@ -232,8 +235,8 @@ def import_bus(source: str, bind: str | None = None, dry_run: bool = False,
         lines.append(f"{summary['left_behind']['wake_locks']} wake lock(s) left behind "
                      "(held by the old machine's supervisor).")
     if summary["agents"] and bind:
-        lines.append(f"Instances bound to '{bind.strip().lower()}': "
-                     + ", ".join(summary["agents"]))
+        lines.append(f"Instances bound to '{bind.strip().lower()}' (no policy power until an "
+                     "admin vouches for one with `iab bind`): " + ", ".join(summary["agents"]))
     elif summary["agents"]:
         lines.append("Bound to no machine (refused until then): "
                      + ", ".join(summary["agents"])

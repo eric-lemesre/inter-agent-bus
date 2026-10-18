@@ -221,13 +221,12 @@ class Authz:
     def check_import(self, machine: dict | None, flows) -> str | None:
         """accepts_from on what an import brings (`iab hub import`), as if
         its source machine had sent it live: a sender's principals are that
-        machine, its role and the sending instance (the import binds it
-        there) — none when the import names no machine. `flows` are
-        (kind, sender, recipient): work, message or channel. Returns the
-        first refusal, or None."""
-        base = [f"machine:{machine['name']}", f"role:{machine['role']}"] if machine else []
-        for kind, sender, target in flows:
-            principals = base + ([sender] if machine and sender else [])
+        machine and its role — never the sending instance, which no admin
+        vouched for — and none when the import names no machine. `flows`
+        are (kind, sender, recipient): work, message or channel. Returns
+        the first refusal, or None."""
+        principals = [f"machine:{machine['name']}", f"role:{machine['role']}"] if machine else []
+        for kind, _sender, target in flows:
             refused = (self._refuses_channel(principals) if kind == "channel"
                        else self._refuses(principals, target,
                                           "work" if kind == "work" else "messages"))

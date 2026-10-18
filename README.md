@@ -38,7 +38,7 @@ never from a working tree:
 ```bash
 python3 -m venv ~/.local/venvs/inter-agent-bus
 ~/.local/venvs/inter-agent-bus/bin/pip install \
-  'inter-agent-bus[server] @ git+https://github.com/eric-lemesre/inter-agent-bus@v0.13.0'
+  'inter-agent-bus[server] @ git+https://github.com/eric-lemesre/inter-agent-bus@v0.13.1'
 ~/.local/venvs/inter-agent-bus/bin/iab install --scope user
 ```
 
