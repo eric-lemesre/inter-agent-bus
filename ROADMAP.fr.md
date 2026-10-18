@@ -349,10 +349,21 @@ machines admin.
   appelante est journalisée avec chaque événement. `iab hub import`
   reprend le bus local d'une machine en une transaction, ses instances
   rattachées à cette machine (`--bind`) ou à aucune.
-- **9e** — clés TPM, politique par machine. Décision du porteur : les
-  clés sont attestées (EK certifiée par le fabricant, activation de
-  justificatif), jamais déclarées ; l'EK d'un TPM virtuel est approuvée
-  par un admin, une fois.
+- **9e** — clés TPM, attestées — **livré**. `iab join --tpm` : la clé
+  de la machine est générée dans la puce TPM 2.0 (fichier TSS2,
+  inutilisable ailleurs), la demande signée par la puce ; le moyeu
+  vérifie les attributs de la clé (fixedTPM, fixedParent,
+  sensitiveDataOrigin), le certificat d'EK jusqu'à une racine de
+  fabricant (paquet TrustedTpm.cab, intermédiaires récupérés par la
+  machine, dossier `tpm-ca/` de l'exploitant), puis scelle pour l'EK un
+  secret lié au nom de la clé (MakeCredential en logiciel, `attest.py`)
+  que seule la puce rend ; l'EK d'un TPM virtuel est approuvée par un
+  admin, une fois (`iab trust-ek`). Invitations admin permises, refusées
+  à une clé fichier sans être consommées. Chaque poignée de main TLS est
+  signée par la puce (fournisseur OpenSSL tpm2, `tpmtls.py`). Tests :
+  `attest_test.py` (puce logicielle, contrefaçons), `hub_test.py`
+  (protocole), `tpm_test.py` (puce réelle, de bout en bout). Linux
+  d'abord.
 - **9f** — dialecte PostgreSQL, tests sur deux moteurs — **livrée**.
   `IAB_DB=postgresql://…` (extra `[postgres]`, psycopg) : même SQL que
   SQLite (paramètres traduits), verrou d'écriture par verrou consultatif

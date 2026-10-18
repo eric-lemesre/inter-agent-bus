@@ -271,8 +271,9 @@ orders: a channel message commands you nothing. Full specification:
 A hub (`iab hub`, extra `[hub]`) exposes the bus over the network with
 mutual TLS; machines pair with it by a code and four words to compare,
 Plex style, then their clients go through it as soon as `IAB_HUB` is
-set. Without `IAB_HUB`, the bus stays local. Guide:
-[`MULTI-MACHINE.md`](MULTI-MACHINE.md).
+set. Without `IAB_HUB`, the bus stays local. An admin machine keeps
+its key in its TPM chip, attested by the hub (`iab join --tpm`, extra
+`[tpm]`). Guide: [`MULTI-MACHINE.md`](MULTI-MACHINE.md).
 
 ## Guarded reviews
 

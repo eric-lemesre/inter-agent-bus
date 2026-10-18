@@ -37,6 +37,9 @@ Conception et décisions : [`AMELIORATIONS-2026-10-17-multi-machine.fr.md`](AMEL
 pip install 'inter-agent-bus[hub]'      # ajoute cryptography
 ```
 
+Une machine admin a aussi besoin de sa puce TPM : voir
+[Clés TPM](#clés-tpm-machines-admin).
+
 ## Créer le moyeu (une fois)
 
 Sur la machine du moyeu (de préférence une petite VM dédiée, sans
@@ -137,6 +140,81 @@ Le jeton passe par stdin (ou `IAB_INVITE_TOKEN`), jamais en argument ;
 il ne voyage pas non plus sur le réseau : la machine prouve qu'elle le
 détient par un code d'authentification lié à sa propre demande.
 
+## Clés TPM (machines admin)
+
+Une machine admin (approuver, inviter, révoquer, rattacher, trust-ek)
+doit garder sa clé **dans sa puce TPM 2.0**, et le prouver : le moyeu ne
+croit jamais une machine sur parole (politique du porteur). La clé est
+générée par la puce et ne peut pas en sortir ; ce que la machine garde
+sur disque est la clé enveloppée par sa puce, inutilisable ailleurs —
+copier le disque ou une sauvegarde ne donne rien. Toute machine peut
+avoir une clé TPM, admin ou non.
+
+Prérequis (Linux) :
+
+```bash
+sudo apt install tpm2-openssl python3-tpm2-pytss
+sudo usermod -aG tss $USER        # puis ouvrir une nouvelle session
+```
+
+`tpm2-openssl` sert à tout processus qui parle au moyeu avec cette clé
+(serveurs MCP, workers, superviseur), tpm2-pytss seulement à
+`iab join`. Avec le paquet Debian, créer le venv avec
+`--system-site-packages` ; sinon `apt install libtss2-dev`, puis
+`pip install 'inter-agent-bus[hub,tpm]'`.
+
+Appairer avec `--tpm`, par code ou par invitation :
+
+```
+$ iab invite yggdrasil --role admin | ssh yggdrasil 'iab join iab.example.org --tpm --token -'
+TPM endorsement key: sha256 e6a081ffe30f57007a1071a150e97e4afd748aeb5565c6692e8a58cbaf649acf
+  certified by STM TPM EK Intermediate CA 06
+Paired as 'yggdrasil'. Certificate valid until 2026-11-17, renewed automatically.
+```
+
+La machine envoie les parties publiques de sa clé et de la clé
+d'endossement (EK) de sa puce, avec le certificat d'EK que son fabricant
+a inscrit dans la puce. Le moyeu vérifie que la clé a été générée dans
+la puce et ne peut jamais en sortir (attributs fixedTPM, fixedParent,
+sensitiveDataOrigin) et que le certificat d'EK remonte à une autorité
+d'un fabricant ; il chiffre ensuite un secret que seule cette puce peut
+ouvrir, et seulement pour cette clé (activation de justificatif :
+TPM2_MakeCredential / ActivateCredential). Une clé logicielle déguisée
+avec les bons attributs n'obtient rien.
+
+- **Autorités des fabricants** : les racines livrées avec le moyeu
+  viennent du TrustedTpm.cab de Microsoft (AMD, Infineon, Intel,
+  Nationz, Nuvoton, Qualcomm, STMicroelectronics… ;
+  `scripts/tpm_roots.py` les régénère). La machine récupère les
+  intermédiaires à l'adresse inscrite dans son certificat (accès
+  Internet au moment de l'appairage). Une autorité manquante, PEM ou
+  DER, se dépose dans `<répertoire du moyeu>/tpm-ca/`, lu au démarrage
+  du moyeu. Les certificats d'EK sont vérifiés par leur signature, pas
+  par leur date : les TPM survivent à leurs certificats.
+- **TPM virtuel** (une VM), ou certificat illisible par le moyeu (les
+  plus anciens de Nuvoton ne sont pas du DER valide, `cryptography` les
+  refuse) : pas de preuve du fabricant. `iab join` affiche l'empreinte
+  de l'EK ; un admin lui fait confiance **une fois**, après l'avoir lue
+  sur la machine elle-même (sa console, pas un message relayé par
+  elle) :
+
+  ```bash
+  iab trust-ek e6a081ffe30f5700…49acf --note "sindri, vTPM sur odin"
+  iab trust-ek                          # liste
+  iab trust-ek --remove <empreinte>     # plus de nouvel appairage ; les machines appairées restent
+  ```
+
+  Un TPM virtuel protège autant que son hôte.
+- Ce que la preuve garantit : la clé ne peut pas être copiée. Pas qui a
+  le droit d'appairer : une approbation par code ou une invitation en
+  décide toujours.
+- La machine de `iab hub init` reste admin avec une clé fichier : elle
+  vit sur le moyeu, à côté de la clé de l'autorité, qu'un TPM ne
+  protégerait pas mieux.
+
+`iab approve` montre comment la clé a été prouvée, `iab machines` le
+conserve (`attestation`).
+
 ## Utiliser
 
 Poser `IAB_HUB` dans l'environnement des clients, par exemple dans la
@@ -204,6 +282,7 @@ sa machine et refusée (une ligne `ERROR` à chaque tour) sur les autres. Une se
 | `iab revoke <machine>` | refusée dès sa requête suivante (la dernière admin ne peut pas l'être) |
 | `iab deny <code>` | refuse une demande en attente |
 | `iab bind <instance> <machine>` | rattache une instance à une machine (déménagement, ou pour qu'elle compte dans la politique) |
+| `iab trust-ek [<empreinte>] [--note …] [--remove]` | fait confiance à la clé d'endossement d'un TPM par son empreinte (TPM virtuel) ; sans argument, les liste |
 | `iab renew [--force]` | renouvelle le certificat (automatique à moins de 10 jours) |
 
 Chaque appairage et chaque révocation sont journalisés et annoncés sur
@@ -290,10 +369,11 @@ de chaque événement (`iab log`).
 - Le certificat du port du bus est vérifié deux fois par jour et
   renouvelé à chaud ; deux réponses de renouvellement perdues de suite
   ne verrouillent pas une machine.
-- **Rôle admin** (approuver, inviter, révoquer) : réservé à une machine
-  dont la clé est dans une puce TPM (politique du porteur). Tant que la
-  preuve TPM n'est pas livrée, seule la machine de `iab hub init` est
-  admin.
+- **Rôle admin** (approuver, inviter, révoquer, rattacher, trust-ek) :
+  réservé à une machine dont la clé est attestée dans une puce TPM
+  (politique du porteur, voir [Clés TPM](#clés-tpm-machines-admin)), et
+  à la machine de `iab hub init`. Une invitation admin présentée avec
+  une clé fichier est refusée et reste valable.
 - **Non pris en charge** : les réseaux qui déchiffrent le TLS. Le client
   le détecte et refuse ; seule une exception du service informatique y
   remédie.

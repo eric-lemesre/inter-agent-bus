@@ -44,9 +44,12 @@ with tempfile.TemporaryDirectory() as tmp:
     import authz
     import hub
     import join
+    import pairing
     import pki
+    import attest
     import registry
     import remote
+    import softtpm
     import store
 
     home = tmp / "hub"
@@ -227,12 +230,12 @@ with tempfile.TemporaryDirectory() as tmp:
     pair_target = f"127.0.0.1:{pair_port}"
 
     def joining(name: str, directory: Path, lines: list, token: str | None = None,
-                timeout: float = 30) -> dict:
+                timeout: float = 30, chip=None) -> dict:
         outcome: dict = {}
 
         def run() -> None:
             outcome["code"] = join.join(pair_target, name, token, directory,
-                                        say=lines.append, timeout=timeout)
+                                        say=lines.append, timeout=timeout, chip=chip)
 
         thread = threading.Thread(target=run)
         thread.start()
@@ -378,8 +381,136 @@ with tempfile.TemporaryDirectory() as tmp:
     check("a request is revealed once", status == 409, answer)
     admin.call("pairing/deny", {"user_code": seen["user_code"]})
 
-    check("admin invitations are refused by policy (TPM required)",
-          str(admin.call("invite", {"name": "theta", "role": "admin"})).startswith("ERROR"))
+    # -- 9e: TPM keys, attested (attest.py) — softtpm plays the chip --------
+    token = admin.call("invite", {"name": "theta", "role": "admin"})["token"]
+    lines = []
+    rc = join.join(pair_target, "theta", token, tmp / "machine-theta", say=lines.append)
+    check("an admin invitation is refused to a file key", rc == 1 and "TPM" in lines[-1],
+          lines[-1:])
+    soft = softtpm.SoftChip()
+    fingerprint = pki.spki_sha256(soft.ek_key.public_key())
+    lines = []
+    rc = join.join(pair_target, "theta", token, tmp / "machine-theta", say=lines.append,
+                   chip=soft)
+    check("a TPM whose endorsement key nobody vouches for is refused, with the fingerprint "
+          "to trust", rc == 1 and f"iab trust-ek {fingerprint}" in lines[-1], lines[-1:])
+    check("join shows that fingerprint on the machine itself",
+          any(fingerprint in line for line in lines[:2]), lines[:2])
+    r = admin.call("tpm/trust", {"fingerprint": "abc"})
+    check("a malformed EK fingerprint is refused", str(r).startswith("ERROR"), r)
+    r = admin.call("tpm/trust", {"fingerprint": fingerprint.upper(), "note": "theta vTPM"})
+    check("an admin trusts an endorsement key by its fingerprint", str(r).startswith("OK"), r)
+    listed = admin.call("tpm/trusted")
+    check("trusted endorsement keys are listed with who vouched",
+          isinstance(listed, list) and [(e["fingerprint"], e["added_by"]) for e in listed]
+          == [(fingerprint, "alpha")], listed)
+    soft.answer = b"\0" * attest.SECRET_BYTES
+    lines = []
+    rc = join.join(pair_target, "theta", token, tmp / "machine-theta", say=lines.append,
+                   chip=soft)
+    check("a machine that does not return the hub's secret is refused",
+          rc == 1 and "did not return" in lines[-1], lines[-1:])
+    soft.answer = None
+    lines = []
+    rc = join.join(pair_target, "theta", token, tmp / "machine-theta", say=lines.append,
+                   chip=soft)
+    check("the refused attempts left the admin invitation usable: an attested TPM key "
+          "redeems it", rc == 0, lines[-3:])
+    theta = registry.get("theta") or {}
+    check("the machine is recorded as an admin with an attested TPM key",
+          theta.get("role") == "admin" and theta.get("key_kind") == "tpm"
+          and "trusted by alpha" in theta.get("attestation", ""), theta)
+    os.environ["IAB_MACHINE_DIR"] = str(tmp / "machine-theta")
+    r = admin.call("machines")
+    check("the attested admin machine can use admin actions", isinstance(r, list), r)
+    os.environ["IAB_MACHINE_DIR"] = str(tmp / "machine-alpha")
+    check("the machine list says how each key was proven",
+          any(m["name"] == "theta" and m["attestation"] for m in r if isinstance(r, list)), r)
+    announced = json.loads(bus.read_channel(since_seq=0, topic="machines"))
+    check("the trusted EK and the TPM pairing are announced",
+          any(fingerprint in e["message"] and "theta vTPM" in e["message"] for e in announced)
+          and any("'theta' paired as admin (tpm key)" in e["message"] for e in announced),
+          [e["message"] for e in announced][-3:])
+
+    # The proof answers once, for the key it was made for.
+    k = soft.new_key()
+    csr_k = soft.csr(k, "iota")
+    status, challenge = forged.post("/v1/pair/challenge", {
+        "csr": csr_k, "tpm": {"public": attest.encode(k.public_area),
+                              **soft.endorsement().material}})
+    check("the hub answers a TPM with a challenge",
+          status == 200 and "credential_blob" in challenge.get("result", {}), challenge)
+    challenge = challenge["result"]
+    proof = {"id": challenge["id"], "secret": attest.encode(soft.activate(k, None, challenge))}
+    token = admin.call("invite", {"name": "iota", "role": "member"})["token"]
+
+    def invited(csr_text: str, attestation) -> tuple[int, dict]:
+        return forged.post("/v1/pair/invited", {
+            "name": "iota", "key_kind": "tpm", "csr": csr_text, "attestation": attestation,
+            "invitation": registry.invitation_id(token),
+            "mac": registry.invitation_mac(registry.invitation_key(token),
+                                           csr_text.encode("utf-8"))})
+
+    status, answer = invited(pki.csr_pem(pki.new_csr(pki.new_key(), "iota")).decode("ascii"),
+                             proof)
+    check("a proof made for one key does not pair another",
+          status == 409 and "another key" in answer["error"], answer)
+    status, answer = invited(csr_k, proof)
+    check("a proof answers once", status == 409 and "unknown or expired" in answer["error"],
+          answer)
+    status, answer = invited(csr_k, None)
+    check("a TPM key without its proof is refused",
+          status == 409 and "challenge" in answer["error"], answer)
+    authority = pair_server.authority
+    asked = [forged.post("/v1/pair/challenge", {
+        "csr": csr_k, "tpm": {"public": attest.encode(k.public_area),
+                              **soft.endorsement().material}})
+        for _ in range(pairing.MAX_CHALLENGES_PER_SOURCE + 1)]
+    check("one address holds a bounded number of challenges",
+          asked[-1][0] == 409 and "from this address" in asked[-1][1]["error"]
+          and all(a[0] == 200 for a in asked[:-1]), asked[-1])
+    authority._challenges.clear()
+    saved_max = pairing.MAX_CHALLENGES
+    pairing.MAX_CHALLENGES = 3
+    for n in range(3):
+        authority._challenges[f"other{n}"] = (time.monotonic() + 60, b"", "", "", f"10.0.0.{n}")
+    status, answer = forged.post("/v1/pair/challenge", {
+        "csr": csr_k, "tpm": {"public": attest.encode(k.public_area),
+                              **soft.endorsement().material}})
+    check("a full challenge table gives way to a new machine, oldest first",
+          status == 200 and "other0" not in authority._challenges
+          and len(authority._challenges) == 3, answer)
+    pairing.MAX_CHALLENGES = saved_max
+    authority._challenges.clear()
+
+    # By code: the approver sees how the key was proven and may make it admin.
+    lines = []
+    pending = joining("kappa", tmp / "machine-kappa", lines, chip=soft)
+    code = shown(lines, "type the code:")
+    words = shown(lines, "Check words:")
+    approver_lines = []
+    rc = admin.approve(code, None, "admin",
+                       ask=lambda _: "y" if f"Check words: {words}" in approver_lines else "n",
+                       say=approver_lines.append)
+    pending["thread"].join(30)
+    check("the approver is shown how the TPM key was proven",
+          any("TPM key attested" in line and fingerprint in line for line in approver_lines),
+          approver_lines)
+    check("a TPM key paired by code may be approved as admin",
+          rc == 0 and pending.get("code") == 0
+          and (registry.get("kappa") or {}).get("role") == "admin", approver_lines[-2:])
+    r = admin.call("tpm/untrust", {"fingerprint": fingerprint})
+    check("an admin withdraws the trust of an endorsement key", str(r).startswith("OK"), r)
+    token = admin.call("invite", {"name": "lambda", "role": "member"})["token"]
+    lines = []
+    rc = join.join(pair_target, "lambda", token, tmp / "machine-lambda", say=lines.append,
+                   chip=soft)
+    check("an endorsement key no longer trusted pairs no new machine",
+          rc == 1 and "trust-ek" in lines[-1], lines[-1:])
+    check("the machines it attested stay paired",
+          (registry.get("kappa") or {}).get("status") == "active")
+    for name in ("theta", "kappa"):  # alpha is the last admin again, as below expects
+        admin.call("revoke", {"name": name})
 
     # Pairing only from allowed networks; requests limited per source.
     saved_allow = pair_server.pair_allow
@@ -747,6 +878,21 @@ with tempfile.TemporaryDirectory() as tmp:
     os.environ["IAB_HUB"] = "http://127.0.0.1:1"
     r = bus.list_presence()
     check("a non-https hub URL is refused", r.startswith("ERROR") and "https" in r, r)
+
+    # A registry created before the TPM attestation keeps working.
+    old_db = tmp / "registry-0.13.db"
+    with sqlite3.connect(old_db) as conn:
+        conn.executescript(registry.SCHEMA.replace(
+            ",\n    attestation      TEXT NOT NULL DEFAULT ''", "").replace(
+            ",\n    attestation TEXT NOT NULL DEFAULT ''", ""))
+        conn.execute("INSERT INTO machines(name, role, key_kind, fingerprint, serial, "
+                     "enrolled_at, renewed_at, expires_at) VALUES('old', 'member', 'file', "
+                     "'f', 's', 'x', 'x', 'x')")
+    saved_db, os.environ["IAB_DB"] = os.environ["IAB_DB"], str(old_db)
+    rows = registry.list_machines()
+    check("an older registry gains the attestation column, its machines intact",
+          [(m["name"], m["attestation"]) for m in rows] == [("old", "")], rows)
+    os.environ["IAB_DB"] = saved_db
 
 if fail:
     print("hub_test: FAIL.")

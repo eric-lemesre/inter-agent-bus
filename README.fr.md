@@ -286,7 +286,9 @@ commande rien. Spécification complète :
 Un moyeu (`iab hub`, extra `[hub]`) expose le bus sur le réseau en TLS
 mutuel ; les machines s'y appairent par un code et quatre mots à
 comparer, à la manière de Plex, puis leurs clients y passent dès que
-`IAB_HUB` est posé. Sans `IAB_HUB`, le bus reste local. Guide :
+`IAB_HUB` est posé. Sans `IAB_HUB`, le bus reste local. Une machine
+admin garde sa clé dans sa puce TPM, attestée par le moyeu
+(`iab join --tpm`, extra `[tpm]`). Guide :
 [`MULTI-MACHINE.fr.md`](MULTI-MACHINE.fr.md).
 
 ## Revues gardées

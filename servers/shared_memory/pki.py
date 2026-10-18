@@ -282,6 +282,31 @@ def new_csr(key, machine: str) -> x509.CertificateSigningRequest:
     )
 
 
+def _der(tag: int, content: bytes) -> bytes:
+    size = len(content)
+    if size < 0x80:
+        return bytes([tag, size]) + content
+    length = size.to_bytes((size.bit_length() + 7) // 8, "big")
+    return bytes([tag, 0x80 | len(length)]) + length + content
+
+
+_ECDSA_SHA256 = bytes.fromhex("300a06082a8648ce3d040302")
+
+
+def signed_csr(public_key, machine: str, sign) -> x509.CertificateSigningRequest:
+    """The request new_csr would build, for a key this process cannot hold
+    (a TPM's): `sign(data)` returns the DER ECDSA-SHA256 signature of
+    `data`. cryptography signs only with keys it holds, so the request is
+    assembled here (RFC 2986, no attributes)."""
+    info = _der(0x30, b"\x02\x01\x00" + _name(machine, "machine").public_bytes()
+                + spki_der(public_key) + b"\xa0\x00")
+    request = x509.load_der_x509_csr(
+        _der(0x30, info + _ECDSA_SHA256 + _der(0x03, b"\x00" + sign(info))))
+    if not request.is_signature_valid:
+        raise ValueError("the external signer produced an invalid signature")
+    return request
+
+
 def csr_pem(csr: x509.CertificateSigningRequest) -> bytes:
     return csr.public_bytes(serialization.Encoding.PEM)
 

@@ -1,6 +1,6 @@
 """Admin driver of the multi-machine bus — what an admin machine asks the
 hub: approve or deny a pairing, invite a machine, list and revoke
-machines, renew this machine's certificate.
+machines, trust a TPM's endorsement key, renew this machine's certificate.
 
 Thin over the hub client (remote.py), through the bus listener, so the
 hub checks the admin role on the authenticated machine certificate. The
@@ -56,6 +56,8 @@ def approve(code: str | None, name: str | None, role: str,
     shown = {k: registry.printable(v) for k, v in found.items() if k != "inherits"}  # never raw to a terminal
     say(f"Request from '{shown['name']}' — {shown['platform'] or 'unknown system'} — "
         f"{shown['source']} — key: {shown['key_kind']}")
+    if found.get("attestation"):
+        say(f"TPM key attested: {registry.printable(found['attestation'], 200)}")
     if found.get("inherits"):
         inherited = ", ".join(registry.printable(a) for a in found["inherits"])
         say(f"This name was paired before: the machine would inherit {inherited}")

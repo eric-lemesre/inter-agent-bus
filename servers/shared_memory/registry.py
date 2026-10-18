@@ -43,7 +43,8 @@ CREATE TABLE IF NOT EXISTS machines (
     renewed_at       TEXT NOT NULL,
     expires_at       TEXT NOT NULL,
     last_seen        TEXT NOT NULL DEFAULT '',
-    revoked_at       TEXT NOT NULL DEFAULT ''
+    revoked_at       TEXT NOT NULL DEFAULT '',
+    attestation      TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS pairing_requests (
     device_hash TEXT PRIMARY KEY,
@@ -61,7 +62,8 @@ CREATE TABLE IF NOT EXISTS pairing_requests (
     expires_at  TEXT NOT NULL,
     last_poll   TEXT NOT NULL DEFAULT '',
     cert        TEXT NOT NULL DEFAULT '',
-    decided_by  TEXT NOT NULL DEFAULT ''
+    decided_by  TEXT NOT NULL DEFAULT '',
+    attestation TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS agent_machines (
     agent    TEXT PRIMARY KEY,
@@ -78,6 +80,12 @@ CREATE TABLE IF NOT EXISTS invitations (
     created_at TEXT NOT NULL,
     expires_at TEXT NOT NULL,
     used_at    TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS trusted_eks (
+    fingerprint TEXT PRIMARY KEY,
+    note        TEXT NOT NULL DEFAULT '',
+    added_by    TEXT NOT NULL,
+    added_at    TEXT NOT NULL
 );
 """
 
@@ -105,14 +113,25 @@ def _create(conn) -> None:
     for statement in SCHEMA.split(";"):
         if statement.strip():
             conn.execute(conn.dialect.ddl(statement))
+    # Additive migrations (registries created before the TPM attestation).
+    for table in ("machines", "pairing_requests"):
+        if "attestation" not in conn.dialect.columns(conn, table):
+            try:
+                store._add_column(conn, table, "attestation TEXT NOT NULL DEFAULT ''")
+            except Exception:
+                # Two first connections after an upgrade may race (SQLite
+                # prepares every connection); losing that race is fine.
+                if "attestation" not in conn.dialect.columns(conn, table):
+                    raise
 
 
 def enroll(
     name: str, role: str, key_kind: str, fingerprint: str, serial: str,
-    expires_at: str, platform: str = "",
+    expires_at: str, platform: str = "", attestation: str = "",
 ) -> str:
     """Record a newly paired machine. A revoked name may be paired again
-    (a reinstalled machine); an active one may not — revoke it first."""
+    (a reinstalled machine); an active one may not — revoke it first.
+    `attestation` says how a TPM key was proven (attest.py)."""
     name = name.strip().lower()
     if not valid_machine_name(name):
         return f"ERROR: invalid machine name '{name}' — expected [a-z0-9][a-z0-9.-]{{0,62}}."
@@ -129,9 +148,10 @@ def enroll(
         conn.execute("DELETE FROM machines WHERE name=?", (name,))
         conn.execute(
             "INSERT INTO machines(name, role, key_kind, status, fingerprint, serial, "
-            "platform, enrolled_at, renewed_at, expires_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+            "platform, enrolled_at, renewed_at, expires_at, attestation) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
             (name, role, key_kind, "active", fingerprint, serial, platform, now, now,
-             expires_at),
+             expires_at, attestation),
         )
         store._log_event(conn, "machine", agent=None,
                          detail=f"paired {name} ({role}, key {key_kind})")
@@ -199,8 +219,8 @@ def revoke(name: str) -> str:
 def list_machines() -> list[dict]:
     with closing(_connect()) as conn:
         rows = conn.execute(
-            "SELECT name, role, key_kind, status, platform, enrolled_at, renewed_at, "
-            "expires_at, last_seen, revoked_at FROM machines ORDER BY name"
+            "SELECT name, role, key_kind, attestation, status, platform, enrolled_at, "
+            "renewed_at, expires_at, last_seen, revoked_at FROM machines ORDER BY name"
         ).fetchall()
     return [dict(r) for r in rows]
 
@@ -210,6 +230,47 @@ def get(name: str) -> dict | None:
         row = conn.execute("SELECT * FROM machines WHERE name=?",
                            (name.strip().lower(),)).fetchone()
     return dict(row) if row else None
+
+
+# -- endorsement keys trusted by an admin (TPMs without a manufacturer
+# certificate: virtual TPMs, or certificates this hub cannot read) -------
+
+
+def trust_ek(fingerprint: str, note: str, admin: str) -> str:
+    """An admin vouches, once, for a TPM's endorsement key — after reading
+    its fingerprint on the machine itself. Machines it already attested
+    keep their pairing if it is withdrawn later."""
+    note = printable(note, 120)
+    with closing(_connect()) as conn, store._write(conn):
+        if conn.execute("SELECT 1 FROM trusted_eks WHERE fingerprint=?",
+                        (fingerprint,)).fetchone() is not None:
+            return f"ERROR: endorsement key {fingerprint} is already trusted."
+        conn.execute("INSERT INTO trusted_eks(fingerprint, note, added_by, added_at) "
+                     "VALUES(?,?,?,?)", (fingerprint, note, admin, store._now()))
+        store._log_event(conn, "machine", detail=f"EK {fingerprint} trusted by {admin}")
+    return f"OK: endorsement key {fingerprint} trusted."
+
+
+def untrust_ek(fingerprint: str, admin: str) -> str:
+    with closing(_connect()) as conn, store._write(conn):
+        cur = conn.execute("DELETE FROM trusted_eks WHERE fingerprint=?", (fingerprint,))
+        if not cur.rowcount:
+            return f"ERROR: endorsement key {fingerprint} is not trusted."
+        store._log_event(conn, "machine", detail=f"EK {fingerprint} withdrawn by {admin}")
+    return f"OK: endorsement key {fingerprint} no longer trusted."
+
+
+def trusted_ek(fingerprint: str) -> dict | None:
+    with closing(_connect()) as conn:
+        row = conn.execute("SELECT * FROM trusted_eks WHERE fingerprint=?",
+                           (fingerprint,)).fetchone()
+    return dict(row) if row else None
+
+
+def list_trusted_eks() -> list[dict]:
+    with closing(_connect()) as conn:
+        rows = conn.execute("SELECT * FROM trusted_eks ORDER BY added_at").fetchall()
+    return [dict(r) for r in rows]
 
 
 # -- pairing (RFC 8628 device authorization, adapted) -----------------------
@@ -318,15 +379,16 @@ def committed_request(device_code: str) -> dict | None:
     with closing(_connect()) as conn:
         _expire(conn)
         row = conn.execute(
-            "SELECT commitment, nonce_hub, user_code FROM pairing_requests "
+            "SELECT commitment, nonce_hub, user_code, key_kind FROM pairing_requests "
             "WHERE device_hash=? AND status='committed'", (_hash(device_code),)).fetchone()
     return dict(row) if row else None
 
 
-def reveal_request(device_code: str, csr_pem: str, words: str) -> dict | str:
-    """Step 2: the revealed request matched its commitment (checked by the
-    caller); the request now waits for a person. Returns {user_code,
-    expires_in, interval}."""
+def reveal_request(device_code: str, csr_pem: str, words: str,
+                   attestation: str = "") -> dict | str:
+    """Step 2: the revealed request matched its commitment (and its TPM
+    attestation, if any — checked by the caller); the request now waits
+    for a person. Returns {user_code, expires_in, interval}."""
     with closing(_connect()) as conn, store._write(conn):
         _expire(conn)
         row = conn.execute(
@@ -334,8 +396,9 @@ def reveal_request(device_code: str, csr_pem: str, words: str) -> dict | str:
             "WHERE device_hash=? AND status='committed'", (_hash(device_code),)).fetchone()
         if row is None:
             return "ERROR: no pairing request waiting for this reveal (expired?)."
-        conn.execute("UPDATE pairing_requests SET status='pending', csr=?, words=? "
-                     "WHERE device_hash=?", (csr_pem, words, _hash(device_code)))
+        conn.execute("UPDATE pairing_requests SET status='pending', csr=?, words=?, "
+                     "attestation=? WHERE device_hash=?",
+                     (csr_pem, words, attestation, _hash(device_code)))
     left = (datetime.fromisoformat(row["expires_at"]) - datetime.now(timezone.utc))
     return {"user_code": row["user_code"], "expires_in": max(0, int(left.total_seconds())),
             "interval": POLL_INTERVAL}
@@ -380,8 +443,9 @@ def lookup_request(user_code: str) -> dict | None:
     with closing(_connect()) as conn:
         _expire(conn)
         row = conn.execute(
-            "SELECT user_code, name, platform, key_kind, source, words, created_at, "
-            "expires_at FROM pairing_requests WHERE user_code=? AND status='pending'",
+            "SELECT user_code, name, platform, key_kind, attestation, source, words, "
+            "created_at, expires_at FROM pairing_requests "
+            "WHERE user_code=? AND status='pending'",
             (normalize_code(user_code),)).fetchone()
     return dict(row) if row else None
 
@@ -419,9 +483,9 @@ def approve_request(user_code: str, name: str, role: str, key_kind: str, cert_pe
         conn.execute("DELETE FROM machines WHERE name=?", (name,))
         conn.execute(
             "INSERT INTO machines(name, role, key_kind, status, fingerprint, serial, "
-            "platform, enrolled_at, renewed_at, expires_at) "
-            "SELECT ?, ?, ?, 'active', ?, ?, platform, ?, ?, ? FROM pairing_requests "
-            "WHERE user_code=?",
+            "platform, enrolled_at, renewed_at, expires_at, attestation) "
+            "SELECT ?, ?, ?, 'active', ?, ?, platform, ?, ?, ?, attestation "
+            "FROM pairing_requests WHERE user_code=?",
             (name, role, key_kind, fingerprint, serial, now, now, expires_at, code),
         )
         conn.execute("UPDATE pairing_requests SET status='approved', cert=?, name=?, "
@@ -464,11 +528,13 @@ def create_invitation(name: str, role: str, created_by: str,
     return token
 
 
-def redeem_invitation(token_id: str, name: str, signed: bytes, mac: str) -> dict | str:
+def redeem_invitation(token_id: str, name: str, signed: bytes, mac: str,
+                      refuse=None) -> dict | str:
     """Consume an invitation for `name`: refused when unknown, used,
     expired, issued for another name, or when `mac` is not the MAC of
     `signed` (the certificate request) under the invitation's key — proof
-    that the requester holds the token, bound to ITS key. Returns the
+    that the requester holds the token, bound to ITS key. `refuse(role)`
+    (the hub's policy) may refuse it too, before it is spent. Returns the
     invitation with its key (to prove the CA back)."""
     name = name.strip().lower()
     with closing(_connect()) as conn, store._write(conn):
@@ -486,6 +552,9 @@ def redeem_invitation(token_id: str, name: str, signed: bytes, mac: str) -> dict
         machine = conn.execute("SELECT status FROM machines WHERE name=?", (name,)).fetchone()
         if machine is not None and machine["status"] == "active":
             return f"ERROR: machine '{name}' is already paired — revoke it first."
+        refused = refuse(row["role"]) if refuse is not None else None
+        if refused:
+            return refused
         conn.execute("UPDATE invitations SET used_at=? WHERE token_hash=?",
                      (store._now(), row["token_hash"]))
     return {"name": row["name"], "role": row["role"], "created_by": row["created_by"],
