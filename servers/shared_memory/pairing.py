@@ -6,31 +6,45 @@ the registry (registry.py) holds the state, pki.py the cryptography. Every
 answer is a dict (success) or an `ERROR:` string (refusal), like the core.
 
 Policy (owner's decision of 2026-10-17): an admin machine — one that can
-approve pairings and revoke machines — must hold a TPM key. Until a
-machine can prove it (phase 9e), the only admin is the one `iab hub init`
-creates locally.
+approve pairings and revoke machines — must hold a TPM key, attested
+(attest.py), never declared. The exception is the machine `iab hub init`
+creates on the hub itself: its key sits next to the CA key, which a TPM
+would not protect better.
 """
 from __future__ import annotations
 
+import base64
+import hashlib
+import hmac
 import json
+import secrets
+import threading
+import time
 from pathlib import Path
 
 try:  # installed package (`iab` maps to this directory)
-    from . import pki, registry, store
+    from . import attest, pki, registry, store
 except ImportError:  # bare script usage
+    import attest
     import pki
     import registry
     import store
 
-# Key kinds a joining machine may claim today. `tpm` needs an attestation
-# the hub can verify (phase 9e); a bare claim proves nothing.
-CLAIMABLE_KEY_KINDS = ("file",)
+# Key kinds a joining machine may claim. `tpm` holds only with an
+# attestation the hub verified; a bare claim proves nothing.
+CLAIMABLE_KEY_KINDS = ("file", "tpm")
+# A challenge is answered within seconds; unauthenticated, so bounded —
+# per source, and overall (the oldest gives way: one source cannot hold
+# the table, a legitimate machine retries).
+CHALLENGE_TTL = 120
+MAX_CHALLENGES = 64
+MAX_CHALLENGES_PER_SOURCE = 4
 
 
 def policy(role: str, key_kind: str) -> str | None:
     if role == "admin" and key_kind != "tpm":
-        return ("ERROR: an admin machine must hold a TPM key (owner's policy) — pair it "
-                "as a member.")
+        return ("ERROR: an admin machine must hold an attested TPM key (owner's policy) — "
+                "pair it with `iab join --tpm`, or as a member.")
     return None
 
 
@@ -43,6 +57,13 @@ class Authority:
         self.ca_cert = pki.load_cert(self.home / "ca.pem")
         self.ca_pem = (self.home / "ca.pem").read_text(encoding="ascii")
         self._ca_key = pki.load_key(self.home / "ca.key")
+        # The manufacturers' CAs shipped with the hub, plus the operator's.
+        self.trust = attest.Trust(self.home / "tpm-ca")
+        # Challenges live seconds, between two requests of one machine to
+        # this process: memory is enough (a restart only makes it retry).
+        # id → (deadline, secret digest, key fingerprint, description, source)
+        self._challenges: dict[str, tuple[float, bytes, str, str, str]] = {}
+        self._challenge_lock = threading.Lock()
 
     @property
     def bus_url(self) -> str:
@@ -60,6 +81,58 @@ class Authority:
 
     # -- pairing listener (no client certificate) --------------------------
 
+    def challenge(self, body: dict, source: str) -> dict | str:
+        """TPM attestation, step 1 (attest.py): check what the machine says
+        about its chip, then seal a secret to its EK for the key of its
+        certificate request. The machine answers with its next request."""
+        try:
+            csr = pki.load_csr(str(body.get("csr", "")).encode("ascii"))
+        except (ValueError, UnicodeEncodeError) as exc:
+            return f"ERROR: unusable certificate request: {exc}."
+        checked = attest.check(body.get("tpm"), csr.public_key(), self.trust,
+                               registry.trusted_ek)
+        if isinstance(checked, str):
+            return checked
+        secret = secrets.token_bytes(attest.SECRET_BYTES)
+        blob, encrypted = attest.make_credential(checked.ek, secret, checked.name)
+        challenge_id = secrets.token_urlsafe(16)
+        now = time.monotonic()
+        with self._challenge_lock:
+            self._challenges = {k: v for k, v in self._challenges.items() if v[0] > now}
+            if sum(1 for v in self._challenges.values() if v[4] == source) \
+                    >= MAX_CHALLENGES_PER_SOURCE:
+                return "ERROR: too many TPM attestations in progress from this address."
+            if len(self._challenges) >= MAX_CHALLENGES:  # dicts keep insertion order
+                del self._challenges[next(iter(self._challenges))]
+            self._challenges[challenge_id] = (now + CHALLENGE_TTL,
+                                              hashlib.sha256(secret).digest(),
+                                              pki.spki_sha256(csr.public_key()),
+                                              checked.description, source)
+        return {"id": challenge_id, "credential_blob": attest.encode(blob),
+                "encrypted_secret": attest.encode(encrypted)}
+
+    def _attested(self, body: dict, csr, key_kind: str) -> str:
+        """"" for a file key; for a TPM key, how it was proven, or an ERROR
+        line. Each challenge is answered once, for the key it was made for."""
+        if key_kind != "tpm":
+            return ""
+        proof = body.get("attestation")
+        if not isinstance(proof, dict):
+            return "ERROR: a TPM key must answer the hub's attestation challenge."
+        with self._challenge_lock:
+            entry = self._challenges.pop(str(proof.get("id", "")), None)
+        if entry is None or entry[0] < time.monotonic():
+            return "ERROR: TPM attestation unknown or expired — pair again."
+        try:
+            secret = base64.b64decode(str(proof.get("secret", "")), validate=True)
+        except ValueError:
+            secret = b""
+        if not hmac.compare_digest(hashlib.sha256(secret).digest(), entry[1]):
+            return "ERROR: TPM attestation failed: the chip did not return the hub's secret."
+        if entry[2] != pki.spki_sha256(csr.public_key()):
+            return "ERROR: TPM attestation was made for another key."
+        return entry[3]
+
     def invited(self, body: dict, source: str) -> dict | str:
         """A machine joins with an invitation: paired at once. It proves it
         holds the token by a MAC over its own request (the token never
@@ -67,8 +140,7 @@ class Authority:
         name = str(body.get("name", "")).strip().lower()
         key_kind = str(body.get("key_kind", "file"))
         if key_kind not in CLAIMABLE_KEY_KINDS:
-            return (f"ERROR: key kind '{key_kind}' cannot be proven to this hub yet — "
-                    "pair with a file key.")
+            return f"ERROR: unknown key kind '{key_kind}' — expected file or tpm."
         try:
             csr = pki.load_csr(str(body.get("csr", "")).encode("ascii"))
         except (ValueError, UnicodeEncodeError) as exc:
@@ -79,21 +151,22 @@ class Authority:
         token_id = body.get("invitation")
         if not token_id:
             return "ERROR: an invited join needs its invitation id."
+        # Before the invitation is spent: a failed proof leaves it usable.
+        attestation = self._attested(body, csr, key_kind)
+        if attestation.startswith("ERROR"):
+            return attestation
         invitation = registry.redeem_invitation(
             str(token_id), name, str(body.get("csr", "")).encode("utf-8"),
-            str(body.get("mac", "")))
+            str(body.get("mac", "")), refuse=lambda role: policy(role, key_kind))
         if isinstance(invitation, str):
             return invitation
-        refused = policy(invitation["role"], key_kind)
-        if refused:
-            return refused
         cert_pem, fingerprint, serial, expires = self._issue(csr.public_key(), name)
         enrolled = registry.enroll(name, invitation["role"], key_kind, fingerprint, serial,
-                                   expires, platform)
+                                   expires, platform, attestation)
         if enrolled.startswith("ERROR"):
             return enrolled
-        self._announce(f"machine '{name}' paired as {invitation['role']} by invitation "
-                       f"of {invitation['created_by']} (from {source})")
+        self._announce(f"machine '{name}' paired as {invitation['role']} ({key_kind} key) "
+                       f"by invitation of {invitation['created_by']} (from {source})")
         return {**common, "status": "approved", "name": name, "certificate": cert_pem,
                 "proof": pki.invitation_proof(invitation["key"], self.ca_cert, self.bus_url)}
 
@@ -102,8 +175,7 @@ class Authority:
         name = str(body.get("name", "")).strip().lower()
         key_kind = str(body.get("key_kind", "file"))
         if key_kind not in CLAIMABLE_KEY_KINDS:
-            return (f"ERROR: key kind '{key_kind}' cannot be proven to this hub yet — "
-                    "pair with a file key.")
+            return f"ERROR: unknown key kind '{key_kind}' — expected file or tpm."
         created = registry.create_request(name, str(body.get("platform", "")), key_kind,
                                           source, str(body.get("commitment", "")))
         if isinstance(created, str):
@@ -129,9 +201,12 @@ class Authority:
             csr = pki.load_csr(csr_text.encode("ascii"))
         except (ValueError, UnicodeEncodeError) as exc:
             return f"ERROR: unusable certificate request: {exc}."
+        attestation = self._attested(body, csr, waiting["key_kind"])
+        if attestation.startswith("ERROR"):
+            return attestation
         words = pki.check_words(self.ca_cert, csr.public_key(), nonce_joiner,
                                 waiting["nonce_hub"], self.bus_url)
-        return registry.reveal_request(device_code, csr_text, words)
+        return registry.reveal_request(device_code, csr_text, words, attestation)
 
     def poll(self, body: dict) -> dict:
         return registry.poll_request(str(body.get("device_code", "")))
@@ -165,17 +240,16 @@ class Authority:
                                         fingerprint, serial, expires, approver)
         if done.startswith("ERROR"):
             return done
-        self._announce(f"machine '{final}' paired as {role}, approved by {approver} "
-                       f"(request from {found['source']})")
+        self._announce(f"machine '{final}' paired as {role} ({found['key_kind']} key), "
+                       f"approved by {approver} (request from {found['source']})")
         return {"result": done, "name": final, "expires_at": expires}
 
     def deny(self, user_code: str, approver: str) -> str:
         return registry.deny_request(user_code, approver)
 
     def invite(self, name: str, role: str, ttl: int, admin: str) -> dict | str:
-        refused = policy(role, "file")
-        if refused:
-            return refused
+        # An admin invitation is redeemed only with an attested TPM key
+        # (policy, checked at redemption): the token alone grants nothing more.
         token = registry.create_invitation(name, role, admin, ttl)
         if token.startswith("ERROR"):
             return token
@@ -193,6 +267,26 @@ class Authority:
         done = registry.revoke(name)
         if done.startswith("OK"):
             self._announce(f"machine '{name}' revoked by {admin}")
+        return done
+
+    def trust_ek(self, fingerprint: str, note: str, admin: str) -> str:
+        value = attest.normalize_fingerprint(fingerprint)
+        if value is None:
+            return "ERROR: an EK fingerprint is 64 hexadecimal characters (SHA-256)."
+        done = registry.trust_ek(value, note, admin)
+        if done.startswith("OK"):
+            shown = registry.printable(note, 120)
+            self._announce(f"TPM endorsement key {value} trusted by {admin}"
+                           + (f" ({shown})" if shown else ""))
+        return done
+
+    def untrust_ek(self, fingerprint: str, admin: str) -> str:
+        value = attest.normalize_fingerprint(fingerprint)
+        if value is None:
+            return "ERROR: an EK fingerprint is 64 hexadecimal characters (SHA-256)."
+        done = registry.untrust_ek(value, admin)
+        if done.startswith("OK"):
+            self._announce(f"TPM endorsement key {value} withdrawn by {admin}")
         return done
 
     def machines(self) -> list[dict]:

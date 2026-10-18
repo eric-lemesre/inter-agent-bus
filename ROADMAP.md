@@ -325,9 +325,19 @@ Internet closed at first, TPM mandatory for admin machines.
   calling machine is journaled with every event. `iab hub import`
   brings a machine's local bus over in one transaction, its instances
   bound to that machine (`--bind`) or to none.
-- **9e** — TPM keys, per-machine policy. Owner's decision: keys are
-  attested (EK certified by the manufacturer, credential activation),
-  never declared; a virtual TPM's EK is trusted by an admin, once.
+- **9e** — TPM keys, attested — **shipped**. `iab join --tpm`: the
+  machine key is generated in the TPM 2.0 chip (TSS2 file, useless
+  elsewhere), the request signed by the chip; the hub checks the key's
+  attributes (fixedTPM, fixedParent, sensitiveDataOrigin), the EK
+  certificate up to a manufacturer root (TrustedTpm.cab bundle,
+  intermediates fetched by the machine, operator's `tpm-ca/` folder),
+  then seals a secret to the EK for the key's name (MakeCredential in
+  software, `attest.py`) that only the chip gives back; a virtual TPM's
+  EK is trusted by an admin, once (`iab trust-ek`). Admin invitations
+  allowed, refused to a file key without being spent. Every TLS
+  handshake is signed by the chip (OpenSSL tpm2 provider, `tpmtls.py`).
+  Tests: `attest_test.py` (software chip, forgeries), `hub_test.py`
+  (protocol), `tpm_test.py` (real chip, end to end). Linux first.
 - **9f** — PostgreSQL dialect, tests on two engines — **shipped**.
   `IAB_DB=postgresql://…` (extra `[postgres]`, psycopg): the same SQL as
   SQLite (placeholders translated), a transaction-level advisory lock as

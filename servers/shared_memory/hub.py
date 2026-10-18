@@ -394,6 +394,13 @@ def admin_dispatch(action: str, body: bytes, machine: dict,
     if action == "bind":
         return _answer(registry.pin(str(request.get("agent", "")),
                                     str(request.get("machine", "")), who))
+    if action == "tpm/trust":
+        return _answer(authority.trust_ek(str(request.get("fingerprint", "")),
+                                          str(request.get("note", "")), who))
+    if action == "tpm/untrust":
+        return _answer(authority.untrust_ek(str(request.get("fingerprint", "")), who))
+    if action == "tpm/trusted":
+        return _answer(registry.list_trusted_eks())
     return _bad(404, f"unknown admin action '{action}'.")
 
 
@@ -561,6 +568,8 @@ class _PairHandler(_BaseHandler):
                 try:
                     if self.path == "/v1/pair/commit":
                         status, answer = _answer(authority.commit(request, source))
+                    elif self.path == "/v1/pair/challenge":
+                        status, answer = _answer(authority.challenge(request, source))
                     elif self.path == "/v1/pair/reveal":
                         status, answer = _answer(authority.reveal(request))
                     elif self.path == "/v1/pair/invited":

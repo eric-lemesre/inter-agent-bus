@@ -1,7 +1,9 @@
 """Pairing driver of the multi-machine bus — `iab join`, on the new machine.
 
-The machine generates its key (it never leaves the machine), sends a
-certificate request to the hub's pairing listener and either:
+The machine generates its key (it never leaves the machine — with
+`--tpm`, it never leaves its TPM chip, and the hub checks that by
+attestation, see attest.py), sends a certificate request to the hub's
+pairing listener and either:
 
   - shows a code and four check words, then waits for a person to type
     the code on an admin machine (`iab approve`) and confirm the words —
@@ -17,6 +19,7 @@ Process orchestration only: state lives on the hub (registry.py).
 """
 from __future__ import annotations
 
+import base64
 import hmac
 import http.client
 import json
@@ -30,10 +33,12 @@ from pathlib import Path
 
 try:  # installed package (`iab` maps to this directory)
     from . import pki, registry, remote
+    from .tpmtls import TpmError
 except ImportError:  # bare script usage
     import pki
     import registry
     import remote
+    from tpmtls import TpmError
 
 DEFAULT_PAIR_PORT = remote.DEFAULT_PORT + 1
 MAX_ANSWER = 1024 * 1024  # a pairing answer is a few KiB; refuse a flood
@@ -110,7 +115,8 @@ def _clean(text, limit: int = 300) -> str:
 
 def _result(status: int, answer: dict) -> dict:
     if status != 200 or "result" not in answer:
-        raise JoinError(_clean(answer.get("error") or f"hub answered HTTP {status}")
+        # Room for a refusal's instructions (a fingerprint to trust…).
+        raise JoinError(_clean(answer.get("error") or f"hub answered HTTP {status}", 600)
                         .removeprefix("ERROR: "))
     result = answer["result"]
     if not isinstance(result, dict):
@@ -125,11 +131,11 @@ def _seconds(value, low: int, high: int) -> int:
         raise JoinError("the pairing listener sent an unexpected answer") from None
 
 
-def _check_certificate(cert_pem: str, ca_cert, key, name: str):
+def _check_certificate(cert_pem: str, ca_cert, public_key, name: str):
     cert = pki.load_cert_bytes(cert_pem.encode("ascii"))
     if not pki.issued_by(cert, ca_cert):
         raise JoinError("the certificate received is not signed by the hub's CA")
-    if not pki.same_key(cert.public_key(), key.public_key()):
+    if not pki.same_key(cert.public_key(), public_key):
         raise JoinError("the certificate received is not for this machine's key")
     if pki.common_name(cert) != name:
         raise JoinError(f"the certificate received names '{_clean(pki.common_name(cert))}', "
@@ -137,9 +143,47 @@ def _check_certificate(cert_pem: str, ca_cert, key, name: str):
     return cert
 
 
-def _by_invitation(channel: "_Channel", body: dict, key, token: str) -> tuple[dict, str, str]:
+class _Key:
+    """The machine key being paired: in a file, or in the TPM chip."""
+
+    def __init__(self, name: str, chip=None) -> None:
+        self.chip = chip
+        if chip is None:
+            key = pki.new_key()
+            self.public_key, self.pem = key.public_key(), pki.key_pem(key)
+            self.csr = pki.csr_pem(pki.new_csr(key, name)).decode("ascii")
+            self.kind = "file"
+            return
+        self.tpm_key = chip.new_key()
+        self.public_key, self.pem = self.tpm_key.public_key, self.tpm_key.pem
+        self.csr = chip.csr(self.tpm_key, name)
+        self.endorsement = chip.endorsement()
+        self.kind = "tpm"
+
+    def attest(self, channel: "_Channel") -> dict | None:
+        """Answer the hub's challenge: only the chip holding this key and
+        the endorsement key the hub trusts can (attest.py)."""
+        if self.chip is None:
+            return None
+        material = {"public": _b64(self.tpm_key.public_area),
+                    **self.endorsement.material}
+        challenge = _result(*channel.post("/v1/pair/challenge",
+                                          {"csr": self.csr, "tpm": material}))
+        secret = self.chip.activate(self.tpm_key, self.endorsement, challenge)
+        return {"id": str(challenge.get("id", "")), "secret": _b64(secret)}
+
+
+def _b64(data: bytes) -> str:
+    return base64.b64encode(data).decode("ascii")
+
+
+def _by_invitation(channel: "_Channel", body: dict, key: _Key,
+                   token: str) -> tuple[dict, str, str]:
     # The token itself never travels (the channel may be unverified): an
     # id to find the invitation, a MAC binding it to THIS request.
+    attestation = key.attest(channel)
+    if attestation is not None:
+        body["attestation"] = attestation
     body["invitation"] = registry.invitation_id(token)
     body["mac"] = registry.invitation_mac(registry.invitation_key(token),
                                           body["csr"].encode("utf-8"))
@@ -152,7 +196,7 @@ def _by_invitation(channel: "_Channel", body: dict, key, token: str) -> tuple[di
     return answer, str(answer["name"]), str(answer["certificate"])
 
 
-def _by_code(channel: "_Channel", body: dict, key, say,
+def _by_code(channel: "_Channel", body: dict, key: _Key, say,
              timeout: float | None) -> tuple[dict, str, str]:
     # Commit, then reveal (see pki.check_words): the hub's nonce is drawn
     # after this machine committed to its request, and this machine
@@ -166,14 +210,17 @@ def _by_code(channel: "_Channel", body: dict, key, say,
     if not re.fullmatch(r"[0-9a-f]{64}", nonce_hub):
         raise JoinError("the pairing listener sent an unexpected answer")
     device_code = str(answer.get("device_code", ""))
-    revealed = _result(*channel.post("/v1/pair/reveal", {
-        "device_code": device_code, "csr": csr_text, "nonce": nonce}))
+    reveal = {"device_code": device_code, "csr": csr_text, "nonce": nonce}
+    attestation = key.attest(channel)
+    if attestation is not None:
+        reveal["attestation"] = attestation
+    revealed = _result(*channel.post("/v1/pair/reveal", reveal))
     code = str(revealed.get("user_code", ""))
     if not _CODE_RE.fullmatch(code):
         raise JoinError("the pairing listener sent an unexpected code")
     expires_in = _seconds(revealed.get("expires_in"), 0, 3600)
     interval = _seconds(revealed.get("interval"), 1, 60)
-    words = pki.check_words(ca_cert, key.public_key(), nonce, nonce_hub,
+    words = pki.check_words(ca_cert, key.public_key, nonce, nonce_hub,
                             str(answer.get("bus_url", "")))
     say(f"Hub: {_clean(answer.get('hub', ''), 80)}"
         + ("" if channel.verified else " (certificate not verified)"))
@@ -197,8 +244,10 @@ def _by_code(channel: "_Channel", body: dict, key, say,
 
 
 def join(hub: str, name: str | None = None, token: str | None = None,
-         directory: Path | None = None, say=print, timeout: float | None = None) -> int:
-    """Pair this machine with a hub. Returns a process exit code."""
+         directory: Path | None = None, say=print, timeout: float | None = None,
+         chip=None) -> int:
+    """Pair this machine with a hub. Returns a process exit code. With
+    `chip` (tpm.Chip), the key is generated in the TPM and attested."""
     directory = directory or remote.machine_dir()
     creds = remote.credentials(directory)
     if creds["cert"].exists():
@@ -210,10 +259,19 @@ def join(hub: str, name: str | None = None, token: str | None = None,
         say(f"ERROR: invalid machine name '{name}' — pass --name.")
         return 1
     host, port = _target(hub)
-    key = pki.new_key()
+    try:
+        key = _Key(name, chip)
+    except (TpmError, ValueError) as exc:
+        say(f"ERROR: {exc}.")
+        return 1
+    if chip is not None:
+        ek = key.endorsement
+        say(f"TPM endorsement key: sha256 {ek.fingerprint}")
+        say(f"  certified by {ek.issuer}" if ek.issuer else
+            "  no manufacturer certificate (a virtual TPM?): an admin must trust this "
+            "fingerprint once — `iab trust-ek` — after reading it here")
     body = {"name": name, "platform": f"{platform.system()} {platform.machine()}",
-            "key_kind": "file",
-            "csr": pki.csr_pem(pki.new_csr(key, name)).decode("ascii")}
+            "key_kind": key.kind, "csr": key.csr}
     channel = _Channel(host, port, say)
     try:
         if token:
@@ -223,23 +281,24 @@ def join(hub: str, name: str | None = None, token: str | None = None,
         if not registry.valid_machine_name(final):
             raise JoinError("the hub sent an invalid machine name")
         ca_cert = pki.load_cert_bytes(str(answer["ca"]).encode("ascii"))
-        cert = _check_certificate(cert_pem, ca_cert, key, final)
+        cert = _check_certificate(cert_pem, ca_cert, key.public_key, final)
         bus_url = str(answer.get("bus_url", ""))
         remote.parse_hub(bus_url)
-    except (JoinError, remote.HubError, ValueError, KeyError) as exc:
-        say(f"ERROR: {_clean(exc)}.")
+    except (JoinError, remote.HubError, TpmError, ValueError, KeyError) as exc:
+        say(f"ERROR: {_clean(exc, 600)}.")
         return 1
     expires = pki.not_after(cert).isoformat()
-    write_credentials(directory, key, cert_pem, str(answer["ca"]),
+    write_credentials(directory, key.pem, cert_pem, str(answer["ca"]),
                       {"name": final, "hub": bus_url, "expires_at": expires})
     say(f"Paired as '{final}'. Certificate valid until {expires[:10]}, renewed automatically.")
     say(f"Point this machine's clients at the hub: IAB_HUB={_clean(bus_url, 200)}")
     return 0
 
 
-def write_credentials(directory: Path, key, cert_pem: str, ca_pem: str, info: dict) -> None:
+def write_credentials(directory: Path, key_pem: bytes, cert_pem: str, ca_pem: str,
+                      info: dict) -> None:
     creds = remote.credentials(directory)
-    pki.write_private(creds["key"], pki.key_pem(key))
+    pki.write_private(creds["key"], key_pem)
     pki.write_public(creds["cert"], cert_pem.encode("ascii"))
     pki.write_public(creds["ca"], ca_pem.encode("ascii"))
     remote.write_info(directory, info)

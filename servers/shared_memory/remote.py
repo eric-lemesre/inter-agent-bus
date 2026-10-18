@@ -15,7 +15,8 @@ machine certificate obtained at pairing (mutual TLS):
     long-polls, so a proxy idle timeout never cuts a wait.
 
 Standard library only (`ssl`, `http.client`): `cryptography` is needed
-for pairing and renewal (pki.py), not for calling the hub.
+for pairing and renewal (pki.py), not for calling the hub. A machine key
+held by the TPM is used through OpenSSL's tpm2 provider (tpmtls.py).
 """
 from __future__ import annotations
 
@@ -26,6 +27,7 @@ import os
 import socket
 import ssl
 import sys
+import threading
 import time
 import urllib.parse
 import urllib.request
@@ -34,10 +36,11 @@ from functools import partial
 from pathlib import Path
 
 try:  # installed package (`iab` maps to this directory)
-    from . import store
+    from . import store, tpmtls
     from .access import OPERATIONS
 except ImportError:  # bare script usage
     import store
+    import tpmtls
     from access import OPERATIONS
 
 DEFAULT_PORT = 7443
@@ -108,7 +111,10 @@ def parse_hub(url: str) -> tuple[str, int]:
 
 
 def client_context(creds: dict) -> ssl.SSLContext:
-    """Mutual TLS, bus CA only, hostname checked, TLS 1.3."""
+    """Mutual TLS, bus CA only, hostname checked, TLS 1.3. A TPM-held key
+    (TSS2 PEM) is loaded through OpenSSL's tpm2 provider."""
+    if tpmtls.is_tpm_key(creds["key"]):
+        tpmtls.enable_provider()
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     ctx.minimum_version = ssl.TLSVersion.TLSv1_3
     ctx.check_hostname = True
@@ -160,6 +166,12 @@ class RemoteBackend:
             self.error = ""
         except HubError as exc:  # reported at the first call, like any failure
             self.host, self.port, self.error = "", 0, f"ERROR: {exc}"
+        # Kept across calls while the credential files stay the same: a TPM
+        # key takes the chip a good half second to load.
+        self._ctx: ssl.SSLContext | None = None
+        self._ctx_files: tuple = ()
+        self._ctx_lock = threading.Lock()  # one key load at a time (a TPM's)
+        self._tpm = False
 
     def __getattr__(self, name: str):
         if name not in OPERATIONS:
@@ -178,7 +190,18 @@ class RemoteBackend:
             raise HubError(
                 f"ERROR: this machine is not paired with a hub (no {', '.join(missing)} "
                 f"in {self.creds['dir']}) — run `iab join`.")
-        return client_context(self.creds)
+        files = tuple((s.st_ino, s.st_mtime_ns, s.st_size)
+                      for s in (self.creds[k].stat() for k in ("key", "cert", "ca")))
+        with self._ctx_lock:
+            if self._ctx is None or files != self._ctx_files:
+                try:
+                    ctx = client_context(self.creds)
+                except tpmtls.TpmError as exc:
+                    raise HubError(f"ERROR: this machine's key lives in its TPM, but "
+                                   f"{exc}.") from None
+                self._ctx, self._ctx_files = ctx, files
+                self._tpm = tpmtls.is_tpm_key(self.creds["key"])
+            return self._ctx
 
     def request(self, method: str, path: str, body: dict | None = None,
                 timeout: float = CALL_TIMEOUT) -> tuple[int, dict]:
@@ -194,6 +217,9 @@ class RemoteBackend:
         data = json.dumps(body or {}, ensure_ascii=False).encode("utf-8")
         conn = open_connection(self.host, self.port, ctx, timeout)
         try:
+            if self._tpm:
+                with tpmtls.handshake_lock():
+                    conn.connect()
             conn.request(method, path, body=data,
                          headers={"Content-Type": "application/json",
                                   "X-IAB-Caller": self.caller})

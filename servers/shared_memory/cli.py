@@ -151,7 +151,7 @@ def _hub(args) -> int:
 
 
 def _pairing(args) -> int:
-    """join / approve / deny / invite / machines / revoke / renew / ping —
+    """join / approve / deny / invite / machines / revoke / bind / trust-ek / renew / ping —
     the pairing and admin commands (need the [hub] extra)."""
     _hub_module()  # fail early with the install hint when the extra is missing
     if __package__:
@@ -171,7 +171,21 @@ def _pairing(args) -> int:
         except join.JoinError as exc:
             print(f"ERROR: {exc}")
             return 2
-        return join.join(hub, args.machine_name, token)
+        if not args.tpm:
+            return join.join(hub, args.machine_name, token)
+        if __package__:
+            from . import tpm
+        else:
+            import tpm
+        try:
+            chip = tpm.Chip()
+        except tpm.TpmError as exc:
+            print(f"ERROR: {exc}.")
+            return 1
+        try:
+            return join.join(hub, args.machine_name, token, chip=chip)
+        finally:
+            chip.close()
     if args.command == "approve":
         return admin.approve(args.code, args.machine_name, args.role)
     if args.command == "deny":
@@ -190,6 +204,13 @@ def _pairing(args) -> int:
         return admin.show(admin.call("revoke", {"name": args.name}))
     if args.command == "bind":
         return admin.show(admin.call("bind", {"agent": args.agent, "machine": args.machine}))
+    if args.command == "trust-ek":
+        if args.fingerprint is None:
+            return admin.show(admin.call("tpm/trusted"))
+        if args.remove:
+            return admin.show(admin.call("tpm/untrust", {"fingerprint": args.fingerprint}))
+        return admin.show(admin.call("tpm/trust", {"fingerprint": args.fingerprint,
+                                                   "note": args.note}))
     if args.command == "renew":
         return admin.renew(args.force)
     return join.ping()
@@ -427,6 +448,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--token", metavar="-",
                    help="'-' to read an invitation token on stdin (else IAB_INVITE_TOKEN); "
                         "never pass the token itself as an argument")
+    p.add_argument("--tpm", action="store_true",
+                   help="generate the key inside this machine's TPM chip and prove it to "
+                        "the hub (required for an admin machine; Linux, [tpm] extra)")
     p = sub.add_parser("approve", help="approve a pairing request (admin machine, "
                                        "interactive: compare the check words)")
     p.add_argument("code", nargs="?", help="the code shown by `iab join`")
@@ -446,6 +470,14 @@ def main(argv: list[str] | None = None) -> int:
                                     "or vouches for it in the hub policy")
     p.add_argument("agent")
     p.add_argument("machine")
+    p = sub.add_parser("trust-ek", help="trust a TPM's endorsement key by its fingerprint "
+                                        "(admin): a virtual TPM, or a certificate the hub "
+                                        "cannot verify; without argument, list them")
+    p.add_argument("fingerprint", nargs="?",
+                   help="sha256 printed by `iab join --tpm` — read it on the machine itself")
+    p.add_argument("--note", default="", help="what this TPM is (shown in the list)")
+    p.add_argument("--remove", action="store_true",
+                   help="withdraw the trust (machines already paired stay paired)")
     p = sub.add_parser("renew", help="renew this machine's certificate (automatic when "
                                      "less than 10 days remain)")
     p.add_argument("--force", action="store_true", help="renew now")
@@ -467,7 +499,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "hub":
         return _hub(args)
     if args.command in ("join", "approve", "deny", "invite", "machines", "revoke",
-                        "bind", "renew", "ping"):
+                        "bind", "trust-ek", "renew", "ping"):
         return _pairing(args)
     if args.command == "supervise":
         return wake.supervise(args.interval, args.once, args.dry_run, args.host)

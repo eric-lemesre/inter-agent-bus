@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "inter-agent-bus"
-version = "0.13.1"
+version = "0.14.0"
 description = "Coordination bus between heterogeneous AI agents: task queues with claim/ack leases, shared result store (SQLite), roster-driven routing — the mechanism, never the cast."
 readme = "README.md"
 license = { text = "MIT" }
@@ -15,6 +15,9 @@ dependencies = []
 server = ["mcp>=2.0"]
 hub = ["cryptography>=42"]
 postgres = ["psycopg>=3.2"]
+# Pairing with a TPM key (`iab join --tpm`, Linux): builds against the TSS
+# (libtss2-dev); the python3-tpm2-pytss package is an alternative.
+tpm = ["tpm2-pytss>=2.1"]
 
 [project.urls]
 Repository = "https://github.com/eric-lemesre/inter-agent-bus"
@@ -28,3 +31,6 @@ packages = ["iab"]
 
 [tool.setuptools.package-dir]
 iab = "servers/shared_memory"
+
+[tool.setuptools.package-data]
+iab = ["tpm_roots.pem"]
