@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -7,8 +7,19 @@ name = "inter-agent-bus"
 version = "0.14.2"
 description = "Coordination bus between heterogeneous AI agents: task queues with claim/ack leases, shared result store (SQLite), roster-driven routing — the mechanism, never the cast."
 readme = "README.md"
-license = { text = "MIT OR Apache-2.0" }
+license = "MIT OR Apache-2.0"
+license-files = ["LICENSE-MIT", "LICENSE-APACHE"]
 requires-python = ">=3.10"
+keywords = ["agents", "mcp", "multi-agent", "orchestration", "task-queue", "claude"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Software Development :: Libraries :: Application Frameworks",
+]
 dependencies = []
 
 [project.optional-dependencies]
@@ -20,7 +31,9 @@ postgres = ["psycopg>=3.2"]
 tpm = ["tpm2-pytss>=2.1"]
 
 [project.urls]
+Homepage = "https://github.com/eric-lemesre/inter-agent-bus"
 Repository = "https://github.com/eric-lemesre/inter-agent-bus"
+Issues = "https://github.com/eric-lemesre/inter-agent-bus/issues"
 
 [project.scripts]
 iab = "iab.cli:main"
