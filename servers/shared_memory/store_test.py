@@ -84,7 +84,7 @@ with tempfile.TemporaryDirectory() as tmp:
     )
     out = subprocess.run(
         [sys.executable, "-c", code],
-        cwd=HERE, env=os.environ.copy(), capture_output=True, text=True,
+        cwd=HERE, env=os.environ.copy(), capture_output=True, text=True, encoding="utf-8",
     )
     check("a second process writes into the same bus", "OK" in out.stdout, out.stderr)
     t3 = json.loads(store.claim_task("gamma"))
@@ -106,7 +106,7 @@ with tempfile.TemporaryDirectory() as tmp:
     procs = [
         subprocess.Popen(
             [sys.executable, "-c", "import store; print(store.claim_task('delta'))"],
-            cwd=HERE, env=os.environ.copy(), stdout=subprocess.PIPE, text=True,
+            cwd=HERE, env=os.environ.copy(), stdout=subprocess.PIPE, text=True, encoding="utf-8",
         )
         for _ in range(8)
     ]
@@ -118,21 +118,21 @@ with tempfile.TemporaryDirectory() as tmp:
     # CLI: same core, drivable without MCP and without python -c.
     cli = [sys.executable, str(HERE / "cli.py")]
     out = subprocess.run(cli + ["state"], env=os.environ.copy(),
-                         capture_output=True, text=True)
+                         capture_output=True, text=True, encoding="utf-8")
     check("cli state returns the system state", '"agents"' in out.stdout, out.stderr)
     out = subprocess.run(cli + ["push", "delta", "t-cli", "-"],
                          input="payload via stdin — quotes ' \" and $vars intact",
-                         env=os.environ.copy(), capture_output=True, text=True)
+                         env=os.environ.copy(), capture_output=True, text=True, encoding="utf-8")
     check("cli push reads the payload from stdin",
           out.stdout.startswith("OK"), out.stdout + out.stderr)
     check("cli-pushed payload is intact",
           json.loads(store.claim_task("delta"))["payload"]
           == "payload via stdin — quotes ' \" and $vars intact")
     out = subprocess.run(cli + ["result", "t-missing"], env=os.environ.copy(),
-                         capture_output=True, text=True)
+                         capture_output=True, text=True, encoding="utf-8")
     check("cli exits non-zero on ERROR output", out.returncode == 1, str(out.returncode))
     out = subprocess.run(cli + ["install", "--print", "--agent-name", "kimi"],
-                         env=os.environ.copy(), capture_output=True, text=True)
+                         env=os.environ.copy(), capture_output=True, text=True, encoding="utf-8")
     cfg = json.loads(out.stdout)
     check("cli install --print emits an absolute stdio registration",
           cfg["type"] == "stdio"
@@ -163,7 +163,7 @@ with tempfile.TemporaryDirectory() as tmp:
         return subprocess.run(
             cli + ["review", "--agent", "delta", "--diff", str(diff_file),
                    "--task-id", task_id, "--", sys.executable, "-c", reviewer],
-            env=env, capture_output=True, text=True)
+            env=env, capture_output=True, text=True, encoding="utf-8")
 
     out = run_review_cli("R-ok", good_reviewer)
     check("a structurally sound review passes the guard",
@@ -212,7 +212,7 @@ with tempfile.TemporaryDirectory() as tmp:
         cli + ["worker", "--agent", "zeta", "--once", "--",
                sys.executable, "-c",
                "import sys; print('did: ' + sys.stdin.read().strip())"],
-        env=os.environ.copy(), capture_output=True, text=True)
+        env=os.environ.copy(), capture_output=True, text=True, encoding="utf-8")
     check("worker --once settles the task", out.returncode == 0, out.stderr)
     check("worker publishes the command's stdout",
           json.loads(store.read_result("t-w1"))["content"].strip()
@@ -225,7 +225,7 @@ with tempfile.TemporaryDirectory() as tmp:
         cli + ["worker", "--agent", "zeta", "--once", "--",
                sys.executable, "-c",
                "import sys; sys.stderr.write('boom'); sys.exit(3)"],
-        env=os.environ.copy(), capture_output=True, text=True)
+        env=os.environ.copy(), capture_output=True, text=True, encoding="utf-8")
     r = json.loads(store.read_result("t-w2"))["content"]
     check("worker turns a non-zero exit into an ERROR result",
           r.startswith("ERROR") and "exit 3" in r and "boom" in r, r)
@@ -234,7 +234,7 @@ with tempfile.TemporaryDirectory() as tmp:
     store.push_task("zeta", "t-w3", "x")
     subprocess.run(cli + ["worker", "--agent", "zeta", "--once", "--",
                           sys.executable, "-c", "pass"],
-                   env=os.environ.copy(), capture_output=True, text=True)
+                   env=os.environ.copy(), capture_output=True, text=True, encoding="utf-8")
     r = json.loads(store.read_result("t-w3"))["content"]
     check("worker turns empty output into an ERROR result",
           r.startswith("ERROR") and "no output" in r, r)
@@ -246,7 +246,7 @@ with tempfile.TemporaryDirectory() as tmp:
         cli + ["worker", "--agent", "zeta", "--once", "--lease", "2", "--",
                sys.executable, "-c",
                "import sys, time; sys.stdin.read(); time.sleep(3); print('slow done')"],
-        env=os.environ.copy(), capture_output=True, text=True)
+        env=os.environ.copy(), capture_output=True, text=True, encoding="utf-8")
     check("a long command still settles (heartbeat)",
           json.loads(store.read_result("t-w4"))["content"].strip() == "slow done",
           out.stderr)
@@ -260,7 +260,7 @@ with tempfile.TemporaryDirectory() as tmp:
         cli + ["worker", "--agent", "zeta", "--once", "--lease", "2",
                "--task-timeout", "3", "--",
                sys.executable, "-c", "import sys, time; sys.stdin.read(); time.sleep(60)"],
-        env=os.environ.copy(), capture_output=True, text=True)
+        env=os.environ.copy(), capture_output=True, text=True, encoding="utf-8")
     r = json.loads(store.read_result("t-w5"))["content"]
     check("a hung command is killed after --task-timeout",
           r.startswith("ERROR") and "timeout" in r, r)
@@ -411,7 +411,7 @@ with tempfile.TemporaryDirectory() as tmp:
     )
     outs = [
         subprocess.run([sys.executable, "-c", probe], cwd=d, env=env2,
-                       capture_output=True, text=True).stdout.strip()
+                       capture_output=True, text=True, encoding="utf-8").stdout.strip()
         for d in (proj_a, proj_b)
     ]
     check("two sessions in two projects resolve distinct buses",
@@ -534,7 +534,7 @@ with tempfile.TemporaryDirectory() as tmp:
     env7["PYTHONPATH"] = str(HERE)
     probe7 = "import store; print(store.announce('delta', 'alerts', 'from-child'))"
     out = subprocess.run([sys.executable, "-c", probe7], env=env7,
-                         capture_output=True, text=True).stdout.strip()
+                         capture_output=True, text=True, encoding="utf-8").stdout.strip()
     check("another process can announce on the channel", out.startswith("{"))
     msgs = json.loads(store.read_channel(since_seq=s4))
     check("the child's announcement is visible here",
@@ -569,7 +569,7 @@ with tempfile.TemporaryDirectory() as tmp:
     probe8 = ("import store; store.register_agent('child', 'other process'); "
               "print(store.notify('child', 'delta', 'from-child'))")
     out = subprocess.run([sys.executable, "-c", probe8], env=env8,
-                         capture_output=True, text=True).stdout.strip()
+                         capture_output=True, text=True, encoding="utf-8").stdout.strip()
     check("another process can notify", out.startswith("{"))
     check("the child's notification is polled here",
           any(m["message"] == "from-child" for m in json.loads(store.poll("delta"))))
@@ -604,7 +604,7 @@ with tempfile.TemporaryDirectory() as tmp:
     probe9 = ("import time, store; time.sleep(1.0); "
               "print(store.push_task('delta', 'wake-3', 'late push'))")
     child = subprocess.Popen([sys.executable, "-c", probe9], env=env9,
-                             stdout=subprocess.PIPE, text=True)
+                             stdout=subprocess.PIPE, text=True, encoding="utf-8")
     t0 = time.monotonic()
     woken = json.loads(store.wait_for_task("delta", timeout_s=15, interval_s=0.2))
     elapsed = time.monotonic() - t0
@@ -810,19 +810,19 @@ with tempfile.TemporaryDirectory() as tmp:
     env_cli = os.environ.copy()
     env_cli.update({"IAB_AGENT_NAME": "opencode", "IAB_MODEL": "qwen3-coder"})
     out = subprocess.run(cli + ["whoami"], env=env_cli, cwd=ws_root / "Loose",
-                         capture_output=True, text=True)
+                         capture_output=True, text=True, encoding="utf-8")
     who = json.loads(out.stdout)
     check("cli whoami composes harness@workspace from env and cwd and echoes the model",
           who["agent_name"] == "opencode@loose" and who["model"] == "qwen3-coder"
           and who["workspace_source"] == "cwd", out.stdout + out.stderr)
     out = subprocess.run(cli + ["register", "opencode@sindri", "--model", "qwen3", "--cwd", "/srv"],
-                         env=os.environ.copy(), capture_output=True, text=True)
+                         env=os.environ.copy(), capture_output=True, text=True, encoding="utf-8")
     check("cli register accepts --model and --cwd", out.stdout.startswith("OK"), out.stdout)
     out = subprocess.run(cli + ["rename", "opencode@sindri", "opencode@vm"],
-                         env=os.environ.copy(), capture_output=True, text=True)
+                         env=os.environ.copy(), capture_output=True, text=True, encoding="utf-8")
     check("cli rename works", out.stdout.startswith("OK"), out.stdout + out.stderr)
     out = subprocess.run(cli + ["heartbeat", "opencode@vm", "--model", "qwen3.6"],
-                         env=os.environ.copy(), capture_output=True, text=True)
+                         env=os.environ.copy(), capture_output=True, text=True, encoding="utf-8")
     check("cli heartbeat --model declares the model",
           json.loads(out.stdout)["model"] == "qwen3.6", out.stdout + out.stderr)
 
@@ -910,15 +910,15 @@ with tempfile.TemporaryDirectory() as tmp:
           store.broadcast("kimi@brother", "x" * (16 * 1024 + 1)).startswith("ERROR"))
 
     out = subprocess.run(cli + ["broadcast", "kimi@brother", "claude@*", "-"],
-                         input="via cli", env=os.environ.copy(), capture_output=True, text=True)
+                         input="via cli", env=os.environ.copy(), capture_output=True, text=True, encoding="utf-8")
     check("cli broadcast reads the message from stdin and returns the id",
           "broadcast_id" in out.stdout, out.stdout + out.stderr)
     bid = json.loads(out.stdout)["broadcast_id"]
     out = subprocess.run(cli + ["notify", "claude@homelab", "kimi@brother", "cli reply",
                                 "--reply-to", str(bid)],
-                         env=os.environ.copy(), capture_output=True, text=True)
+                         env=os.environ.copy(), capture_output=True, text=True, encoding="utf-8")
     out2 = subprocess.run(cli + ["replies", str(bid)], env=os.environ.copy(),
-                          capture_output=True, text=True)
+                          capture_output=True, text=True, encoding="utf-8")
     check("cli notify --reply-to and cli replies round-trip",
           out.stdout.startswith("{") and json.loads(out2.stdout)[0]["message"] == "cli reply",
           out.stdout + out2.stdout + out.stderr + out2.stderr)
@@ -952,7 +952,7 @@ with tempfile.TemporaryDirectory() as tmp:
     child = subprocess.Popen(
         [sys.executable, "-c",
          "import time, store; time.sleep(1.0); print(store.notify('yy@wake', 'zz@wake', 'late'))"],
-        env=env9, stdout=subprocess.PIPE, text=True)
+        env=env9, stdout=subprocess.PIPE, text=True, encoding="utf-8")
     t0 = time.monotonic()
     w = json.loads(store.wait_signal("zz@wake", "any", timeout_s=15, interval_s=0.2))
     child.wait(timeout=15)
@@ -1041,19 +1041,19 @@ with tempfile.TemporaryDirectory() as tmp:
     env_w["IAB_ROSTER"] = str(roster_w)
     store.push_task("yy@wake", "t-cli", "x")
     out = subprocess.run(cli + ["wake", "yy@wake", "--dry-run"], env=env_w,
-                         capture_output=True, text=True)
+                         capture_output=True, text=True, encoding="utf-8")
     check("cli wake --dry-run reads the roster from IAB_ROSTER",
           out.stdout.startswith("DRY_RUN") and "t-cli" in out.stdout, out.stdout + out.stderr)
     check("a dry run over an exhausted budget reports it without journaling",
           wake.wake_agent("zz@wake", roster_list, dry_run=True) == "NO_SIGNAL")
-    out = subprocess.run(cli + ["signals", "yy@wake"], env=env_w, capture_output=True, text=True)
+    out = subprocess.run(cli + ["signals", "yy@wake"], env=env_w, capture_output=True, text=True, encoding="utf-8")
     check("cli signals shows the queued task", "t-cli" in out.stdout, out.stdout + out.stderr)
     out = subprocess.run(cli + ["watch", "yy@wake", "--on", "any", "--timeout", "1"],
-                         env=env_w, capture_output=True, text=True)
+                         env=env_w, capture_output=True, text=True, encoding="utf-8")
     check("cli watch --on any prints the JSON snapshot",
           json.loads(out.stdout)["signalled"] is True, out.stdout + out.stderr)
     out = subprocess.run(cli + ["supervise", "--once", "--dry-run"], env=env_w,
-                         capture_output=True, text=True)
+                         capture_output=True, text=True, encoding="utf-8")
     check("cli supervise --once --dry-run covers every launchable entry",
           out.returncode == 0 and "supervising zz@wake, yy" in out.stderr
           and "yy: DRY_RUN" in out.stderr, out.stdout + out.stderr)
@@ -1074,11 +1074,11 @@ with tempfile.TemporaryDirectory() as tmp:
     roster_hf.write_text(json.dumps({"agents": roster_h}), encoding="utf-8")
     env_h = {**os.environ, "IAB_ROSTER": str(roster_hf)}
     out = subprocess.run(cli + ["supervise", "--once", "--dry-run", "--host", "thisbox"],
-                         env=env_h, capture_output=True, text=True)
+                         env=env_h, capture_output=True, text=True, encoding="utf-8")
     check("supervise covers this machine's entries and those without host",
           "supervising near@wake, any@wake on thisbox" in out.stderr, out.stderr)
     out = subprocess.run(cli + ["supervise", "--once", "--dry-run", "--host", "nowhere"],
-                         env=env_h, capture_output=True, text=True)
+                         env=env_h, capture_output=True, text=True, encoding="utf-8")
     check("another machine supervises only the entries without host",
           out.returncode == 0 and "supervising any@wake on nowhere" in out.stderr, out.stderr)
     store.cancel_task("t-far")

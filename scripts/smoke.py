@@ -45,7 +45,7 @@ env: dict[str, str] = {}
 
 def run(step: str, args: list[str], stdin: str | None = None) -> str:
     done = subprocess.run(CLI + args, input=stdin, env=env,
-                          capture_output=True, text=True)
+                          capture_output=True, text=True, encoding="utf-8")
     ok = done.returncode == 0
     print(("ok — " if ok else "FAIL: ") + step)
     if not ok:
@@ -105,7 +105,7 @@ else:
         try:
             env["IAB_HUB"] = f"https://127.0.0.1:{port}"
             for _ in range(50):
-                ping = subprocess.run(CLI + ["whoami"], env=env, capture_output=True, text=True)
+                ping = subprocess.run(CLI + ["whoami"], env=env, capture_output=True, text=True, encoding="utf-8")
                 if '"db_source": "hub"' in ping.stdout and '"error"' not in ping.stdout:
                     break
                 time.sleep(0.1)
@@ -122,7 +122,7 @@ else:
             run("the second machine registers its own instance",
                 ["register", "kimi@second", "-d", "worker on the second machine"])
             refused = subprocess.run(CLI + ["publish", "kimi", "T1", "forged"], env=env,
-                                     capture_output=True, text=True)
+                                     capture_output=True, text=True, encoding="utf-8")
             print(("ok — " if refused.returncode != 0 and "belongs to machine" in refused.stdout
                    else "FAIL: ") + "the second machine cannot act as the first one's agent")
             if refused.returncode == 0:
