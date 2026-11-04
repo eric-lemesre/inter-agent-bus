@@ -7,7 +7,7 @@ name = "inter-agent-bus"
 version = "0.14.1"
 description = "Coordination bus between heterogeneous AI agents: task queues with claim/ack leases, shared result store (SQLite), roster-driven routing — the mechanism, never the cast."
 readme = "README.md"
-license = { text = "MIT" }
+license = { text = "MIT OR Apache-2.0" }
 requires-python = ">=3.10"
 dependencies = []
 

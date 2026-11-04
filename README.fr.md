@@ -365,3 +365,20 @@ Ne jamais enregistrer l'arbre de travail comme plugin d'exploitation —
 installer depuis un tag (voir Installation). Travaux prévus et
 invariants : [`ROADMAP.fr.md`](ROADMAP.fr.md). Règles de contribution,
 humain ou agent : [`AGENTS.md`](AGENTS.md).
+
+## Licence
+
+Distribué sous l'une ou l'autre de ces licences, au choix :
+
+- licence Apache, version 2.0 ([`LICENSE-APACHE`](LICENSE-APACHE) ou
+  <https://www.apache.org/licenses/LICENSE-2.0>) ;
+- licence MIT ([`LICENSE-MIT`](LICENSE-MIT) ou
+  <https://opensource.org/licenses/MIT>).
+
+Identifiant SPDX : `MIT OR Apache-2.0`. Cette licence couvre toutes les
+versions publiées du projet, v0.14.1 et antérieures comprises.
+
+Sauf mention contraire explicite, toute contribution que vous soumettez
+volontairement pour inclusion dans l'œuvre, au sens de la licence
+Apache-2.0, est placée sous cette double licence, sans condition
+supplémentaire. Seuls les textes anglais des licences font foi.
