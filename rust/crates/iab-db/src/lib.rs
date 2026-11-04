@@ -9,8 +9,13 @@
 //! `CONTRAT.md`: an implementation in another language writes the same
 //! database.
 
+mod any;
+mod postgres;
 mod sqlite;
+pub mod tls;
 
+pub use any::AnyConnection;
+pub use postgres::{PostgresConnection, percent_decode, pgpass_lookup, translate};
 pub use sqlite::SqliteConnection;
 
 /// Errors of the database layer.
@@ -19,6 +24,12 @@ pub enum DbError {
     /// Error reported by SQLite.
     #[error(transparent)]
     Sqlite(#[from] rusqlite::Error),
+    /// Error reported by PostgreSQL or its driver.
+    #[error(transparent)]
+    Postgres(#[from] ::postgres::Error),
+    /// A connection URL or a TLS setting that cannot be used.
+    #[error("{0}")]
+    Config(String),
     /// The directory holding the database file cannot be created.
     #[error("cannot create {path}: {source}")]
     Directory {
@@ -245,6 +256,12 @@ pub trait Connection {
 
     /// Create the tables of [`SCHEMA`] that do not exist yet.
     fn create_schema(&mut self) -> Result<(), DbError>;
+
+    /// Whether schema creation must run under the writer lock (PostgreSQL:
+    /// concurrent `CREATE TABLE IF NOT EXISTS` race on the catalogue).
+    fn schema_needs_lock(&self) -> bool {
+        false
+    }
 
     /// Open a write transaction whose first statement takes the writer
     /// lock.

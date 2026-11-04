@@ -4,7 +4,7 @@
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
-use iab_db::{Connection, Row, SqliteConnection, Value, write};
+use iab_db::{AnyConnection, Connection, PostgresConnection, Row, SqliteConnection, Value, write};
 use serde_json::{Map, Value as Json, json};
 
 use crate::Error;
@@ -27,12 +27,12 @@ type Sent = (i64, Vec<String>, Vec<String>);
 /// The bus database of the current process, opened per operation.
 #[derive(Debug, Clone)]
 pub struct Bus {
-    path: std::path::PathBuf,
+    target: Target,
 }
 
 impl Bus {
     /// The bus the environment designates (`CONTRAT.md`, § 1). A hub
-    /// (`IAB_HUB`) or a PostgreSQL URL is refused rather than ignored.
+    /// (`IAB_HUB`) is refused rather than ignored.
     pub fn from_env() -> Result<Self, Error> {
         if !strip(&std::env::var("IAB_HUB").unwrap_or_default()).is_empty() {
             return Err(Error::Unsupported(
@@ -41,30 +41,43 @@ impl Bus {
                     .to_owned(),
             ));
         }
-        match identity::resolve_db().0 {
-            Target::File(path) => Ok(Self { path }),
-            Target::Url(_) => Err(Error::Unsupported(
-                "a postgresql:// bus is not supported by this version of the native client yet; \
-                 use the Python implementation."
-                    .to_owned(),
-            )),
-        }
+        Ok(Self {
+            target: identity::resolve_db().0,
+        })
     }
 
     /// A bus on an explicit SQLite file.
     pub fn at(path: impl Into<std::path::PathBuf>) -> Self {
-        Self { path: path.into() }
+        Self {
+            target: Target::File(path.into()),
+        }
+    }
+
+    /// A bus on an explicit target.
+    pub fn on(target: Target) -> Self {
+        Self { target }
     }
 
     /// One connection, schema and additive migrations applied.
-    fn connect(&self) -> Result<SqliteConnection, Error> {
-        let mut conn = SqliteConnection::open(&self.path)?;
+    fn connect(&self) -> Result<AnyConnection, Error> {
+        let mut conn = match &self.target {
+            Target::File(path) => AnyConnection::Sqlite(SqliteConnection::open(path)?),
+            Target::Url(url) => AnyConnection::Postgres(Box::new(PostgresConnection::open(url)?)),
+        };
         setup(&mut conn)?;
         Ok(conn)
     }
 }
 
 fn setup<C: Connection>(conn: &mut C) -> Result<(), Error> {
+    if conn.schema_needs_lock() {
+        // PostgreSQL: schema and migrations under the writer lock, as
+        // `PostgresDialect.prepare` does.
+        return write(conn, |c| -> Result<(), Error> {
+            c.create_schema()?;
+            migrate(c)
+        });
+    }
     conn.create_schema()?;
     if needs_migration(conn)? {
         // Under the writer lock: two processes opening an old file at once

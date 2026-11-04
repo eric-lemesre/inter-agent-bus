@@ -235,7 +235,19 @@ struct Refusal(String);
 
 impl From<Error> for Refusal {
     fn from(error: Error) -> Self {
-        Self(format!("ERROR: {error}"))
+        // The causes too: "error performing TLS handshake" alone does not
+        // say which certificate was refused, nor why.
+        let mut text = error.to_string();
+        let mut source = std::error::Error::source(&error);
+        while let Some(cause) = source {
+            let cause_text = cause.to_string();
+            if !text.contains(&cause_text) {
+                text.push_str(": ");
+                text.push_str(&cause_text);
+            }
+            source = cause.source();
+        }
+        Self(format!("ERROR: {text}"))
     }
 }
 
