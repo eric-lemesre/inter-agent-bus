@@ -98,13 +98,17 @@ jobs:
       - name: Toolchain
         run: rustup update stable && rustup default stable && rustup component add clippy rustfmt
       - name: Format
-        run: cargo fmt --manifest-path rust/Cargo.toml --check
+        working-directory: rust
+        run: cargo fmt --all --check
       - name: Lints
-        run: cargo clippy --manifest-path rust/Cargo.toml --all-targets --all-features --locked -- -D warnings
+        working-directory: rust
+        run: cargo clippy --all-targets --all-features --locked -- -D warnings
       - name: Unit and behaviour tests
-        run: cargo test --manifest-path rust/Cargo.toml --locked
+        working-directory: rust
+        run: cargo test --locked
       - name: Build
-        run: cargo build --manifest-path rust/Cargo.toml --release --locked
+        working-directory: rust
+        run: cargo build --release --locked
       - name: Install the Python implementation
         run: python -m pip install -e .
       # Every scenario on the four pairs python/python, python/rust,
