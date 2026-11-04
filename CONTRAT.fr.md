@@ -4,7 +4,7 @@
 
 Le bus peut avoir plusieurs implémentations — Python aujourd'hui, un
 client natif en Rust prévu (voir
-[l'étude](AMELIORATIONS-2026-11-04-client-rust.fr.md)) — qui écrivent
+[l'étude](docs/AMELIORATIONS-2026-11-04-client-rust.fr.md)) — qui écrivent
 **la même base** au même moment. Ce document fixe ce sur quoi elles
 doivent s'accorder : à l'octet près pour ce qui est stocké, au sens près
 pour ce qui est renvoyé. L'implémentation Python est la référence ; en

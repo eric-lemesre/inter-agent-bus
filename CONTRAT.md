@@ -3,7 +3,7 @@
 🇬🇧 English · 🇫🇷 [Français](CONTRAT.fr.md)
 
 The bus may have several implementations — Python today, a native Rust
-client planned (see [the study](AMELIORATIONS-2026-11-04-client-rust.md))
+client planned (see [the study](docs/AMELIORATIONS-2026-11-04-client-rust.md))
 — writing **the same database** at the same time. This document states
 what they must agree on: byte for byte for what is stored, in meaning
 for what is returned. The Python implementation is the reference; when

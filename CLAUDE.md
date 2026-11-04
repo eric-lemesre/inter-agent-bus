@@ -9,6 +9,6 @@ Claude-specific notes:
   pass without the MCP SDK.
 - Planned work and its ordering live in `ROADMAP.md` / `ROADMAP.fr.md`;
   field feedback that has not been folded in yet lives in
-  `AMELIORATIONS-*.md` files at the root.
+  `docs/AMELIORATIONS-*.md` files.
 - When editing a bilingual doc (`X.md` / `X.fr.md`), update both
   versions in the same change.

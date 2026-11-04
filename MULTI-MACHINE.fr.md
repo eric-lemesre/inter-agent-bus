@@ -9,7 +9,7 @@ cette base sur le réseau ; les machines s'y appairent une fois, puis
 leurs clients (serveur MCP, CLI, `iab worker`, `iab supervise`) y passent
 d'eux-mêmes dès que `IAB_HUB` est posé. Sans `IAB_HUB`, rien ne change.
 
-Conception et décisions : [`AMELIORATIONS-2026-10-17-multi-machine.fr.md`](AMELIORATIONS-2026-10-17-multi-machine.fr.md).
+Conception et décisions : [`AMELIORATIONS-2026-10-17-multi-machine.fr.md`](docs/AMELIORATIONS-2026-10-17-multi-machine.fr.md).
 
 ## Principe
 

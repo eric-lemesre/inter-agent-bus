@@ -3,7 +3,7 @@
 🇫🇷 Français · 🇬🇧 [English](ROADMAP.md)
 
 Trame de travail pour les évolutions du plugin. Sources : le retour de
-terrain [`AMELIORATIONS-2026-08-25.md`](AMELIORATIONS-2026-08-25.md)
+terrain [`AMELIORATIONS-2026-08-25.md`](docs/AMELIORATIONS-2026-08-25.md)
 (frictions réellement rencontrées en pilotant le bus pendant le jalon
 J0010 du projet `IA-conciliateur-justice`) et sa revue critique. Le
 retour de terrain énonce les *besoins* ; cette trame fixe l'*ordre* et
@@ -230,7 +230,7 @@ partagé. Spécification complète, prête à développer par un tiers :
 
 ## Phase 8 — Identité, diffusion, réveil
 
-Retour de terrain du 2026-10-16 ([`AMELIORATIONS-2026-10-16-identite-broadcast-reveil.fr.md`](AMELIORATIONS-2026-10-16-identite-broadcast-reveil.fr.md)) :
+Retour de terrain du 2026-10-16 ([`AMELIORATIONS-2026-10-16-identite-broadcast-reveil.fr.md`](docs/AMELIORATIONS-2026-10-16-identite-broadcast-reveil.fr.md)) :
 quatre sessions Claude Code partageaient l'unique identité `claude`
 (une file, une présence, un curseur de notifications), un auteur
 fantôme est passé inaperçu six semaines, une réponse est restée non lue
@@ -306,7 +306,7 @@ vingt heures.
 ## Phase 9 — Bus multi-machine
 
 Étude et décisions du 2026-10-17 :
-[`AMELIORATIONS-2026-10-17-multi-machine.fr.md`](AMELIORATIONS-2026-10-17-multi-machine.fr.md).
+[`AMELIORATIONS-2026-10-17-multi-machine.fr.md`](docs/AMELIORATIONS-2026-10-17-multi-machine.fr.md).
 Un moyeu (`iab hub`) expose `store.py` en HTTPS avec mTLS ; les
 machines s'y appairent par code, à la manière de Plex. Décisions :
 moyeu unique, une seule base, `cryptography` dans l'extra `[hub]`,
@@ -386,7 +386,7 @@ machines admin.
 ## Phase 10 — Client natif en Rust
 
 Étude du 2026-11-04 :
-[`AMELIORATIONS-2026-11-04-client-rust.fr.md`](AMELIORATIONS-2026-11-04-client-rust.fr.md).
+[`AMELIORATIONS-2026-11-04-client-rust.fr.md`](docs/AMELIORATIONS-2026-11-04-client-rust.fr.md).
 Un exécutable Rust unique, Windows d'abord, à côté de l'implémentation
 Python, qui reste la référence et la seule à porter le moyeu,
 l'appairage et le TPM. Les deux écrivent la même base, SQLite ou

@@ -18,7 +18,7 @@ posées :
    de WireGuard comprises.
 
 Décisions du porteur prises le 2026-10-17 (§ 13) ; implémentation en
-cours, phase 9 de la [ROADMAP](ROADMAP.fr.md).
+cours, phase 9 de la [ROADMAP](../ROADMAP.fr.md).
 
 ## 1. Constat
 

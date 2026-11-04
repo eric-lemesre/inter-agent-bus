@@ -353,7 +353,7 @@ python3 conformance/run.py                     # suite de conformité (CONTRAT.f
 ```
 
 Toute implémentation qui partage une base — Python aujourd'hui, un
-client natif en Rust prévu ([étude](AMELIORATIONS-2026-11-04-client-rust.fr.md))
+client natif en Rust prévu ([étude](docs/AMELIORATIONS-2026-11-04-client-rust.fr.md))
 — respecte le contrat commun [`CONTRAT.fr.md`](CONTRAT.fr.md), vérifié par
 la suite de conformité. L'intégration continue joue toutes les suites
 sous Linux et Windows, Python 3.10 et 3.14, sur SQLite et sur un serveur

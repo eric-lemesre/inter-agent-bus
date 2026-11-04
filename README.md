@@ -334,7 +334,7 @@ python3 conformance/run.py                     # conformance suite (CONTRAT.md)
 ```
 
 Every implementation sharing a database — Python today, a native Rust
-client planned ([study](AMELIORATIONS-2026-11-04-client-rust.md)) — obeys
+client planned ([study](docs/AMELIORATIONS-2026-11-04-client-rust.md)) — obeys
 the common contract [`CONTRAT.md`](CONTRAT.md), checked by the
 conformance suite. Continuous integration plays every suite on Linux and
 Windows, Python 3.10 and 3.14, on SQLite and on a PostgreSQL server

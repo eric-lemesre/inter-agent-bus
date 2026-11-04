@@ -10,7 +10,7 @@ clients (MCP server, CLI, `iab worker`, `iab supervise`) go through it by
 themselves as soon as `IAB_HUB` is set. Without `IAB_HUB`, nothing
 changes.
 
-Design and decisions: [`AMELIORATIONS-2026-10-17-multi-machine.md`](AMELIORATIONS-2026-10-17-multi-machine.md).
+Design and decisions: [`AMELIORATIONS-2026-10-17-multi-machine.md`](docs/AMELIORATIONS-2026-10-17-multi-machine.md).
 
 ## Principle
 

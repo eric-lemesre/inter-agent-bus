@@ -18,7 +18,7 @@ Noted on 2026-10-17. Owner's requests, in the order they were raised:
    included.
 
 Owner's decisions taken on 2026-10-17 (§ 13); implementation under way,
-phase 9 of the [ROADMAP](ROADMAP.md).
+phase 9 of the [ROADMAP](../ROADMAP.md).
 
 ## 1. Findings
 

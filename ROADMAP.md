@@ -3,7 +3,7 @@
 🇬🇧 English · 🇫🇷 [Français](ROADMAP.fr.md)
 
 Working frame for the plugin's evolutions. Sources: the field report
-[`AMELIORATIONS-2026-08-25.md`](AMELIORATIONS-2026-08-25.md) (real
+[`AMELIORATIONS-2026-08-25.md`](docs/AMELIORATIONS-2026-08-25.md) (real
 frictions hit while driving the bus during the J0010 milestone of the
 `IA-conciliateur-justice` project) and its critical review. The field
 report states the *needs*; this roadmap states the *order* and the
@@ -215,7 +215,7 @@ specification, ready for third-party development:
 
 ## Phase 8 — Identity, broadcast, wake-up
 
-Field report of 2026-10-16 ([`AMELIORATIONS-2026-10-16-identite-broadcast-reveil.md`](AMELIORATIONS-2026-10-16-identite-broadcast-reveil.md)):
+Field report of 2026-10-16 ([`AMELIORATIONS-2026-10-16-identite-broadcast-reveil.md`](docs/AMELIORATIONS-2026-10-16-identite-broadcast-reveil.md)):
 four Claude Code sessions shared the single identity `claude` (one
 queue, one presence, one notification cursor), a ghost author went
 unnoticed for six weeks, and a reply sat unread for twenty hours.
@@ -286,7 +286,7 @@ unnoticed for six weeks, and a reply sat unread for twenty hours.
 ## Phase 9 — Multi-machine bus
 
 Study and decisions of 2026-10-17:
-[`AMELIORATIONS-2026-10-17-multi-machine.md`](AMELIORATIONS-2026-10-17-multi-machine.md).
+[`AMELIORATIONS-2026-10-17-multi-machine.md`](docs/AMELIORATIONS-2026-10-17-multi-machine.md).
 A hub (`iab hub`) exposes `store.py` over HTTPS with mTLS; machines
 pair with it by code, Plex style. Decisions: single hub, one single
 database, `cryptography` in the `[hub]` extra, pairing from the
@@ -358,7 +358,7 @@ Internet closed at first, TPM mandatory for admin machines.
 ## Phase 10 — Native client in Rust
 
 Study of 2026-11-04:
-[`AMELIORATIONS-2026-11-04-client-rust.md`](AMELIORATIONS-2026-11-04-client-rust.md).
+[`AMELIORATIONS-2026-11-04-client-rust.md`](docs/AMELIORATIONS-2026-11-04-client-rust.md).
 A single Rust executable, Windows first, alongside the Python
 implementation, which stays the reference and the only one to hold the
 hub, pairing and TPM. Both write the same database, SQLite or remote
