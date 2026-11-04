@@ -41,6 +41,17 @@ def _version() -> str:
         return "unknown (not installed — pip install -e .)"
 
 
+def _utf8_stdio() -> None:
+    """Standard streams in UTF-8 with no line-ending translation, on every
+    platform: Windows would otherwise decode a payload with the console's
+    code page and turn its CRLF into LF on the way in, LF into CRLF on the
+    way out (CONTRAT.md, "Standard streams")."""
+    for stream, newline in ((sys.stdin, ""), (sys.stdout, "\n"), (sys.stderr, "\n")):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:  # absent when a caller swapped the stream
+            reconfigure(encoding="utf-8", newline=newline)
+
+
 def _content(arg: str | None) -> str:
     if arg is None or arg == "-":
         return sys.stdin.read()
@@ -231,6 +242,7 @@ def _watch(agent: str, timeout: float, interval: float, on: str) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
+    _utf8_stdio()
     parser = argparse.ArgumentParser(
         prog="iab",
         description="Inter-agent bus: task queues under lease and a shared "

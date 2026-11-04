@@ -41,6 +41,12 @@ def _tail(text: str) -> str:
     return text
 
 
+def _decode(data: bytes) -> str:
+    """A command's output as published: UTF-8, an invalid byte shown as
+    U+FFFD rather than losing the whole result."""
+    return data.decode("utf-8", errors="replace")
+
+
 def _run_command(
     cmd: list[str],
     payload: str,
@@ -53,21 +59,23 @@ def _run_command(
     None when the command was killed by the task timeout."""
     heartbeat = max(1, lease_seconds // 2)
     deadline = time.monotonic() + task_timeout if task_timeout else None
+    # Bytes, not text mode: text mode would decode with the locale's
+    # encoding (cp1252 on Windows) and translate line endings both ways —
+    # the payload and the output must cross the pipe byte for byte.
     proc = subprocess.Popen(
-        cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE, text=True,
+        cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
     )
-    pending_input: str | None = payload
+    pending_input: bytes | None = payload.encode("utf-8")
     while True:
         try:
             out, err = proc.communicate(input=pending_input, timeout=heartbeat)
-            return proc.returncode, out, err
+            return proc.returncode, _decode(out), _decode(err)
         except subprocess.TimeoutExpired:
             pending_input = None  # communicate() keeps the unsent remainder
             if deadline is not None and time.monotonic() > deadline:
                 proc.kill()
                 out, err = proc.communicate()
-                return None, out, err
+                return None, _decode(out), _decode(err)
             renewed = bus.extend_lease(task_id, lease_seconds)
             _log(renewed if renewed.startswith("ERROR")
                  else f"heartbeat: lease of '{task_id}' extended")

@@ -263,8 +263,11 @@ def _wake_agent(agent: str, roster: list[dict] | None, dry_run: bool,
     bus.record_wake(agent, f"start: {reason}; {Path(argv[0]).name} in {cwd}")
     started = time.monotonic()
     try:
+        # Bytes, not text mode: text mode would use the locale's encoding
+        # (cp1252 on Windows) and translate line endings — the prompt must
+        # reach the agent byte for byte, in UTF-8.
         proc = subprocess.Popen(argv, cwd=cwd, stdin=subprocess.PIPE,
-                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     except OSError as exc:
         bus.record_wake(agent, f"end: launch failed ({exc})")
         bus.release_wake_lock(agent, token)
@@ -272,11 +275,11 @@ def _wake_agent(agent: str, roster: list[dict] | None, dry_run: bool,
             os.unlink(prompt_file)
         return f"ERROR: cannot launch {argv[0]}: {exc}"
     try:
-        out, err = proc.communicate(input=prompt, timeout=timeout)
+        raw_out, raw_err = proc.communicate(input=prompt.encode("utf-8"), timeout=timeout)
         code: int | None = proc.returncode
     except subprocess.TimeoutExpired:
         proc.kill()
-        out, err = proc.communicate()
+        raw_out, raw_err = proc.communicate()
         code = None
     finally:
         if prompt_file:
@@ -284,6 +287,8 @@ def _wake_agent(agent: str, roster: list[dict] | None, dry_run: bool,
                 os.unlink(prompt_file)
             except OSError:
                 pass
+    out = raw_out.decode("utf-8", errors="replace")
+    err = raw_err.decode("utf-8", errors="replace")
     elapsed = int(time.monotonic() - started)
     if code is None:
         detail = f"end: killed after timeout {timeout}s"
