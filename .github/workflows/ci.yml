@@ -1,0 +1,76 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    name: tests (${{ matrix.os }}, Python ${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ["3.10", "3.14"]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install
+        run: python -m pip install -e ".[server,hub,postgres]" "psycopg[binary]"
+      - name: Core (store_test)
+        run: python servers/shared_memory/store_test.py
+      - name: Hub (hub_test)
+        run: python servers/shared_memory/hub_test.py
+      - name: TPM attestation, software chip (attest_test)
+        run: python servers/shared_memory/attest_test.py
+      - name: End to end (smoke)
+        run: python scripts/smoke.py
+      - name: Conformance (SQLite)
+        run: python conformance/run.py
+
+  postgres-tls:
+    name: PostgreSQL over TLS (${{ matrix.os }}, Python ${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ["3.10", "3.14"]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install
+        run: python -m pip install -e ".[server,hub,postgres]" "psycopg[binary]"
+      # A cluster that accepts the bus role only over TLS with a client
+      # certificate; the URL uses sslmode=verify-full. The script refuses to
+      # hand out a URL if clear text, a foreign authority or a wrong host
+      # name would be accepted.
+      - name: Start the TLS bench
+        run: |
+          url=$(python scripts/pg_tls.py start "$RUNNER_TEMP/pg")
+          echo "IAB_TEST_POSTGRES=$url" >> "$GITHUB_ENV"
+      - name: Core on PostgreSQL (store_test)
+        run: python servers/shared_memory/store_test.py
+      - name: Conformance on PostgreSQL
+        run: python conformance/run.py
+      - name: Server log
+        if: failure()
+        run: cat "$RUNNER_TEMP/pg/server.log" || true
+      - name: Stop the bench
+        if: always()
+        run: python scripts/pg_tls.py stop "$RUNNER_TEMP/pg"
