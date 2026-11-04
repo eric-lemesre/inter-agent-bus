@@ -8,7 +8,9 @@ certificate — the test bench of a bus shared through a remote database.
 `start` generates a test authority, a server certificate for
 `localhost` and a client certificate for the role `iab`, creates a
 cluster in DIR, starts it on 127.0.0.1 and creates the empty database
-`iab_test` owned by `iab`. The role `iab` may connect only over TLS
+`iab_test` owned by `iab`. A second role, `iab_pw` (member of `iab`),
+authenticates by password (SCRAM-SHA-256, over TLS only); its random
+password is written to DIR/password, owner-only — never printed. The role `iab` may connect only over TLS
 (`hostssl … cert`): a clear-text connection, a foreign authority or a
 host name absent from the server certificate are refused — `start`
 checks all three before printing the URL, so a bench that would accept
@@ -25,6 +27,7 @@ from __future__ import annotations
 import datetime
 import ipaddress
 import os
+import secrets
 import shutil
 import socket
 import subprocess
@@ -33,6 +36,7 @@ import urllib.parse
 from pathlib import Path
 
 ROLE = "iab"
+PASSWORD_ROLE = "iab_pw"
 DATABASE = "iab_test"
 
 
@@ -187,7 +191,8 @@ def start(directory: Path) -> str:
     # role over TLS with a client certificate, nothing else.
     (data / "pg_hba.conf").write_text(
         "host    all       postgres 127.0.0.1/32 trust\n"
-        f"hostssl {DATABASE} {ROLE}      127.0.0.1/32 cert\n",
+        f"hostssl {DATABASE} {ROLE}      127.0.0.1/32 cert\n"
+        f"hostssl {DATABASE} {PASSWORD_ROLE}   127.0.0.1/32 scram-sha-256\n",
         encoding="utf-8",
     )
     # Output to a file, never to a pipe: on Windows the server inherits
@@ -201,6 +206,11 @@ def start(directory: Path) -> str:
     with psycopg.connect(admin, autocommit=True) as conn:
         conn.execute(f"CREATE ROLE {ROLE} LOGIN")
         conn.execute(f"CREATE DATABASE {DATABASE} OWNER {ROLE}")
+        password = secrets.token_urlsafe(24)
+        _write_private(directory / "password", password.encode("ascii"))
+        conn.execute("SET password_encryption = 'scram-sha-256'")
+        # A literal: CREATE ROLE takes no parameter. token_urlsafe has no quote.
+        conn.execute(f"CREATE ROLE {PASSWORD_ROLE} LOGIN PASSWORD '{password}' IN ROLE {ROLE}")
     url = _url(directory, port)
     psycopg.connect(url).close()
     refusals = {
