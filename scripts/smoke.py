@@ -22,6 +22,10 @@ import tempfile
 import time
 from pathlib import Path
 
+# The report holds non-ASCII (—, →): print it in UTF-8 even where the
+# console code page cannot (cp1252 on Windows).
+sys.stdout.reconfigure(encoding="utf-8", errors="backslashreplace")
+
 ROOT = Path(__file__).resolve().parent.parent
 CLI = [sys.executable, str(ROOT / "servers" / "shared_memory" / "cli.py")]
 

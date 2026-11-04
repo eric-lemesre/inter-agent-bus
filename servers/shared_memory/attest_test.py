@@ -11,6 +11,10 @@ import sys
 import tempfile
 from pathlib import Path
 
+# The report holds non-ASCII (—, →): print it in UTF-8 even where the
+# console code page cannot (cp1252 on Windows).
+sys.stdout.reconfigure(encoding="utf-8", errors="backslashreplace")
+
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec, rsa

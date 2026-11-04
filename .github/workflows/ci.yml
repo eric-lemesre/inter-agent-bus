@@ -12,6 +12,7 @@ jobs:
   tests:
     name: tests (${{ matrix.os }}, Python ${{ matrix.python }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -41,6 +42,7 @@ jobs:
   postgres-tls:
     name: PostgreSQL over TLS (${{ matrix.os }}, Python ${{ matrix.python }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -70,7 +72,7 @@ jobs:
         run: python conformance/run.py
       - name: Server log
         if: failure()
-        run: cat "$RUNNER_TEMP/pg/server.log" || true
+        run: cat "$RUNNER_TEMP/pg/pg_ctl.log" "$RUNNER_TEMP/pg/server.log" || true
       - name: Stop the bench
         if: always()
         run: python scripts/pg_tls.py stop "$RUNNER_TEMP/pg"

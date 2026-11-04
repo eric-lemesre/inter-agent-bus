@@ -190,8 +190,13 @@ def start(directory: Path) -> str:
         f"hostssl {DATABASE} {ROLE}      127.0.0.1/32 cert\n",
         encoding="utf-8",
     )
-    subprocess.run([str(bindir / "pg_ctl"), "-D", str(data), "-l", str(directory / "server.log"),
-                    "-w", "-t", "60", "start"], check=True, capture_output=True)
+    # Output to a file, never to a pipe: on Windows the server inherits
+    # pg_ctl's handles, and a captured pipe would stay open as long as the
+    # server runs — run() would wait for its end forever.
+    with (directory / "pg_ctl.log").open("wb") as log:
+        subprocess.run([str(bindir / "pg_ctl"), "-D", str(data), "-l",
+                        str(directory / "server.log"), "-w", "-t", "60", "start"],
+                       check=True, stdin=subprocess.DEVNULL, stdout=log, stderr=log)
     admin = f"postgresql://postgres@127.0.0.1:{port}/postgres?sslmode=disable"
     with psycopg.connect(admin, autocommit=True) as conn:
         conn.execute(f"CREATE ROLE {ROLE} LOGIN")
@@ -214,7 +219,8 @@ def stop(directory: Path) -> None:
     data = directory.resolve() / "data"
     if data.exists():
         subprocess.run([str(_bindir() / "pg_ctl"), "-D", str(data), "-m", "fast", "-w", "stop"],
-                       capture_output=True)
+                       stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL)
 
 
 def main(argv: list[str]) -> int:

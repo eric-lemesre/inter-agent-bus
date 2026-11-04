@@ -22,6 +22,10 @@ import tempfile
 import time
 from pathlib import Path
 
+# The report holds non-ASCII (—, →): print it in UTF-8 even where the
+# console code page cannot (cp1252 on Windows).
+sys.stdout.reconfigure(encoding="utf-8", errors="backslashreplace")
+
 HERE = Path(__file__).parent
 fail = 0
 from testdb import PG, fresh_db  # noqa: E402  (engine under test)
