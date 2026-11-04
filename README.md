@@ -38,7 +38,7 @@ never from a working tree:
 ```bash
 python3 -m venv ~/.local/venvs/inter-agent-bus
 ~/.local/venvs/inter-agent-bus/bin/pip install \
-  'inter-agent-bus[server] @ git+https://github.com/eric-lemesre/inter-agent-bus@v0.14.0'
+  'inter-agent-bus[server] @ git+https://github.com/eric-lemesre/inter-agent-bus@v0.14.1'
 ~/.local/venvs/inter-agent-bus/bin/iab install --scope user
 ```
 
@@ -330,7 +330,17 @@ python3 -m venv .venv                          # py -m venv .venv on Windows
 .venv/bin/pip install -r requirements.txt -e . # .venv\Scripts\pip on Windows
 .venv/bin/python servers/shared_memory/store_test.py   # core tests, no MCP SDK needed
 python3 scripts/smoke.py                       # end-to-end, CLI only
+python3 conformance/run.py                     # conformance suite (CONTRAT.md)
 ```
+
+Every implementation sharing a database — Python today, a native Rust
+client planned ([study](AMELIORATIONS-2026-11-04-client-rust.md)) — obeys
+the common contract [`CONTRAT.md`](CONTRAT.md), checked by the
+conformance suite. Continuous integration plays every suite on Linux and
+Windows, Python 3.10 and 3.14, on SQLite and on a PostgreSQL server
+reached over TLS with a client certificate (`scripts/pg_tls.py`, also
+usable locally: `IAB_TEST_POSTGRES=$(python3 scripts/pg_tls.py start
+DIR)`).
 
 Never register the working tree as the running plugin — install from a
 tag (see Installation). Planned work and its invariants:

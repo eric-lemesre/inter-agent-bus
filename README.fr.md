@@ -40,7 +40,7 @@ taguée**, jamais depuis un arbre de travail :
 ```bash
 python3 -m venv ~/.local/venvs/inter-agent-bus
 ~/.local/venvs/inter-agent-bus/bin/pip install \
-  'inter-agent-bus[server] @ git+https://github.com/eric-lemesre/inter-agent-bus@v0.14.0'
+  'inter-agent-bus[server] @ git+https://github.com/eric-lemesre/inter-agent-bus@v0.14.1'
 ~/.local/venvs/inter-agent-bus/bin/iab install --scope user
 ```
 
@@ -349,7 +349,17 @@ python3 -m venv .venv                          # py -m venv .venv sous Windows
 .venv/bin/pip install -r requirements.txt -e . # .venv\Scripts\pip sous Windows
 .venv/bin/python servers/shared_memory/store_test.py   # tests du cœur, sans SDK MCP
 python3 scripts/smoke.py                       # bout en bout, CLI seule
+python3 conformance/run.py                     # suite de conformité (CONTRAT.fr.md)
 ```
+
+Toute implémentation qui partage une base — Python aujourd'hui, un
+client natif en Rust prévu ([étude](AMELIORATIONS-2026-11-04-client-rust.fr.md))
+— respecte le contrat commun [`CONTRAT.fr.md`](CONTRAT.fr.md), vérifié par
+la suite de conformité. L'intégration continue joue toutes les suites
+sous Linux et Windows, Python 3.10 et 3.14, sur SQLite et sur un serveur
+PostgreSQL joint en TLS avec un certificat client (`scripts/pg_tls.py`,
+utilisable aussi en local : `IAB_TEST_POSTGRES=$(python3 scripts/pg_tls.py
+start DIR)`).
 
 Ne jamais enregistrer l'arbre de travail comme plugin d'exploitation —
 installer depuis un tag (voir Installation). Travaux prévus et

@@ -355,6 +355,36 @@ Internet closed at first, TPM mandatory for admin machines.
   with `iab watch --on any`, long-polling the hub.
 - **9h** — MCP streamable HTTP: **deferred**.
 
+## Phase 10 — Native client in Rust
+
+Study of 2026-11-04:
+[`AMELIORATIONS-2026-11-04-client-rust.md`](AMELIORATIONS-2026-11-04-client-rust.md).
+A single Rust executable, Windows first, alongside the Python
+implementation, which stays the reference and the only one to hold the
+hub, pairing and TPM. Both write the same database, SQLite or remote
+PostgreSQL over TLS; their agreement is the contract
+[`CONTRAT.md`](CONTRAT.md). From R1 on, invariants 2 and 4 read: state
+logic lands in `store.py` **and** `iab-core` in the same pull request;
+two implementations, kept in agreement by the contract and the
+conformance suite.
+
+- **R0** — contract, conformance suite, Linux and Windows CI on the
+  Python implementation — **shipped** (v0.14.1). Fixes found on the
+  way: `iab worker` and `iab wake` translated line endings (and used
+  the console code page on Windows), now bytes in UTF-8; the CLI reads
+  and writes UTF-8 without translation on every platform; the test
+  suites now run on Windows.
+- **R1** — `iab-core`, SQLite, `iab` command (register, push, claim,
+  publish, poll, notify, signals, state): local bus on Windows in Rust.
+- **R2** — PostgreSQL over TLS (rustls, libpq parameters, `pgpass`),
+  waits through `LISTEN`/`NOTIFY`: bus shared between two machines.
+- **R3** — `iab-server`, the 23 MCP tools.
+- **R4** — `worker`, `wake`, `supervise` on Windows.
+- **R5** — signing, published archives; `.deb`/`.rpm` when needed.
+
+Each step passes the full conformance suite on both implementations
+before merging.
+
 ## Global acceptance criterion
 
 From a fresh Claude Code session, with no project configuration: push a

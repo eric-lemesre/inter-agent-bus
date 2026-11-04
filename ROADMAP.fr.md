@@ -383,6 +383,38 @@ machines admin.
   --on any`, en long-poll vers le moyeu.
 - **9h** — MCP streamable HTTP : **reportée**.
 
+## Phase 10 — Client natif en Rust
+
+Étude du 2026-11-04 :
+[`AMELIORATIONS-2026-11-04-client-rust.fr.md`](AMELIORATIONS-2026-11-04-client-rust.fr.md).
+Un exécutable Rust unique, Windows d'abord, à côté de l'implémentation
+Python, qui reste la référence et la seule à porter le moyeu,
+l'appairage et le TPM. Les deux écrivent la même base, SQLite ou
+PostgreSQL distant en TLS ; leur accord est le contrat
+[`CONTRAT.fr.md`](CONTRAT.fr.md). À partir de R1, les invariants 2 et 4
+se lisent : la logique d'état atterrit dans `store.py` **et** `iab-core`
+dans la même demande de fusion ; deux implémentations, tenues d'accord
+par le contrat et la suite de conformité.
+
+- **R0** — contrat, suite de conformité, intégration continue Linux et
+  Windows sur l'implémentation Python — **livrée** (v0.14.1). Correctifs
+  trouvés en route : `iab worker` et `iab wake` traduisaient les fins de
+  ligne (et prenaient la page de code de la console sous Windows),
+  désormais en octets UTF-8 ; la ligne de commande lit et écrit en UTF-8
+  sans traduction sur toutes les plateformes ; les suites de tests
+  tournent désormais sous Windows.
+- **R1** — `iab-core`, SQLite, commande `iab` (register, push, claim,
+  publish, poll, notify, signals, state) : bus local sous Windows en Rust.
+- **R2** — PostgreSQL en TLS (rustls, paramètres libpq, `pgpass`),
+  attentes par `LISTEN`/`NOTIFY` : bus partagé entre deux machines.
+- **R3** — `iab-server`, les 23 outils MCP.
+- **R4** — `worker`, `wake`, `supervise` sous Windows.
+- **R5** — signature, archives publiées ; `.deb`/`.rpm` quand le besoin
+  viendra.
+
+Chaque étape passe la suite de conformité complète sur les deux
+implémentations avant fusion.
+
 ## Critère d'acceptation global
 
 Depuis une session Claude Code fraîche, sans configuration projet :
