@@ -9,13 +9,16 @@ B, each scenario runs as A/A, A/B, B/A and B/B on every engine.
 
     python3 conformance/run.py
     python3 conformance/run.py --impl rust='["/path/to/iab"]'
+    python3 conformance/run.py --impl python='[…]' --impl rust='[…]' --without rust=worker
     IAB_TEST_POSTGRES=<URL of an EMPTY test database> python3 conformance/run.py
 
 An implementation is a NAME=COMMAND pair, COMMAND a JSON list (the argv
 prefix; no shell, no quoting rules). Without --impl, the Python
 implementation of this checkout is used. Engines: SQLite always,
 PostgreSQL when IAB_TEST_POSTGRES is set (each scenario gets a fresh
-schema, see servers/shared_memory/testdb.py).
+schema, see servers/shared_memory/testdb.py). `--without NAME=SCENARIO`
+skips a scenario on every pair involving an implementation that does not
+offer it yet (said in the report, never silently).
 
 The child processes get no PYTHONUTF8/PYTHONIOENCODING: their standard
 streams are judged as an operator's shell would see them. Every byte
@@ -309,6 +312,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--impl", action="append", default=[], metavar="NAME=JSON_ARGV")
     parser.add_argument("-k", dest="only", default="", help="run scenarios whose name contains this")
+    parser.add_argument("--without", action="append", default=[], metavar="NAME=SCENARIO[,…]",
+                        help="scenarios an implementation does not offer yet")
     args = parser.parse_args()
     impls: dict[str, list[str]] = {}
     for spec in args.impl:
@@ -316,6 +321,10 @@ def main() -> int:
         impls[name] = json.loads(argv)
     if not impls:
         impls["python"] = PYTHON_IMPL
+    without: dict[str, set[str]] = {}
+    for spec in args.without:
+        name, _, scenarios = spec.partition("=")
+        without.setdefault(name, set()).update(s for s in scenarios.split(",") if s)
     engine = "postgresql" if PG else "sqlite"
     print(f"engine: {engine}; implementations: {', '.join(impls)}")
     pairs = list(itertools.product(impls.items(), repeat=2))
@@ -326,8 +335,13 @@ def main() -> int:
             if args.only and args.only not in scenario.__name__:
                 continue
             for m, ((na, argv_a), (nb, argv_b)) in enumerate(pairs):
-                db = fresh_db(tmp, f"{scenario.__name__}_{n}_{m}")
                 tag = f"[{na}/{nb}] {scenario.__name__}:"
+                missing = [x for x in dict.fromkeys((na, nb))
+                           if scenario.__name__ in without.get(x, set())]
+                if missing:
+                    print(f"skip — {tag} not offered by {', '.join(missing)} yet")
+                    continue
+                db = fresh_db(tmp, f"{scenario.__name__}_{n}_{m}")
                 try:
                     scenario(Impl(na, argv_a, db, cwd), Impl(nb, argv_b, db, cwd), tag)
                 except Exception as exc:  # a crash is a failure, not an abort
