@@ -16,6 +16,7 @@ import sys
 import tempfile
 import threading
 import time
+from contextlib import closing
 from pathlib import Path
 
 # The report holds non-ASCII (—, →): print it in UTF-8 even where the
@@ -885,7 +886,9 @@ with tempfile.TemporaryDirectory() as tmp:
 
     # A registry created before the TPM attestation keeps working.
     old_db = tmp / "registry-0.13.db"
-    with sqlite3.connect(old_db) as conn:
+    # closing(): a sqlite3 connection used as a context manager only
+    # commits; left open, it keeps Windows from deleting the file.
+    with closing(sqlite3.connect(old_db)) as conn, conn:
         conn.executescript(registry.SCHEMA.replace(
             ",\n    attestation      TEXT NOT NULL DEFAULT ''", "").replace(
             ",\n    attestation TEXT NOT NULL DEFAULT ''", ""))
