@@ -104,11 +104,17 @@ else:
                                     stderr=subprocess.DEVNULL)
         try:
             env["IAB_HUB"] = f"https://127.0.0.1:{port}"
-            for _ in range(50):
+            # A slow runner (Windows) may take seconds to start the hub:
+            # wait for it by deadline, and say so if it never answers.
+            deadline = time.monotonic() + 60
+            while True:
                 ping = subprocess.run(CLI + ["whoami"], env=env, capture_output=True, text=True, encoding="utf-8")
                 if '"db_source": "hub"' in ping.stdout and '"error"' not in ping.stdout:
                     break
-                time.sleep(0.1)
+                if time.monotonic() > deadline or hub_proc.poll() is not None:
+                    print(f"FAIL: the hub did not answer within 60 s ({ping.stdout.strip()[:200]})")
+                    sys.exit(1)
+                time.sleep(0.2)
             scenario(Path(tmp), "through the hub")
 
             # A second machine joins by invitation (the Ansible path: token
