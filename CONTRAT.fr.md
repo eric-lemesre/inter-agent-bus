@@ -162,9 +162,13 @@ les paires d'implémentations partageant une même base :
 ```bash
 python3 conformance/run.py                                   # Python seul
 python3 conformance/run.py --impl python='["python3","servers/shared_memory/cli.py"]' \
-                           --impl rust='["/chemin/vers/iab"]'
+                           --impl rust='["/chemin/vers/iab"]' --without rust=worker
 IAB_TEST_POSTGRES=<URL d'une base de test VIDE> python3 conformance/run.py
 ```
+
+`--without NOM=SCÉNARIO` saute, en le disant dans le rapport, un
+scénario qu'une implémentation n'offre pas encore, sur toutes les paires
+où elle figure.
 
 Scénarios : cycle de vie complet, refus, priorités, règlement gardé
 après expiration, file des tâches mortes et remise en file,
@@ -180,4 +184,5 @@ rôle du bus qu'en TLS avec certificat client, et ne donne son URL
 autorité étrangère et un mauvais nom d'hôte sont refusés.
 L'intégration continue (`.github/workflows/ci.yml`) joue toutes les
 suites sous Linux et Windows, Python 3.10 et 3.14, sur SQLite et sur ce
-banc.
+banc, ainsi que la suite sur les quatre paires de l'implémentation
+Python et du client natif (`rust/`).

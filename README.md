@@ -331,6 +331,7 @@ python3 -m venv .venv                          # py -m venv .venv on Windows
 .venv/bin/python servers/shared_memory/store_test.py   # core tests, no MCP SDK needed
 python3 scripts/smoke.py                       # end-to-end, CLI only
 python3 conformance/run.py                     # conformance suite (CONTRAT.md)
+cargo build --release --manifest-path rust/Cargo.toml   # native client `iab` (Rust)
 ```
 
 Every implementation sharing a database — Python today, a native Rust

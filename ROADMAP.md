@@ -374,8 +374,18 @@ conformance suite.
   the console code page on Windows), now bytes in UTF-8; the CLI reads
   and writes UTF-8 without translation on every platform; the test
   suites now run on Windows.
-- **R1** — `iab-core`, SQLite, `iab` command (register, push, claim,
-  publish, poll, notify, signals, state): local bus on Windows in Rust.
+- **R1** — `iab-core`, SQLite, `iab` command: local bus on Windows in
+  Rust — **shipped**. Cargo workspace `rust/` (`iab-db`: connection trait
+  and SQLite engine, bundled SQLite; `iab-core`: the counterpart of
+  `store.py`; `iab-cli`: the `iab` executable). Every subcommand that
+  reads or writes the bus — register, rename, push, claim, publish,
+  cancel, requeue, extend, result, state, heartbeat, announce, channel,
+  notify, broadcast, replies, poll, watch, signals, presence, log,
+  whoami — with the same options and answers; `worker`, `wake`,
+  `supervise` come at R4, the hub, pairing, `review` and `install` stay
+  Python-only. `IAB_HUB` or a PostgreSQL URL is refused, never ignored.
+  The conformance suite passes on the four pairs python/rust, and a
+  differential run of 69 commands gives byte-identical answers.
 - **R2** — PostgreSQL over TLS (rustls, libpq parameters, `pgpass`),
   waits through `LISTEN`/`NOTIFY`: bus shared between two machines.
 - **R3** — `iab-server`, the 23 MCP tools.

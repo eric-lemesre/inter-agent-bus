@@ -158,9 +158,12 @@ pair of implementations sharing one database:
 ```bash
 python3 conformance/run.py                                   # Python only
 python3 conformance/run.py --impl python='["python3","servers/shared_memory/cli.py"]' \
-                           --impl rust='["/path/to/iab"]'
+                           --impl rust='["/path/to/iab"]' --without rust=worker
 IAB_TEST_POSTGRES=<URL of an EMPTY test database> python3 conformance/run.py
 ```
+
+`--without NAME=SCENARIO` skips, saying so in the report, a scenario an
+implementation does not offer yet on every pair involving it.
 
 Scenarios: full lifecycle, refusals, priorities, fenced settling after
 expiry, dead letters and requeue, concurrent claims (exactly one wins),
@@ -173,4 +176,6 @@ the bus role only over TLS with a client certificate, and hands out its
 URL (`sslmode=verify-full`) only after checking that clear text, a
 foreign authority and a wrong host name are refused. Continuous
 integration (`.github/workflows/ci.yml`) plays every suite on Linux and
-Windows, Python 3.10 and 3.14, on SQLite and on that bench.
+Windows, Python 3.10 and 3.14, on SQLite and on that bench, and the
+suite on the four pairs of the Python implementation and the native
+client (`rust/`).

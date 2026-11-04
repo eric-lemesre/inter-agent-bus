@@ -350,6 +350,7 @@ python3 -m venv .venv                          # py -m venv .venv sous Windows
 .venv/bin/python servers/shared_memory/store_test.py   # tests du cœur, sans SDK MCP
 python3 scripts/smoke.py                       # bout en bout, CLI seule
 python3 conformance/run.py                     # suite de conformité (CONTRAT.fr.md)
+cargo build --release --manifest-path rust/Cargo.toml   # client natif `iab` (Rust)
 ```
 
 Toute implémentation qui partage une base — Python aujourd'hui, un

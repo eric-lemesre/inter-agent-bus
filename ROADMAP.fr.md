@@ -403,8 +403,19 @@ par le contrat et la suite de conformité.
   désormais en octets UTF-8 ; la ligne de commande lit et écrit en UTF-8
   sans traduction sur toutes les plateformes ; les suites de tests
   tournent désormais sous Windows.
-- **R1** — `iab-core`, SQLite, commande `iab` (register, push, claim,
-  publish, poll, notify, signals, state) : bus local sous Windows en Rust.
+- **R1** — `iab-core`, SQLite, commande `iab` : bus local sous Windows en
+  Rust — **livrée**. Espace de travail Cargo `rust/` (`iab-db` : trait de
+  connexion et moteur SQLite, SQLite embarqué ; `iab-core` : l'équivalent
+  de `store.py` ; `iab-cli` : l'exécutable `iab`). Toutes les
+  sous-commandes qui lisent ou écrivent le bus — register, rename, push,
+  claim, publish, cancel, requeue, extend, result, state, heartbeat,
+  announce, channel, notify, broadcast, replies, poll, watch, signals,
+  presence, log, whoami — avec les mêmes options et les mêmes réponses ;
+  `worker`, `wake`, `supervise` viennent en R4, le moyeu, l'appairage,
+  `review` et `install` restent en Python seul. `IAB_HUB` ou une URL
+  PostgreSQL est refusé, jamais ignoré. La suite de conformité passe sur
+  les quatre paires python/rust, et une comparaison de 69 commandes donne
+  des réponses identiques à l'octet près.
 - **R2** — PostgreSQL en TLS (rustls, paramètres libpq, `pgpass`),
   attentes par `LISTEN`/`NOTIFY` : bus partagé entre deux machines.
 - **R3** — `iab-server`, les 23 outils MCP.
