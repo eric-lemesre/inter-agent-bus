@@ -417,7 +417,16 @@ par le contrat et la suite de conformité.
   les quatre paires python/rust, et une comparaison de 69 commandes donne
   des réponses identiques à l'octet près.
 - **R2** — PostgreSQL en TLS (rustls, paramètres libpq, `pgpass`),
-  attentes par `LISTEN`/`NOTIFY` : bus partagé entre deux machines.
+  attentes par `LISTEN`/`NOTIFY` : bus partagé entre deux machines —
+  **livrée**. Pilote `postgres`, rustls (ring) et magasin de certificats
+  du système (`rustls-platform-verifier`) ; `verify-full`, `verify-ca`,
+  `require`, certificat client, mot de passe (URL, `PGPASSWORD`,
+  pgpass) ; `prefer` et l'absence de `sslmode` refusés en TCP. Même SQL,
+  verrou consultatif d'écriture, `NOTIFY` seulement si une ligne a
+  changé, schéma et migrations sous le verrou. La suite de conformité
+  passe sur les quatre paires sur le banc TLS, `conformance/tls.py` sur
+  le client natif. Kerberos/SSPI : non géré (aucun pilote Rust ne le
+  propose).
 - **R3** — `iab-server`, les 23 outils MCP.
 - **R4** — `worker`, `wake`, `supervise` sous Windows.
 - **R5** — signature, archives publiées ; `.deb`/`.rpm` quand le besoin

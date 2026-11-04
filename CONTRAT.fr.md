@@ -31,6 +31,20 @@ passe la suite de conformité (§ 11) sur chaque paire d'implémentations.
 - Une URL n'est jamais affichée en entier : seuls le schéma, le rôle,
   l'hôte, le port et la base apparaissent (ni mot de passe ni
   paramètres).
+- La même URL sert aux deux implémentations, paramètres libpq compris :
+  `sslmode`, `sslrootcert`, `sslcert`, `sslkey`, `hostaddr`,
+  `connect_timeout`, `options`, `application_name`, `passfile` ; le mot
+  de passe vient de l'URL, à défaut de `PGPASSWORD`, à défaut du fichier
+  pgpass (`PGPASSFILE`, `~/.pgpass`, `%APPDATA%\postgresql\pgpass.conf`) ;
+  les certificats ont par défaut les emplacements de libpq
+  (`~/.postgresql/`, `%APPDATA%\postgresql\`).
+- Le client natif est plus strict que libpq sur deux points, tous deux
+  du côté de la sûreté : en TCP il refuse `sslmode=prefer`, `allow` et
+  l'absence de `sslmode` (défaut de libpq, qui retombe en clair) —
+  indiquer `verify-full` ; et sans fichier de racines il fait confiance
+  au magasin du système (`sslrootcert=system`) là où libpq refuserait de
+  vérifier. Il ne gère ni clé chiffrée (`sslpassword`), ni listes de
+  révocation (`sslcrl`), ni Kerberos/GSSAPI.
 
 ## 2. Schéma
 
@@ -181,7 +195,14 @@ accentué.
 Le banc `scripts/pg_tls.py` monte un serveur PostgreSQL qui n'accepte le
 rôle du bus qu'en TLS avec certificat client, et ne donne son URL
 (`sslmode=verify-full`) qu'après avoir vérifié que le clair, une
-autorité étrangère et un mauvais nom d'hôte sont refusés.
+autorité étrangère et un mauvais nom d'hôte sont refusés ; il porte
+aussi un rôle authentifié par mot de passe (SCRAM-SHA-256).
+`conformance/tls.py` y confronte le client natif : ce qu'il doit
+accepter (certificat client, mot de passe par `PGPASSWORD` ou un fichier
+pgpass, `verify-ca` sur un nom d'hôte absent du certificat, `require` avec ou
+sans fichier de racines, comme libpq) et refuser
+(clair, `prefer`, `sslmode` absent, autorité étrangère, mauvais nom
+d'hôte, mauvais mot de passe).
 L'intégration continue (`.github/workflows/ci.yml`) joue toutes les
 suites sous Linux et Windows, Python 3.10 et 3.14, sur SQLite et sur ce
 banc, ainsi que la suite sur les quatre paires de l'implémentation

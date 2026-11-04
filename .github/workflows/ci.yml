@@ -110,7 +110,7 @@ jobs:
         working-directory: rust
         run: cargo build --release --locked
       - name: Install the Python implementation
-        run: python -m pip install -e .
+        run: python -m pip install -e ".[hub,postgres]" "psycopg[binary]"
       # Every scenario on the four pairs python/python, python/rust,
       # rust/python, rust/rust sharing one database. `worker` arrives in
       # the native client at step R4.
@@ -119,3 +119,21 @@ jobs:
           py=$(python -c "import json, os, sys; print(json.dumps([sys.executable, os.path.abspath('servers/shared_memory/cli.py')]))")
           rs=$(python -c "import json, os; print(json.dumps([os.path.abspath(os.path.join('rust', 'target', 'release', 'iab.exe' if os.name == 'nt' else 'iab'))]))")
           python conformance/run.py --impl "python=$py" --impl "rust=$rs" --without rust=worker
+          echo "IMPLS_PY=$py" >> "$GITHUB_ENV"
+          echo "IMPLS_RS=$rs" >> "$GITHUB_ENV"
+      - name: Start the TLS bench
+        run: |
+          url=$(python scripts/pg_tls.py start "$RUNNER_TEMP/pg")
+          echo "IAB_TEST_POSTGRES=$url" >> "$GITHUB_ENV"
+      # Same pairs on PostgreSQL over TLS (verify-full, client certificate):
+      # LISTEN/NOTIFY wakes and the advisory writer lock shared by both.
+      - name: Conformance, Python and native client crossed (PostgreSQL over TLS)
+        run: python conformance/run.py --impl "python=$IMPLS_PY" --impl "rust=$IMPLS_RS" --without rust=worker
+      - name: TLS and authentication of the native client
+        run: python conformance/tls.py "$RUNNER_TEMP/pg" "$(python -c "import json, sys; print(json.loads(sys.argv[1])[0])" "$IMPLS_RS")"
+      - name: Server log
+        if: failure()
+        run: cat "$RUNNER_TEMP/pg/pg_ctl.log" "$RUNNER_TEMP/pg/server.log" || true
+      - name: Stop the bench
+        if: always()
+        run: python scripts/pg_tls.py stop "$RUNNER_TEMP/pg" || true

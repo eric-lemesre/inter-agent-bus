@@ -28,6 +28,20 @@ suite (§ 11) on every pair of implementations.
   `$XDG_DATA_HOME/inter-agent-bus` (default `~/.local/share`) elsewhere.
 - A URL is never displayed whole: only scheme, role, host, port and
   database show (no password, no parameters).
+- The same URL serves both implementations, libpq's parameters
+  included: `sslmode`, `sslrootcert`, `sslcert`, `sslkey`, `hostaddr`,
+  `connect_timeout`, `options`, `application_name`, `passfile`; the
+  password comes from the URL, else `PGPASSWORD`, else the pgpass file
+  (`PGPASSFILE`, `~/.pgpass`, `%APPDATA%\postgresql\pgpass.conf`);
+  certificates default to libpq's places (`~/.postgresql/`,
+  `%APPDATA%\postgresql\`).
+- The native client is stricter than libpq on two points, both on the
+  side of safety: over TCP it refuses `sslmode=prefer`, `allow` and a
+  missing `sslmode` (libpq's default, which falls back to clear text) —
+  state `verify-full`; and without a root file it trusts the system
+  store (`sslrootcert=system`) where libpq would refuse to verify. It
+  does not support an encrypted key (`sslpassword`), CRLs (`sslcrl`) nor
+  Kerberos/GSSAPI.
 
 ## 2. Schema
 
@@ -174,7 +188,14 @@ other implementation, fidelity of a 200 kB payload (non-ASCII, `\r\n`,
 The `scripts/pg_tls.py` bench starts a PostgreSQL server that accepts
 the bus role only over TLS with a client certificate, and hands out its
 URL (`sslmode=verify-full`) only after checking that clear text, a
-foreign authority and a wrong host name are refused. Continuous
+foreign authority and a wrong host name are refused; it also holds a
+role authenticated by password (SCRAM-SHA-256). `conformance/tls.py`
+checks the native client against it: what it must accept (client
+certificate, password from `PGPASSWORD` or a pgpass file, `verify-ca` on
+a host name absent from the certificate, `require` with or without a
+root file, as libpq) and refuse (clear text,
+`prefer`, a missing `sslmode`, a foreign authority, a wrong host name, a
+wrong password). Continuous
 integration (`.github/workflows/ci.yml`) plays every suite on Linux and
 Windows, Python 3.10 and 3.14, on SQLite and on that bench, and the
 suite on the four pairs of the Python implementation and the native

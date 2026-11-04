@@ -387,7 +387,15 @@ conformance suite.
   The conformance suite passes on the four pairs python/rust, and a
   differential run of 69 commands gives byte-identical answers.
 - **R2** — PostgreSQL over TLS (rustls, libpq parameters, `pgpass`),
-  waits through `LISTEN`/`NOTIFY`: bus shared between two machines.
+  waits through `LISTEN`/`NOTIFY`: bus shared between two machines —
+  **shipped**. `postgres` driver, rustls (ring) and the system
+  certificate store (`rustls-platform-verifier`); `verify-full`,
+  `verify-ca`, `require`, client certificate, password (URL,
+  `PGPASSWORD`, pgpass); `prefer` and a missing `sslmode` refused over
+  TCP. Same SQL, advisory writer lock, `NOTIFY` only when a row changed,
+  schema and migrations under the lock. The conformance suite passes on
+  the four pairs over the TLS bench, `conformance/tls.py` on the native
+  client. Kerberos/SSPI: not supported (no Rust driver offers it).
 - **R3** — `iab-server`, the 23 MCP tools.
 - **R4** — `worker`, `wake`, `supervise` on Windows.
 - **R5** — signing, published archives; `.deb`/`.rpm` when needed.
