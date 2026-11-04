@@ -1,0 +1,38 @@
+[workspace]
+resolver = "3"
+members = ["crates/iab-db", "crates/iab-core", "crates/iab-cli"]
+
+[workspace.package]
+version = "0.14.2"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/eric-lemesre/inter-agent-bus"
+
+[workspace.dependencies]
+iab-db = { path = "crates/iab-db" }
+iab-core = { path = "crates/iab-core" }
+rusqlite = { version = "0.39", features = ["bundled"] }
+chrono = { version = "0.4.41", default-features = false, features = ["std", "clock"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1.0.140", features = ["preserve_order"] }
+sha2 = "0.10.9"
+thiserror = "2"
+clap = { version = "4.5", features = ["derive"] }
+dunce = "1.0.5"
+tempfile = "3.20"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+dbg_macro = "deny"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true

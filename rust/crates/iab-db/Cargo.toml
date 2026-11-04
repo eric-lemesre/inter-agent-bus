@@ -1,0 +1,15 @@
+[package]
+name = "iab-db"
+description = "Database engines of the inter-agent bus behind one connection trait."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+rusqlite.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true
