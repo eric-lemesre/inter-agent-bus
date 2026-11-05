@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/iab-db", "crates/iab-core", "crates/iab-cli"]
+members = ["crates/iab-db", "crates/iab-core", "crates/iab-cli", "crates/iab-server"]
 
 [workspace.package]
 version = "0.14.2"

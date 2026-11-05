@@ -110,6 +110,24 @@ plusieurs CLI d'agents ne chargent les serveurs MCP qu'en session
 interactive — le mode headless passe par `iab worker` ci-dessous, qui
 se passe entièrement de MCP.
 
+### Exécutables natifs (Rust, préversion)
+
+`rust/` construit deux exécutables autonomes, sans Python sur la
+machine : `iab`, la ligne de commande (toutes les sous-commandes du bus
+sauf `worker`, `wake`, `supervise`, qui viennent ensuite, et le moyeu,
+l'appairage, `review` et `install`, qui restent en Python), et
+`iab-server`, le serveur MCP avec les mêmes 23 outils. Tous deux parlent
+au même fichier SQLite ou au même serveur PostgreSQL (en TLS) que
+l'implémentation Python, en même temps ; `IAB_HUB` est refusé. Aucune
+archive n'est encore publiée : construire avec
+`cargo build --release --manifest-path rust/Cargo.toml`, puis
+enregistrer le serveur par son chemin absolu, par exemple :
+
+```bash
+claude mcp add-json --scope user inter-agent-bus \
+  '{"type": "stdio", "command": "/chemin/vers/iab-server", "env": {"IAB_AGENT_NAME": "claude"}}'
+```
+
 ## Mise en place côté projet (consommateur)
 
 Copier `skills/pipeline-router/references/roster.example.json` en
@@ -350,11 +368,12 @@ python3 -m venv .venv                          # py -m venv .venv sous Windows
 .venv/bin/python servers/shared_memory/store_test.py   # tests du cœur, sans SDK MCP
 python3 scripts/smoke.py                       # bout en bout, CLI seule
 python3 conformance/run.py                     # suite de conformité (CONTRAT.fr.md)
-cargo build --release --manifest-path rust/Cargo.toml   # client natif `iab` (Rust)
+cargo build --release --manifest-path rust/Cargo.toml   # `iab` et `iab-server` natifs (Rust)
+python3 conformance/mcp_server.py --impl rust='["/chemin/vers/iab-server"]'   # serveur MCP face à server.py
 ```
 
-Toute implémentation qui partage une base — Python aujourd'hui, un
-client natif en Rust prévu ([étude](docs/AMELIORATIONS-2026-11-04-client-rust.fr.md))
+Toute implémentation qui partage une base — Python, et le client et le
+serveur natifs en Rust ([étude](docs/AMELIORATIONS-2026-11-04-client-rust.fr.md))
 — respecte le contrat commun [`CONTRAT.fr.md`](CONTRAT.fr.md), vérifié par
 la suite de conformité. L'intégration continue joue toutes les suites
 sous Linux et Windows, Python 3.10 et 3.14, sur SQLite et sur un serveur

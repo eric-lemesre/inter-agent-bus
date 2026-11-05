@@ -2,8 +2,8 @@
 
 🇬🇧 [English](CONTRAT.md) · 🇫🇷 Français
 
-Le bus peut avoir plusieurs implémentations — Python aujourd'hui, un
-client natif en Rust prévu (voir
+Le bus peut avoir plusieurs implémentations — Python, et un client et
+un serveur MCP natifs en Rust (voir
 [l'étude](docs/AMELIORATIONS-2026-11-04-client-rust.fr.md)) — qui écrivent
 **la même base** au même moment. Ce document fixe ce sur quoi elles
 doivent s'accorder : à l'octet près pour ce qui est stocké, au sens près
@@ -207,3 +207,52 @@ L'intégration continue (`.github/workflows/ci.yml`) joue toutes les
 suites sous Linux et Windows, Python 3.10 et 3.14, sur SQLite et sur ce
 banc, ainsi que la suite sur les quatre paires de l'implémentation
 Python et du client natif (`rust/`).
+
+`conformance/mcp_server.py` confronte un serveur MCP à `server.py`, tous
+deux pilotés comme processus en stdio par le client du paquet `mcp` :
+
+```bash
+python3 conformance/mcp_server.py --impl rust='["/chemin/vers/iab-server"]'
+```
+
+Il vérifie l'interface annoncée (§ 12), rejoue une session qui touche
+chaque outil — refus et arguments invalides compris — sur une base
+neuve par serveur et compare les réponses (dates et base masquées), fait
+tourner les deux serveurs sur une même base, chacun réglant ce que
+l'autre a commencé, et vérifie qu'un `wait_signal` bloquant ne retient
+ni les appels qui le suivent dans la même session ni la poussée qui le
+réveille. L'intégration continue le joue sur SQLite et sur le banc TLS.
+
+## 12. Serveur MCP
+
+- Mêmes 23 outils que `servers/shared_memory/server.py` : mêmes noms,
+  descriptions, paramètres, types et valeurs par défaut, donc même
+  `inputSchema` ; chaque outil déclare le schéma de sortie
+  `{"result": string}`.
+- Un appel abouti répond le texte de l'opération (`OK: …`, JSON,
+  `NO_TASK`, ou un refus `ERROR: …`) à la fois en contenu texte et en
+  `structuredContent` `{"result": …}`, avec `isError` faux : un refus du
+  bus est une réponse, pas une erreur d'outil.
+- L'erreur d'outil (`isError` vrai) est réservée à ce qui empêche
+  l'appel : outil inconnu (`Unknown tool: NOM`), arguments invalides
+  (première ligne `Error executing tool NOM: N validation error(s) for
+  NOMArguments`, puis une entrée par paramètre), panne de la base
+  (`Error executing tool NOM: …`).
+- Les arguments se lisent comme le mode souple de pydantic : un entier
+  accepte `"5"`, `5.0` et un booléen, un nombre accepte un texte
+  numérique, un drapeau accepte `true`/`false`, `0`/`1` et les mots
+  `yes`, `no`, `on`, `off`, `t`, `f`, `y`, `n` ; un texte n'accepte
+  qu'un texte. Les arguments inconnus sont ignorés. Un texte optionnel
+  vide, `0` pour `attempt` et `reply_to`, `-1` pour `since_seq` valent
+  « non fourni ».
+- Identité résolue une fois par processus serveur (§ 7). Quand elle
+  nomme un harnais, chaque appel valide enregistre d'abord l'instance à
+  sa première apparition (description vide, dossier de lancement) et
+  rafraîchit sa présence, de même que le démarrage du serveur ; un échec
+  à cet endroit ne fait jamais échouer l'appel. Sans harnais, `whoami`
+  répond le `clientInfo` de la poignée de main (`source` =
+  `client_info`, `name`, `title`, `version`).
+- Un outil bloquant (`wait_signal`, `wait_task`) ne retient pas les
+  autres appels de la session.
+- Le serveur natif refuse `IAB_HUB` à chaque appel, comme la ligne de
+  commande native (§ 1).

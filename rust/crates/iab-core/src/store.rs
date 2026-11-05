@@ -9,7 +9,7 @@ use serde_json::{Map, Value as Json, json};
 
 use crate::Error;
 use crate::clock;
-use crate::identity::{self, Target, is_valid_name, split_name};
+use crate::identity::{self, Identity, Target, is_valid_name, split_name};
 use crate::pytext::{self, fold, repr_list, strip};
 
 /// The mechanism's own voice (task-queued notices): no client may register,
@@ -369,6 +369,43 @@ fn set_model<C: Connection>(conn: &mut C, agent: &str, model: &str, force: bool)
             "{}".into(),
             model.into(),
             force.into(),
+        ],
+    )?;
+    Ok(())
+}
+
+/// `touch_presence()` of store.py: refresh `last_seen` only, keeping the
+/// declared TTL and capability card (a default-TTL row for an absent
+/// agent); a `model` fills an empty slot only, never overrides a
+/// declaration.
+fn touch_presence<C: Connection>(conn: &mut C, agent: &str, model: Option<&str>) -> Result<(), Error> {
+    let rows = conn.query(
+        "SELECT ttl_seconds, capabilities, model FROM presence WHERE agent=?",
+        &[agent.into()],
+    )?;
+    let (ttl, capabilities, mut stored_model) = match rows.first() {
+        Some(row) => (
+            row.int("ttl_seconds")?,
+            row.text("capabilities")?.to_owned(),
+            row.text("model")?.to_owned(),
+        ),
+        None => (DEFAULT_PRESENCE_TTL, "{}".to_owned(), String::new()),
+    };
+    if let Some(model) = model.filter(|m| !m.is_empty()) {
+        if stored_model.is_empty() {
+            strip(model).clone_into(&mut stored_model);
+        }
+    }
+    conn.execute(
+        "INSERT INTO presence(agent, last_seen, ttl_seconds, capabilities, model) \
+         VALUES(?,?,?,?,?) ON CONFLICT(agent) DO UPDATE SET \
+         last_seen=excluded.last_seen, model=excluded.model",
+        &[
+            agent.into(),
+            clock::now_iso().into(),
+            ttl.into(),
+            capabilities.into(),
+            stored_model.into(),
         ],
     )?;
     Ok(())
@@ -1105,6 +1142,45 @@ impl Bus {
         answer.insert("alive_until".into(), json!(clock::iso(alive_until)));
         answer.insert("model".into(), none_if_empty(&stored_model));
         Ok(pytext::dumps(&answer)?)
+    }
+
+    /// Piggyback of the MCP server: the resolved identity of a connected
+    /// client is a present instance. Registers it on first sight (empty
+    /// description, launch directory recorded), then refreshes its
+    /// presence. A nameless or invalid identity is a silent no-op; callers
+    /// swallow failures so the tool call always proceeds.
+    pub fn touch_identity(&self, identity: &Identity) -> Result<(), Error> {
+        let name = fold(identity.agent_name.as_deref().unwrap_or_default());
+        if name.is_empty() || !is_valid_name(&name) || name == SYSTEM_AUTHOR {
+            return Ok(());
+        }
+        let mut conn = self.connect()?;
+        write(&mut conn, |c| -> Result<(), Error> {
+            if exists(c, "SELECT 1 FROM agents WHERE name=?", &[name.as_str().into()])? {
+                if !identity.cwd.is_empty() {
+                    c.execute(
+                        "UPDATE agents SET cwd=? WHERE name=?",
+                        &[identity.cwd.as_str().into(), name.as_str().into()],
+                    )?;
+                }
+                return Ok(());
+            }
+            let (harness, workspace) = split_name(&name);
+            c.execute(
+                "INSERT INTO agents(name, description, registered_at, harness, workspace, cwd) \
+                 VALUES(?,?,?,?,?,?) ON CONFLICT(name) DO NOTHING",
+                &[
+                    name.as_str().into(),
+                    "".into(),
+                    clock::now_iso().into(),
+                    harness.as_str().into(),
+                    workspace.as_str().into(),
+                    identity.cwd.as_str().into(),
+                ],
+            )?;
+            log_event(c, "register", None, Some(&name), "auto (connected client)")
+        })?;
+        touch_presence(&mut conn, &name, identity.model.as_deref())
     }
 
     /// Every known agent (registered or seen) with a computed status.

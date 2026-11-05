@@ -102,6 +102,23 @@ name in the MCP handshake. Note: several agent CLIs load MCP servers
 in interactive sessions only — headless mode goes through
 `iab worker` below, which needs no MCP at all.
 
+### Native executables (Rust, preview)
+
+`rust/` builds two standalone executables, no Python needed on the
+machine: `iab`, the command line (every bus subcommand except `worker`,
+`wake`, `supervise`, which come next, and the hub, pairing, `review`
+and `install`, which stay Python-only), and `iab-server`, the MCP server
+with the same 23 tools. Both speak to the same SQLite file or PostgreSQL
+server (over TLS) as the Python implementation, at the same time;
+`IAB_HUB` is refused. No archive is published yet: build with
+`cargo build --release --manifest-path rust/Cargo.toml`, then register
+the server by its absolute path, for instance:
+
+```bash
+claude mcp add-json --scope user inter-agent-bus \
+  '{"type": "stdio", "command": "/path/to/iab-server", "env": {"IAB_AGENT_NAME": "claude"}}'
+```
+
 ## Project setup (consumer side)
 
 Copy `skills/pipeline-router/references/roster.example.json` to
@@ -331,11 +348,12 @@ python3 -m venv .venv                          # py -m venv .venv on Windows
 .venv/bin/python servers/shared_memory/store_test.py   # core tests, no MCP SDK needed
 python3 scripts/smoke.py                       # end-to-end, CLI only
 python3 conformance/run.py                     # conformance suite (CONTRAT.md)
-cargo build --release --manifest-path rust/Cargo.toml   # native client `iab` (Rust)
+cargo build --release --manifest-path rust/Cargo.toml   # native `iab` and `iab-server` (Rust)
+python3 conformance/mcp_server.py --impl rust='["/path/to/iab-server"]'   # MCP server vs server.py
 ```
 
-Every implementation sharing a database — Python today, a native Rust
-client planned ([study](docs/AMELIORATIONS-2026-11-04-client-rust.md)) — obeys
+Every implementation sharing a database — Python, and the native Rust
+client and server ([study](docs/AMELIORATIONS-2026-11-04-client-rust.md)) — obeys
 the common contract [`CONTRAT.md`](CONTRAT.md), checked by the
 conformance suite. Continuous integration plays every suite on Linux and
 Windows, Python 3.10 and 3.14, on SQLite and on a PostgreSQL server

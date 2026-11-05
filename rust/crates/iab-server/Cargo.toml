@@ -1,0 +1,22 @@
+[package]
+name = "iab-server"
+description = "Native MCP server of the inter-agent bus (stdio)."
+version.workspace = true
+edition.workspace = true
+# rmcp requires 1.88; the other crates keep the workspace's 1.85.
+rust-version = "1.88"
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "iab-server"
+path = "src/main.rs"
+
+[dependencies]
+iab-core.workspace = true
+rmcp = { version = "3.8.0", default-features = false, features = ["server", "transport-io"] }
+tokio = { version = "1.47", features = ["rt"] }
+serde_json.workspace = true
+
+[lints]
+workspace = true

@@ -427,7 +427,15 @@ par le contrat et la suite de conformité.
   passe sur les quatre paires sur le banc TLS, `conformance/tls.py` sur
   le client natif. Kerberos/SSPI : non géré (aucun pilote Rust ne le
   propose).
-- **R3** — `iab-server`, les 23 outils MCP.
+- **R3** — `iab-server`, les 23 outils MCP — **livré**. `rmcp` en
+  stdio, la table des outils recopiée de `server.py` (mêmes schémas),
+  lecture souple des arguments comme pydantic, chaque appel sur le pool
+  bloquant pour qu'un `wait_signal` ne retienne rien ; présence au fil
+  des appels et `whoami` sur le `clientInfo` de la poignée de main,
+  comme la référence. Jugé par `conformance/mcp_server.py` (interface,
+  une session qui touche chaque outil réponse par réponse, les deux
+  serveurs sur une même base, concurrence) sur SQLite et en TLS, Linux
+  et Windows.
 - **R4** — `worker`, `wake`, `supervise` sous Windows.
 - **R5** — signature, archives publiées ; `.deb`/`.rpm` quand le besoin
   viendra.

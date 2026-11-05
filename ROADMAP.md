@@ -396,7 +396,14 @@ conformance suite.
   schema and migrations under the lock. The conformance suite passes on
   the four pairs over the TLS bench, `conformance/tls.py` on the native
   client. Kerberos/SSPI: not supported (no Rust driver offers it).
-- **R3** — `iab-server`, the 23 MCP tools.
+- **R3** — `iab-server`, the 23 MCP tools — **shipped**. `rmcp` over
+  stdio, the tool table copied from `server.py` (same schemas), lax
+  argument reading as pydantic, every call on the blocking pool so a
+  `wait_signal` holds back nothing; presence piggyback and `whoami` on
+  the handshake's `clientInfo`, as the reference. Judged by
+  `conformance/mcp_server.py` (interface, a session touching every tool
+  answer for answer, both servers on one database, concurrency) on
+  SQLite and over TLS, Linux and Windows.
 - **R4** — `worker`, `wake`, `supervise` on Windows.
 - **R5** — signing, published archives; `.deb`/`.rpm` when needed.
 

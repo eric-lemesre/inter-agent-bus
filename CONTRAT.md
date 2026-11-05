@@ -2,8 +2,8 @@
 
 🇬🇧 English · 🇫🇷 [Français](CONTRAT.fr.md)
 
-The bus may have several implementations — Python today, a native Rust
-client planned (see [the study](docs/AMELIORATIONS-2026-11-04-client-rust.md))
+The bus may have several implementations — Python, and a native Rust
+client and MCP server (see [the study](docs/AMELIORATIONS-2026-11-04-client-rust.md))
 — writing **the same database** at the same time. This document states
 what they must agree on: byte for byte for what is stored, in meaning
 for what is returned. The Python implementation is the reference; when
@@ -200,3 +200,51 @@ integration (`.github/workflows/ci.yml`) plays every suite on Linux and
 Windows, Python 3.10 and 3.14, on SQLite and on that bench, and the
 suite on the four pairs of the Python implementation and the native
 client (`rust/`).
+
+`conformance/mcp_server.py` judges an MCP server against `server.py`,
+both driven as processes over stdio by the client of the `mcp` package:
+
+```bash
+python3 conformance/mcp_server.py --impl rust='["/path/to/iab-server"]'
+```
+
+It checks the announced interface (§ 12), replays one session touching
+every tool — refusals and invalid arguments included — on a fresh
+database per server and compares the answers (dates and database
+masked), runs both servers on one database, each settling what the
+other started, and checks that a blocking `wait_signal` holds back
+neither the calls that follow it in the same session nor the push that
+wakes it. Continuous integration runs it on SQLite and on the TLS bench.
+
+## 12. MCP server
+
+- Same 23 tools as `servers/shared_memory/server.py`: same names,
+  descriptions, parameters, types and defaults, hence the same
+  `inputSchema`; every tool declares the output schema
+  `{"result": string}`.
+- A completed call answers the operation's text (`OK: …`, JSON,
+  `NO_TASK`, or an `ERROR: …` refusal) both as text content and as
+  `structuredContent` `{"result": …}`, with `isError` false: a refusal
+  of the bus is an answer, not a tool error.
+- A tool error (`isError` true) is kept for what prevents the call:
+  unknown tool (`Unknown tool: NAME`), invalid arguments (first line
+  `Error executing tool NAME: N validation error(s) for NAMEArguments`,
+  then one entry per parameter), failure of the database
+  (`Error executing tool NAME: …`).
+- Arguments are read as pydantic's lax mode reads them: an integer
+  accepts `"5"`, `5.0` and a boolean, a number accepts a numeric text, a
+  flag accepts `true`/`false`, `0`/`1` and the words `yes`, `no`, `on`,
+  `off`, `t`, `f`, `y`, `n`; a text accepts only a text. Unknown
+  arguments are ignored. Optional texts left empty, and `0` for
+  `attempt` and `reply_to`, `-1` for `since_seq`, mean "not given".
+- Identity resolved once per server process (§ 7). When it names a
+  harness, every valid tool call first registers the instance on first
+  sight (empty description, launch directory) and refreshes its
+  presence, as does the start of the server; a failure there never
+  fails the call. Without a harness, `whoami` answers the `clientInfo`
+  of the handshake (`source` = `client_info`, `name`, `title`,
+  `version`).
+- A blocking tool (`wait_signal`, `wait_task`) does not hold back the
+  other calls of the session.
+- The native server refuses `IAB_HUB` at every call, as the native
+  command line does (§ 1).
