@@ -211,7 +211,7 @@ python3 conformance/mcp_server.py --impl rust='["/path/to/iab-server"]'
 It checks the announced interface (§ 12), replays one session touching
 every tool — refusals and invalid arguments included — on a fresh
 database per server and compares the answers (dates and database
-masked), runs both servers on one database, each settling what the
+masked, a JSON answer compared parsed), runs both servers on one database, each settling what the
 other started, and checks that a blocking `wait_signal` holds back
 neither the calls that follow it in the same session nor the push that
 wakes it. Continuous integration runs it on SQLite and on the TLS bench.

@@ -12,8 +12,8 @@ against it:
 
   - interface: the same tools, descriptions and schemas;
   - transcript: one scripted session touching every tool, on a fresh
-    database per server, answer for answer (dates and database masked;
-    of a tool error, only its first line);
+    database per server, answer for answer (dates and database masked,
+    JSON compared parsed; of a tool error, only its first line);
   - crossed: the reference and the server under test on ONE database,
     each settling what the other started;
   - concurrency: a blocking wait_signal does not hold back the calls
@@ -87,7 +87,11 @@ def masked(server: Server, answer: tuple[bool, str]) -> tuple[bool, str]:
     if is_error:  # pydantic's wording is the reference's own; the first line is the contract
         text = text.split("\n", 1)[0]
     text = text.replace(json.dumps(server.db)[1:-1], "<db>").replace(server.db, "<db>")
-    return is_error, TIMESTAMP.sub("<date>", text)
+    text = TIMESTAMP.sub("<date>", text)
+    try:  # a JSON answer is judged parsed (CONTRAT.md, § 8): key order is free
+        return is_error, json.loads(text)
+    except ValueError:
+        return is_error, text
 
 
 # One session touching every tool, refusals and invalid arguments included.

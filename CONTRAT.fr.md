@@ -217,7 +217,7 @@ python3 conformance/mcp_server.py --impl rust='["/chemin/vers/iab-server"]'
 
 Il vérifie l'interface annoncée (§ 12), rejoue une session qui touche
 chaque outil — refus et arguments invalides compris — sur une base
-neuve par serveur et compare les réponses (dates et base masquées), fait
+neuve par serveur et compare les réponses (dates et base masquées, une réponse JSON comparée une fois analysée), fait
 tourner les deux serveurs sur une même base, chacun réglant ce que
 l'autre a commencé, et vérifie qu'un `wait_signal` bloquant ne retient
 ni les appels qui le suivent dans la même session ni la poussée qui le
