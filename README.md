@@ -32,13 +32,13 @@ task over. Every transition is journaled (`get_events`, `iab log`).
 
 ## Installation (operator)
 
-Run the bus from a dedicated venv installed from a **tagged release**,
+Run the bus from a dedicated venv installed from a **published release** (PyPI),
 never from a working tree:
 
 ```bash
 python3 -m venv ~/.local/venvs/inter-agent-bus
 ~/.local/venvs/inter-agent-bus/bin/pip install \
-  'inter-agent-bus[server] @ git+https://github.com/eric-lemesre/inter-agent-bus@v0.14.2'
+  'inter-agent-bus[server]==0.15.0'
 ~/.local/venvs/inter-agent-bus/bin/iab install --scope user
 ```
 

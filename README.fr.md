@@ -34,13 +34,13 @@ repreneur. Chaque transition est journalisée (`get_events`,
 
 ## Installation (opérateur)
 
-Exploiter le bus depuis un venv dédié installé depuis une **version
-taguée**, jamais depuis un arbre de travail :
+Exploiter le bus depuis un venv dédié installé depuis une **version publiée**
+(PyPI), jamais depuis un arbre de travail :
 
 ```bash
 python3 -m venv ~/.local/venvs/inter-agent-bus
 ~/.local/venvs/inter-agent-bus/bin/pip install \
-  'inter-agent-bus[server] @ git+https://github.com/eric-lemesre/inter-agent-bus@v0.14.2'
+  'inter-agent-bus[server]==0.15.0'
 ~/.local/venvs/inter-agent-bus/bin/iab install --scope user
 ```
 

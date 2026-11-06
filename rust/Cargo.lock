@@ -603,7 +603,7 @@ dependencies = [
 
 [[package]]
 name = "iab-cli"
-version = "0.14.2"
+version = "0.15.0"
 dependencies = [
  "clap",
  "gethostname",
@@ -614,7 +614,7 @@ dependencies = [
 
 [[package]]
 name = "iab-core"
-version = "0.14.2"
+version = "0.15.0"
 dependencies = [
  "chrono",
  "dunce",
@@ -628,7 +628,7 @@ dependencies = [
 
 [[package]]
 name = "iab-db"
-version = "0.14.2"
+version = "0.15.0"
 dependencies = [
  "bytes",
  "postgres",
@@ -641,7 +641,7 @@ dependencies = [
 
 [[package]]
 name = "iab-server"
-version = "0.14.2"
+version = "0.15.0"
 dependencies = [
  "iab-core",
  "rmcp",
