@@ -6,10 +6,14 @@
 //! as `-`, are read from standard input, in UTF-8, with no line-ending
 //! translation (`CONTRAT.md`, § 9).
 
+mod child;
+mod wake;
+mod worker;
+
 use std::io::{Read, Write};
 use std::process::ExitCode;
 
-use clap::{ArgGroup, Parser, Subcommand, ValueEnum};
+use clap::{ArgGroup, CommandFactory, Parser, Subcommand, ValueEnum};
 use iab_core::{Bus, Error, db_info, identity, pytext};
 
 #[derive(Parser)]
@@ -227,27 +231,108 @@ enum Command {
     },
     /// identity from the environment and the resolved bus database
     Whoami,
+    /// launch an asleep agent if a signal waits for it, from the roster's
+    /// `launch` block (one decision, synchronous)
+    Wake {
+        agent: String,
+        /// print the decision and the command, launch nothing
+        #[arg(long)]
+        dry_run: bool,
+        /// this machine's name, matched against launch.host
+        #[arg(long)]
+        host: Option<String>,
+    },
+    /// the single watcher: wake every roster agent with a `launch` block
+    /// when a signal waits
+    Supervise {
+        #[arg(
+            long,
+            default_value_t = 60.0,
+            value_name = "SECONDS",
+            allow_negative_numbers = true
+        )]
+        interval: f64,
+        /// one pass, then exit
+        #[arg(long)]
+        once: bool,
+        #[arg(long)]
+        dry_run: bool,
+        /// this machine's name, matched against launch.host (default: the
+        /// host name)
+        #[arg(long)]
+        host: Option<String>,
+    },
+    /// headless worker loop: claim → run a command with the payload on
+    /// stdin → publish its stdout (ERROR: on failure)
+    Worker {
+        /// identity to work as (roster name)
+        #[arg(long)]
+        agent: String,
+        /// model behind the command, declared on the bus (default: IAB_MODEL)
+        #[arg(long)]
+        model: Option<String>,
+        /// one task (or NO_TASK) then exit
+        #[arg(long)]
+        once: bool,
+        /// lease per claim; extended at every heartbeat while running
+        #[arg(
+            long,
+            default_value_t = 900,
+            value_name = "SECONDS",
+            allow_negative_numbers = true
+        )]
+        lease: i64,
+        /// initial delay between empty claims (doubles up to 60s)
+        #[arg(
+            long,
+            default_value_t = 5,
+            value_name = "SECONDS",
+            allow_negative_numbers = true
+        )]
+        poll: i64,
+        /// kill the command and publish ERROR after this long (default: no
+        /// limit — a hung command holds its task forever)
+        #[arg(long, value_name = "SECONDS", allow_negative_numbers = true)]
+        task_timeout: Option<i64>,
+        /// the worker command, after `--`; receives the payload on stdin
+        #[arg(
+            trailing_var_arg = true,
+            allow_hyphen_values = true,
+            value_name = "-- command..."
+        )]
+        worker_cmd: Vec<String>,
+    },
 }
 
 /// A refusal of the command line itself, printed like a bus refusal.
 #[derive(Debug)]
 struct Refusal(String);
 
+/// A failure of the core as the `ERROR: …` line a refusal prints.
+fn describe(error: &Error) -> String {
+    // The causes too: "error performing TLS handshake" alone does not
+    // say which certificate was refused, nor why.
+    let mut text = error.to_string();
+    let mut source = std::error::Error::source(error);
+    while let Some(cause) = source {
+        let cause_text = cause.to_string();
+        if !text.contains(&cause_text) {
+            text.push_str(": ");
+            text.push_str(&cause_text);
+        }
+        source = cause.source();
+    }
+    format!("ERROR: {text}")
+}
+
+/// An answer of the bus, a failure turned into its `ERROR: …` line.
+fn answer(outcome: Result<String, Error>) -> String {
+    outcome.unwrap_or_else(|error| describe(&error))
+}
+
 impl From<Error> for Refusal {
     fn from(error: Error) -> Self {
-        // The causes too: "error performing TLS handshake" alone does not
-        // say which certificate was refused, nor why.
-        let mut text = error.to_string();
-        let mut source = std::error::Error::source(&error);
-        while let Some(cause) = source {
-            let cause_text = cause.to_string();
-            if !text.contains(&cause_text) {
-                text.push_str(": ");
-                text.push_str(&cause_text);
-            }
-            source = cause.source();
-        }
-        Self(format!("ERROR: {text}"))
+        Self(describe(&error))
     }
 }
 
@@ -394,12 +479,79 @@ fn run(command: Command) -> Result<String, Refusal> {
             limit,
         } => bus.get_events(task_id.as_deref(), agent.as_deref(), limit)?,
         Command::Whoami => whoami()?,
+        Command::Wake { agent, dry_run, host } => {
+            wake::wake_agent(&bus, &agent, None, dry_run, host.as_deref())
+        }
+        Command::Supervise { .. } | Command::Worker { .. } => {
+            return Err(Refusal("ERROR: not a one-shot command.".to_owned()));
+        }
     };
     Ok(out)
 }
 
+/// The long-running commands: their log goes to stderr, their outcome
+/// is the exit status.
+fn run_loop(command: Command) -> Result<u8, Refusal> {
+    match command {
+        Command::Worker {
+            agent,
+            model,
+            once,
+            lease,
+            poll,
+            task_timeout,
+            mut worker_cmd,
+        } => {
+            if worker_cmd.first().is_some_and(|arg| arg == "--") {
+                worker_cmd.remove(0);
+            }
+            if worker_cmd.is_empty() {
+                Cli::command()
+                    .error(
+                        clap::error::ErrorKind::MissingRequiredArgument,
+                        "worker: missing command after `--`",
+                    )
+                    .exit();
+            }
+            let model = model.or_else(|| std::env::var("IAB_MODEL").ok().filter(|m| !m.is_empty()));
+            let bus = Bus::from_env()?;
+            Ok(worker::run(
+                &bus,
+                &worker::Options {
+                    agent,
+                    command: worker_cmd,
+                    once,
+                    lease_seconds: lease,
+                    poll_seconds: poll,
+                    task_timeout,
+                    model,
+                },
+            ))
+        }
+        Command::Supervise {
+            interval,
+            once,
+            dry_run,
+            host,
+        } => {
+            let bus = Bus::from_env()?;
+            Ok(wake::supervise(&bus, interval, once, dry_run, host.as_deref()))
+        }
+        _ => Err(Refusal("ERROR: not a long-running command.".to_owned())),
+    }
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
+    if matches!(cli.command, Command::Worker { .. } | Command::Supervise { .. }) {
+        return match run_loop(cli.command) {
+            Ok(code) => ExitCode::from(code),
+            Err(Refusal(text)) => {
+                let _ = writeln!(std::io::stdout(), "{text}");
+                ExitCode::from(1)
+            }
+        };
+    }
     let mut out = run(cli.command).unwrap_or_else(|Refusal(text)| text);
     if cli.json {
         if let Ok(value) = serde_json::from_str::<serde_json::Value>(&out) {

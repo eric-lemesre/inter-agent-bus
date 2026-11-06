@@ -436,7 +436,15 @@ par le contrat et la suite de conformité.
   une session qui touche chaque outil réponse par réponse, les deux
   serveurs sur une même base, concurrence) sur SQLite et en TLS, Linux
   et Windows.
-- **R4** — `worker`, `wake`, `supervise` sous Windows.
+- **R4** — `worker`, `wake`, `supervise` dans le `iab` natif —
+  **livré**. Charge utile et invite sur l'entrée standard en octets, bail
+  prolongé toutes les demi-durées, délai de tâche, textes de résultat de
+  `worker.py` ; décision, budget, verrou de réveil et journal partagés
+  avec Python par la base, si bien qu'un lancement de l'un retient
+  l'autre ; `supervise`, un fil par instance. Jugé par de nouveaux
+  scénarios de `conformance/run.py` (échecs du worker, wake, supervise,
+  et le scénario worker existant désormais sur toutes les paires) sur
+  SQLite et en TLS, Linux et Windows.
 - **R5** — signature, archives publiées ; `.deb`/`.rpm` quand le besoin
   viendra.
 

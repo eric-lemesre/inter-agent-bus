@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 use chrono::{DateTime, Utc};
 use iab_db::{AnyConnection, Connection, PostgresConnection, Row, SqliteConnection, Value, write};
 use serde_json::{Map, Value as Json, json};
+use sha2::{Digest, Sha256};
 
 use crate::Error;
 use crate::clock;
@@ -1691,6 +1692,93 @@ impl Bus {
             out.push(entry);
         }
         Ok(pytext::dumps_indented(&out)?)
+    }
+
+    /// Take the wake lock of an instance for `lease_seconds`: the guard
+    /// that keeps two supervisors from launching the same agent at once.
+    /// A lease like a task's (an expired lock is free); `{token, until}`
+    /// or `BUSY`.
+    pub fn acquire_wake_lock(&self, agent: &str, lease_seconds: i64, holder: &str) -> Result<String, Error> {
+        let target = fold(agent);
+        if target.is_empty() {
+            return Ok("ERROR: empty agent.".to_owned());
+        }
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_nanos());
+        let seed = format!("{target}{nanos}{}", std::process::id());
+        let token: String = Sha256::digest(seed.as_bytes())
+            .iter()
+            .take(8)
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        let until = clock::after(lease_seconds)?;
+        let mut conn = self.connect()?;
+        write(&mut conn, |c| -> Result<String, Error> {
+            let rows = c.query(
+                "SELECT until FROM wake_locks WHERE agent=?",
+                &[target.as_str().into()],
+            )?;
+            // Workspace MSRV 1.85: no let chain here.
+            if let Some(row) = rows.first() {
+                if row.text("until")? > clock::now_iso().as_str() {
+                    return Ok("BUSY".to_owned());
+                }
+            }
+            c.execute(
+                "INSERT INTO wake_locks(agent, token, until, holder) VALUES(?,?,?,?) \
+                 ON CONFLICT(agent) DO UPDATE SET token=excluded.token, \
+                 until=excluded.until, holder=excluded.holder",
+                &[
+                    target.as_str().into(),
+                    token.as_str().into(),
+                    until.as_str().into(),
+                    holder.into(),
+                ],
+            )?;
+            Ok(pytext::dumps(&json!({ "token": token, "until": until }))?)
+        })
+    }
+
+    /// Give a wake lock back, if still held with this token.
+    pub fn release_wake_lock(&self, agent: &str, token: &str) -> Result<String, Error> {
+        let target = fold(agent);
+        let mut conn = self.connect()?;
+        let held = write(&mut conn, |c| {
+            c.execute(
+                "DELETE FROM wake_locks WHERE agent=? AND token=?",
+                &[target.as_str().into(), token.into()],
+            )
+        })?;
+        Ok(if held > 0 {
+            "OK".to_owned()
+        } else {
+            "ERROR: wake lock not held with this token.".to_owned()
+        })
+    }
+
+    /// Journal a wake-up transition (`wake` event: start, end, refused);
+    /// [`Bus::wake_count`] counts the starts.
+    pub fn record_wake(&self, agent: &str, detail: &str) -> Result<(), Error> {
+        let agent = fold(agent);
+        let mut conn = self.connect()?;
+        write(&mut conn, |c| log_event(c, "wake", None, Some(&agent), detail))
+    }
+
+    /// Launches of an instance within the window (`wake` events whose
+    /// detail starts with `start`).
+    pub fn wake_count(&self, agent: &str, window_seconds: i64) -> Result<i64, Error> {
+        let since = clock::shift(clock::now(), -window_seconds).map(clock::iso)?;
+        let mut conn = self.connect()?;
+        let rows = conn.query(
+            "SELECT COUNT(*) c FROM events WHERE event='wake' AND agent=? AND at >= ? \
+             AND detail LIKE 'start%'",
+            &[fold(agent).into(), since.into()],
+        )?;
+        Ok(match rows.first() {
+            Some(row) => row.int("c")?,
+            None => 0,
+        })
     }
 }
 

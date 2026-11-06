@@ -113,9 +113,9 @@ se passe entièrement de MCP.
 ### Exécutables natifs (Rust, préversion)
 
 `rust/` construit deux exécutables autonomes, sans Python sur la
-machine : `iab`, la ligne de commande (toutes les sous-commandes du bus
-sauf `worker`, `wake`, `supervise`, qui viennent ensuite, et le moyeu,
-l'appairage, `review` et `install`, qui restent en Python), et
+machine : `iab`, la ligne de commande (toutes les sous-commandes du bus,
+`worker`, `wake` et `supervise` compris ; le moyeu, l'appairage, `review`
+et `install` restent en Python), et
 `iab-server`, le serveur MCP avec les mêmes 23 outils. Tous deux parlent
 au même fichier SQLite ou au même serveur PostgreSQL (en TLS) que
 l'implémentation Python, en même temps ; `IAB_HUB` est refusé. Aucune

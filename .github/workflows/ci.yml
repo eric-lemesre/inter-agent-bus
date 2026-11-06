@@ -129,13 +129,13 @@ jobs:
       - name: Install the Python implementation
         run: python -m pip install -e ".[server,hub,postgres]" "psycopg[binary]"
       # Every scenario on the four pairs python/python, python/rust,
-      # rust/python, rust/rust sharing one database. `worker` arrives in
-      # the native client at step R4.
+      # rust/python, rust/rust sharing one database, worker, wake and
+      # supervise included.
       - name: Conformance, Python and native client crossed (SQLite)
         run: |
           py=$(python -c "import json, os, sys; print(json.dumps([sys.executable, os.path.abspath('servers/shared_memory/cli.py')]))")
           rs=$(python -c "import json, os; print(json.dumps([os.path.abspath(os.path.join('rust', 'target', 'release', 'iab.exe' if os.name == 'nt' else 'iab'))]))")
-          python conformance/run.py --impl "python=$py" --impl "rust=$rs" --without rust=worker
+          python conformance/run.py --impl "python=$py" --impl "rust=$rs"
           echo "IMPLS_PY=$py" >> "$GITHUB_ENV"
           echo "IMPLS_RS=$rs" >> "$GITHUB_ENV"
       # The native MCP server judged against server.py: same tools and
@@ -152,7 +152,7 @@ jobs:
       # Same pairs on PostgreSQL over TLS (verify-full, client certificate):
       # LISTEN/NOTIFY wakes and the advisory writer lock shared by both.
       - name: Conformance, Python and native client crossed (PostgreSQL over TLS)
-        run: python conformance/run.py --impl "python=$IMPLS_PY" --impl "rust=$IMPLS_RS" --without rust=worker
+        run: python conformance/run.py --impl "python=$IMPLS_PY" --impl "rust=$IMPLS_RS"
       - name: Conformance, native MCP server (PostgreSQL over TLS)
         run: python conformance/mcp_server.py --impl "rust=$SERVER_RS"
       - name: TLS and authentication of the native client

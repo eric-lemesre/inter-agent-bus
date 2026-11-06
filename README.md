@@ -105,9 +105,9 @@ in interactive sessions only — headless mode goes through
 ### Native executables (Rust, preview)
 
 `rust/` builds two standalone executables, no Python needed on the
-machine: `iab`, the command line (every bus subcommand except `worker`,
-`wake`, `supervise`, which come next, and the hub, pairing, `review`
-and `install`, which stay Python-only), and `iab-server`, the MCP server
+machine: `iab`, the command line (every bus subcommand, `worker`, `wake`
+and `supervise` included; the hub, pairing, `review` and `install` stay
+Python-only), and `iab-server`, the MCP server
 with the same 23 tools. Both speak to the same SQLite file or PostgreSQL
 server (over TLS) as the Python implementation, at the same time;
 `IAB_HUB` is refused. No archive is published yet: build with

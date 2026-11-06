@@ -404,7 +404,15 @@ conformance suite.
   `conformance/mcp_server.py` (interface, a session touching every tool
   answer for answer, both servers on one database, concurrency) on
   SQLite and over TLS, Linux and Windows.
-- **R4** — `worker`, `wake`, `supervise` on Windows.
+- **R4** — `worker`, `wake`, `supervise` in the native `iab` —
+  **shipped**. Payload and prompt on stdin in bytes, lease extended
+  every half lease, task timeout, the result texts of `worker.py`;
+  decision, budget, wake lock and journal shared with Python through
+  the database, so a launch by one holds the other back; `supervise`
+  one thread per instance. Judged by four new scenarios of
+  `conformance/run.py` (worker failures, wake, supervise, the existing
+  worker one now on every pair) on SQLite and over TLS, Linux and
+  Windows.
 - **R5** — signing, published archives; `.deb`/`.rpm` when needed.
 
 Each step passes the full conformance suite on both implementations

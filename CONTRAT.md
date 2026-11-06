@@ -152,7 +152,7 @@ suite (§ 11) on every pair of implementations.
 - A payload is never truncated; its size is limited by the database
   only.
 
-## 10. Launched processes (`worker`, `wake`)
+## 10. Launched processes (`worker`, `wake`, `supervise`)
 
 - The payload or prompt goes through the process's **standard input**
   (or a temporary file for `{prompt_file}`), never through its arguments
@@ -162,6 +162,32 @@ suite (§ 11) on every pair of implementations.
   line-ending translation. `iab worker` publishes standard output as is.
 - Empty output from a command that succeeded is a failure published as
   `ERROR: …`.
+- `iab worker`: the lease is extended every half lease while the
+  command runs; `--task-timeout` is checked at those beats, the command
+  is then killed and `ERROR: worker command killed after task timeout …`
+  published. The exit code is the operating system's (a signal is minus
+  its number on Unix). The result texts (`ERROR: worker command failed
+  (exit N). stderr: …`, `… produced no output …`) and the stderr tail
+  (2000 characters) are those of `worker.py`.
+- `iab wake` answers the same lines: `NO_SIGNAL`, `NOT_HERE: …`, `BUSY`,
+  `REFUSED: …`, `DRY_RUN: …`, `OK: …`, `ERROR: …`. Decision, budget
+  (`wake` events of the last hour whose detail starts with `start`), wake
+  lock (`wake_locks` table: a lease, a 16-hex token, `BUSY` while it has
+  not expired) and journal (`start: …`, `end: …`, `refused: …`) are
+  shared: one implementation's launch holds the other back.
+- The launch prompt: the `{agent}`, `{iab}`, `{cwd}`, `{lease}`,
+  `{task_ids}` and `{signals}` fields are replaced, an unknown field is
+  kept as written, `{{` and `}}` escape a brace. `{iab}` is the running
+  executable: the native `iab` names itself. The native client applies
+  no format specification (`{lease:>6}` is written as the bare value),
+  and refuses an unbalanced brace with an `ERROR:` line where Python
+  fails.
+- `this machine`, matched against `launch.host`: `--host`, otherwise the
+  host name without its domain, in lower case. The native client never
+  speaks to a hub, so never takes the paired name.
+- A malformed roster value (`timeout` that is not a number, `wake_on`
+  that is not a list) is an `ERROR:` line in the native client; Python
+  stops on an exception.
 
 ## 11. Conformance suite
 
@@ -172,7 +198,7 @@ pair of implementations sharing one database:
 ```bash
 python3 conformance/run.py                                   # Python only
 python3 conformance/run.py --impl python='["python3","servers/shared_memory/cli.py"]' \
-                           --impl rust='["/path/to/iab"]' --without rust=worker
+                           --impl rust='["/path/to/iab"]'
 IAB_TEST_POSTGRES=<URL of an EMPTY test database> python3 conformance/run.py
 ```
 
@@ -183,7 +209,11 @@ Scenarios: full lifecycle, refusals, priorities, fenced settling after
 expiry, dead letters and requeue, concurrent claims (exactly one wins),
 notifications and broadcasts, a blocking wait woken by a write of the
 other implementation, fidelity of a 200 kB payload (non-ASCII, `\r\n`,
-`\r`), `iab worker`, identity and project key in an accented folder.
+`\r`), `iab worker` (one task, then a failing, a silent and a hung
+command), `iab wake` (nothing waits, the same dry run from both, a launch
+with the rendered prompt, the budget spent, another machine's entry, the
+lock held by the other implementation's launch), `iab supervise --once`,
+identity and project key in an accented folder.
 
 The `scripts/pg_tls.py` bench starts a PostgreSQL server that accepts
 the bus role only over TLS with a client certificate, and hands out its

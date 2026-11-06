@@ -9,7 +9,7 @@ B, each scenario runs as A/A, A/B, B/A and B/B on every engine.
 
     python3 conformance/run.py
     python3 conformance/run.py --impl rust='["/path/to/iab"]'
-    python3 conformance/run.py --impl python='[…]' --impl rust='[…]' --without rust=worker
+    python3 conformance/run.py --impl python='[…]' --impl rust='[…]' --without rust=wake
     IAB_TEST_POSTGRES=<URL of an EMPTY test database> python3 conformance/run.py
 
 An implementation is a NAME=COMMAND pair, COMMAND a JSON list (the argv
@@ -93,9 +93,9 @@ class Impl:
             capture_output=True, cwd=cwd or self.cwd, env=self.env(env), timeout=timeout)
         return Run(done.returncode, _utf8(done.stdout, self, args), _utf8(done.stderr, self, args))
 
-    def popen(self, *args: str) -> subprocess.Popen:
+    def popen(self, *args: str, env: dict[str, str] | None = None) -> subprocess.Popen:
         return subprocess.Popen([*self.argv, *args], stdout=subprocess.PIPE,
-                                stderr=subprocess.PIPE, cwd=self.cwd, env=self.env())
+                                stderr=subprocess.PIPE, cwd=self.cwd, env=self.env(env))
 
 
 def _utf8(data: bytes, impl: Impl, args) -> str:
@@ -281,6 +281,116 @@ def worker(a: Impl, b: Impl, tag: str) -> None:
           content == PAYLOAD, f"{len(content or '')} chars vs {len(PAYLOAD)}")
 
 
+def worker_failures(a: Impl, b: Impl, tag: str) -> None:
+    """A failing, silent or hung command publishes an ERROR: result."""
+    a("register", "alpha@conf")
+    check(f"{tag} worker --once on an empty queue exits 0",
+          b("worker", "--agent", "alpha@conf", "--once", "--", *ECHO).rc == 0)
+    a("push", "alpha@conf", "fail", "x")
+    ran = b("worker", "--agent", "alpha@conf", "--once", "--", sys.executable, "-c",
+            "import sys; sys.stderr.write('boom'); sys.exit(3)")
+    content = a("result", "fail").json().get("content", "")
+    check(f"{tag} non-zero exit published as ERROR with the stderr tail",
+          ran.rc == 1 and content == "ERROR: worker command failed (exit 3). stderr: boom", content)
+    a("push", "alpha@conf", "mute", "x")
+    b("worker", "--agent", "alpha@conf", "--once", "--", sys.executable, "-c", "pass")
+    content = a("result", "mute").json().get("content", "")
+    check(f"{tag} empty output published as ERROR",
+          content == "ERROR: worker command produced no output (exit 0). stderr: ", content)
+    a("push", "alpha@conf", "hang", "x")
+    started = time.monotonic()
+    b("worker", "--agent", "alpha@conf", "--once", "--lease", "2", "--task-timeout", "1",
+      "--", sys.executable, "-c", "import time; time.sleep(60)")
+    content = a("result", "hang").json().get("content", "")
+    check(f"{tag} task timeout kills the command and publishes ERROR",
+          content.startswith("ERROR: worker command killed after task timeout 1s.")
+          and time.monotonic() - started < 30, content)
+
+
+def _roster(tmp: Path, entries: list[dict]) -> dict[str, str]:
+    path = tmp / "roster.json"
+    path.write_text(json.dumps({"agents": entries}), encoding="utf-8")
+    return {"IAB_ROSTER": str(path)}
+
+
+def _writer(target: Path) -> list[str]:
+    """A launcher that keeps the prompt it receives on stdin."""
+    return [sys.executable, "-c",
+            f"import sys, pathlib; pathlib.Path({str(target)!r}).write_bytes(sys.stdin.buffer.read())"]
+
+
+def wake(a: Impl, b: Impl, tag: str) -> None:
+    """One decision: nothing waits, dry run, launch, budget, other host,
+    lock held by a launch of the other implementation."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        prompt = tmp / "prompt.txt"
+        env = _roster(tmp, [
+            {"name": "alpha@conf", "launch": {
+                "command": _writer(prompt), "cwd": str(tmp), "max_wakes_per_hour": 1,
+                "lease_seconds": 600, "prompt": "agent={agent} tasks={task_ids} lease={lease} {other}"}},
+            {"name": "beta@conf", "launch": {"command": ["true"], "host": "elsewhere"}},
+            {"name": "gamma@conf", "launch": {
+                "command": [sys.executable, "-c", "import time; time.sleep(12)"], "cwd": str(tmp)}},
+        ])
+        a("register", "alpha@conf")
+        quiet = b("wake", "alpha@conf", env=env)
+        check(f"{tag} nothing waits: NO_SIGNAL", quiet.rc == 0 and strip_newline(quiet.out) == "NO_SIGNAL",
+              quiet.out)
+        a("push", "alpha@conf", "t1", "x")
+        dry = [impl("wake", "alpha@conf", "--dry-run", env=env).out for impl in (a, b)]
+        check(f"{tag} dry run: same decision from both",
+              dry[0] == dry[1] and dry[0].startswith('DRY_RUN: would launch ["')
+              and "(reason: 1 queued task(s): t1; timeout 1200s; prompt 43 chars)" in dry[0], str(dry))
+        woken = b("wake", "alpha@conf", env=env)
+        check(f"{tag} launch with the rendered prompt on stdin",
+              woken.rc == 0 and woken.out.startswith("OK: worker finished in")
+              and prompt.read_text(encoding="utf-8") == "agent=alpha@conf tasks=t1 lease=600 {other}",
+              woken.out + woken.err[-300:])
+        wakes = [e["detail"] for e in a("log", "-a", "alpha@conf").json() if e["event"] == "wake"]
+        check(f"{tag} journal: start then end",
+              len(wakes) == 2 and wakes[0].startswith("start: 1 queued task(s): t1; ")
+              and wakes[1].startswith("end: exit 0 after "), str(wakes))
+        again = a("wake", "alpha@conf", env=env)
+        check(f"{tag} budget spent: REFUSED by the other implementation",
+              strip_newline(again.out) == "REFUSED: 1/1 wakes in the last hour — loop breaker.", again.out)
+        a("register", "beta@conf")
+        a("push", "beta@conf", "t2", "x")
+        away = [impl("wake", "beta@conf", "--host", "here", env=env).out for impl in (a, b)]
+        check(f"{tag} entry of another machine: NOT_HERE",
+              away[0] == away[1]
+              and strip_newline(away[0]) == "NOT_HERE: 'beta@conf' is launched on elsewhere, this is here.",
+              str(away))
+        missing = a("wake", "nobody@conf", env=env)
+        check(f"{tag} no launch block: refused", refused(missing), missing.out)
+        a("register", "gamma@conf")
+        a("push", "gamma@conf", "t3", "x")
+        first = a.popen("wake", "gamma@conf", env=env)
+        time.sleep(5)  # the lock is taken once the first process has started
+        busy = b("wake", "gamma@conf", env=env)
+        first.communicate(timeout=60)
+        check(f"{tag} lock held by the other implementation: BUSY",
+              strip_newline(busy.out) == "BUSY" and first.returncode == 0, busy.out)
+
+
+def supervise(a: Impl, b: Impl, tag: str) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        prompt = tmp / "prompt.txt"
+        env = _roster(tmp, [{"name": "alpha@conf", "launch": {
+            "command": _writer(prompt), "cwd": str(tmp), "prompt": "{task_ids}"}}])
+        a("register", "alpha@conf")
+        a("push", "alpha@conf", "t1", "x")
+        ran = b("supervise", "--once", env=env)
+        check(f"{tag} supervise --once wakes the agent a signal waits for",
+              ran.rc == 0 and "supervising alpha@conf on " in ran.err
+              and "alpha@conf: OK: worker finished in" in ran.err
+              and prompt.read_text(encoding="utf-8") == "t1", ran.err[-400:])
+        starts = [e for e in a("log", "-a", "alpha@conf").json()
+                  if e["event"] == "wake" and e["detail"].startswith("start")]
+        check(f"{tag} the launch is journaled", len(starts) == 1, str(starts))
+
+
 def identity(a: Impl, b: Impl, tag: str) -> None:
     """Same folder, same identity and project key — accents included."""
     if shutil.which("git") is None:
@@ -305,7 +415,7 @@ def identity(a: Impl, b: Impl, tag: str) -> None:
 
 
 SCENARIOS = [lifecycle, refusals, priority, fencing, dead_letter, contention,
-             messages, wake_up, payload, worker, identity]
+             messages, wake_up, payload, worker, worker_failures, wake, supervise, identity]
 
 
 def main() -> int:

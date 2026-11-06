@@ -156,7 +156,7 @@ passe la suite de conformité (§ 11) sur chaque paire d'implémentations.
 - Une charge utile n'est jamais tronquée ; sa taille n'est limitée que
   par la base.
 
-## 10. Processus lancés (`worker`, `wake`)
+## 10. Processus lancés (`worker`, `wake`, `supervise`)
 
 - La charge utile ou l'invite passe par l'**entrée standard** du
   processus (ou un fichier temporaire pour `{prompt_file}`), jamais par
@@ -166,6 +166,34 @@ passe la suite de conformité (§ 11) sur chaque paire d'implémentations.
   des fins de ligne. `iab worker` publie la sortie standard telle quelle.
 - Une sortie vide d'une commande qui a réussi est un échec publié
   `ERROR: …`.
+- `iab worker` : le bail est prolongé toutes les demi-durées de bail
+  pendant que la commande tourne ; `--task-timeout` est vérifié à ces
+  battements, la commande est alors tuée et
+  `ERROR: worker command killed after task timeout …` publié. Le code de
+  sortie est celui du système (un signal vaut moins son numéro sous
+  Unix). Les textes de résultat (`ERROR: worker command failed (exit N).
+  stderr: …`, `… produced no output …`) et la fin de stderr (2000
+  caractères) sont ceux de `worker.py`.
+- `iab wake` répond les mêmes lignes : `NO_SIGNAL`, `NOT_HERE: …`,
+  `BUSY`, `REFUSED: …`, `DRY_RUN: …`, `OK: …`, `ERROR: …`. Décision,
+  budget (événements `wake` de la dernière heure dont le détail commence
+  par `start`), verrou de réveil (table `wake_locks` : un bail, un jeton
+  de 16 hexadécimaux, `BUSY` tant qu'il n'a pas expiré) et journal
+  (`start: …`, `end: …`, `refused: …`) sont partagés : le lancement d'une
+  implémentation retient l'autre.
+- L'invite de lancement : les champs `{agent}`, `{iab}`, `{cwd}`,
+  `{lease}`, `{task_ids}` et `{signals}` sont remplacés, un champ inconnu
+  reste tel quel, `{{` et `}}` échappent une accolade. `{iab}` est
+  l'exécutable en cours : le `iab` natif se désigne lui-même. Le client
+  natif n'applique aucune spécification de format (`{lease:>6}` donne la
+  valeur nue) et refuse une accolade orpheline par une ligne `ERROR:` là
+  où Python échoue.
+- « Cette machine », comparée à `launch.host` : `--host`, sinon le nom
+  d'hôte sans son domaine, en minuscules. Le client natif ne parle
+  jamais à un moyeu, il ne prend donc jamais le nom d'appairage.
+- Une valeur de roster mal formée (`timeout` qui n'est pas un nombre,
+  `wake_on` qui n'est pas une liste) donne une ligne `ERROR:` dans le
+  client natif ; Python s'arrête sur une exception.
 
 ## 11. Suite de conformité
 
@@ -176,7 +204,7 @@ les paires d'implémentations partageant une même base :
 ```bash
 python3 conformance/run.py                                   # Python seul
 python3 conformance/run.py --impl python='["python3","servers/shared_memory/cli.py"]' \
-                           --impl rust='["/chemin/vers/iab"]' --without rust=worker
+                           --impl rust='["/chemin/vers/iab"]'
 IAB_TEST_POSTGRES=<URL d'une base de test VIDE> python3 conformance/run.py
 ```
 
@@ -189,8 +217,12 @@ après expiration, file des tâches mortes et remise en file,
 réclamations concurrentes (une seule gagne), notifications et
 diffusions, réveil d'une attente par une écriture de l'autre
 implémentation, fidélité d'une charge utile de 200 ko (non-ASCII,
-`\r\n`, `\r`), `iab worker`, identité et clé de projet dans un dossier
-accentué.
+`\r\n`, `\r`), `iab worker` (une tâche, puis une commande en échec,
+muette, puis bloquée), `iab wake` (rien n'attend, la même simulation des
+deux côtés, un lancement avec l'invite rendue, le budget épuisé,
+l'entrée d'une autre machine, le verrou tenu par le lancement de l'autre
+implémentation), `iab supervise --once`, identité et clé de projet dans
+un dossier accentué.
 
 Le banc `scripts/pg_tls.py` monte un serveur PostgreSQL qui n'accepte le
 rôle du bus qu'en TLS avec certificat client, et ne donne son URL
