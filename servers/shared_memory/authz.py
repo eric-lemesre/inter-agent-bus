@@ -187,6 +187,14 @@ class Authz:
             refused = self._refuses_channel(principals)
             if refused:
                 return refused, None
+        if op in ("claim_task", "decline_task"):
+            # `by` names a second instance (who claims or refuses from a
+            # shared queue): another machine's instance may not be named.
+            by = str(arguments.get("by") or "").strip().lower()
+            by_owner = registry.bound_machine(by) if by else None
+            if by_owner and by_owner != machine["name"]:
+                return (f"ERROR: agent '{by}' belongs to machine '{by_owner}' — refused "
+                        f"as `by` from '{machine['name']}'."), None
         if op == "rename_agent":
             new = str(arguments.get("new", "")).strip().lower()
             new_owner = registry.bound_machine(new)

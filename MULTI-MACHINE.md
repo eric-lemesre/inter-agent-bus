@@ -275,7 +275,9 @@ Through the hub, binding applies as to any instance: the queue belongs
 to the first machine that acts as it (its first claim, refusal or
 heartbeat). An agent of `odin` watching `odin@general` first is what
 binds it to `odin`; from then on, a claim, a refusal or a wake lock on
-`odin@general` from another machine is refused. Watching a queue is a
+`odin@general` from another machine is refused, and so is naming
+another machine's instance as `by` of a claim or a refusal. Watching a
+queue is a
 read and binds nothing: watch only your own machine's queue. An entry
 `odin@general` with a `launch` block, `host: "odin"` and
 `after_seconds` lets that machine's `iab supervise` stand in when no

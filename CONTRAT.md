@@ -119,7 +119,9 @@ suite (§ 11) on every pair of implementations.
   grows by one (a refusal costs no attempt) and a `declines` row
   `(task_id, agent=by)` is written; a claim with `by` skips the tasks
   that instance declined. On any other queue, the task becomes
-  `declined` and its result is `DECLINED: <reason>`, authored by `by`.
+  `declined` and its result is `DECLINED by <by>: <reason>`, authored
+  by the queue's agent. `by` must be a valid name other than `bus`:
+  `ERROR: invalid refusing instance '<by>'.`
   Journal: `decline`, detail `by <by>: <reason>` (followed by ` —
   re-offered to the other agents` on a general queue).
 - Claim: the highest-priority `queued` task, then the oldest

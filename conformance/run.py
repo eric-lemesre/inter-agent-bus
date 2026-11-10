@@ -305,7 +305,7 @@ def machine_queue(a: Impl, b: Impl, tag: str) -> None:
     out = a("decline", "beta@conf", "p1", "--attempt", str(taken.get("attempts")),
             "--reason", "hors cadre")
     check(f"{tag} a personal refusal settles the task",
-          ok_line(out) and b("result", "p1").json().get("content") == "DECLINED: hors cadre",
+          ok_line(out) and b("result", "p1").json().get("content") == "DECLINED by beta@conf: hors cadre",
           out.out)
 
 

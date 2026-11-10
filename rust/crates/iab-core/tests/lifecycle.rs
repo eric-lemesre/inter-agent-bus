@@ -171,7 +171,7 @@ fn a_declined_personal_task_should_be_settled_with_its_reason() {
     bus.decline_task("alpha@conf", "p", "out of scope", None, "")
         .unwrap();
     let result = json(&bus.read_result("p").unwrap());
-    assert_eq!(result["content"], "DECLINED: out of scope");
+    assert_eq!(result["content"], "DECLINED by alpha@conf: out of scope");
 }
 
 #[test]

@@ -1021,6 +1021,8 @@ def decline_task(
     reason = reason.strip()
     if not reason:
         return "ERROR: a refusal needs a reason."
+    if not _NAME_RE.match(by) or by == SYSTEM_AUTHOR:
+        return f"ERROR: invalid refusing instance '{by}'."
     with _db() as conn:
         with _write(conn):
             row = conn.execute(
@@ -1062,7 +1064,7 @@ def decline_task(
                 "INSERT INTO results(task_id, author, content, updated_at) VALUES(?,?,?,?) "
                 "ON CONFLICT(task_id) DO UPDATE SET author=excluded.author, "
                 "content=excluded.content, updated_at=excluded.updated_at",
-                (task_id, by, f"DECLINED: {reason}", _now()),
+                (task_id, owner, f"DECLINED by {by}: {reason}", _now()),
             )
             conn.execute(
                 "UPDATE tasks SET status='declined', claimed_at=NULL, lease_deadline=NULL "

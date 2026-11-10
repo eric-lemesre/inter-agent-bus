@@ -125,7 +125,9 @@ passe la suite de conformité (§ 11) sur chaque paire d'implémentations.
   essai) et une ligne `declines` `(task_id, agent=by)` est écrite ; une
   réclamation avec `by` saute les tâches que cette instance a refusées.
   Sur toute autre file, la tâche passe en `declined` et son résultat est
-  `DECLINED: <motif>`, d'auteur `by`. Journal : `decline`, détail `by
+  `DECLINED by <by>: <motif>`, d'auteur l'agent de la file. `by` doit
+  être un nom valide autre que `bus` : `ERROR: invalid refusing instance
+  '<by>'.` Journal : `decline`, détail `by
   <by>: <motif>` (suivi de ` — re-offered to the other agents` sur une
   file générale).
 - Réclamation : la tâche `queued` de plus haute priorité, puis la plus

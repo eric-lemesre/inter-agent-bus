@@ -1489,7 +1489,11 @@ with tempfile.TemporaryDirectory() as tmp:
     check("a refusal on a personal queue settles the task as declined",
           r.startswith("OK") and store.claim_task("bb@ws2", 60) == "NO_TASK", r)
     check("…with the reason readable as its result",
-          json.loads(store.read_result("p-2"))["content"] == "DECLINED: outside my frame")
+          json.loads(store.read_result("p-2"))["content"] == "DECLINED by bb@ws2: outside my frame"
+          and json.loads(store.read_result("p-2"))["author"] == "bb@ws2")
+    check("a reserved or invalid refusing instance is refused",
+          store.decline_task("bb@ws2", "p-2", "x", by="bus").startswith("ERROR: invalid")
+          and store.decline_task("bb@ws2", "p-2", "x", by="Not A Name!").startswith("ERROR: invalid"))
     check("an unclaimed task cannot be declined",
           store.decline_task("bb@ws2", "p-2", "again").startswith("ERROR"))
     check("a declined task can be requeued by an orchestrator",

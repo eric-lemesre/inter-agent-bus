@@ -1188,6 +1188,9 @@ impl Bus {
         if reason.is_empty() {
             return Ok("ERROR: a refusal needs a reason.".to_owned());
         }
+        if !is_valid_name(&by) || by == SYSTEM_AUTHOR {
+            return Ok(format!("ERROR: invalid refusing instance '{by}'."));
+        }
         let mut conn = self.connect()?;
         write(&mut conn, |c| -> Result<String, Error> {
             let rows = c.query(
@@ -1251,8 +1254,8 @@ impl Bus {
                  content=excluded.content, updated_at=excluded.updated_at",
                 &[
                     task_id.into(),
-                    by.as_str().into(),
-                    format!("DECLINED: {reason}").into(),
+                    owner.as_str().into(),
+                    format!("DECLINED by {by}: {reason}").into(),
                     clock::now_iso().into(),
                 ],
             )?;

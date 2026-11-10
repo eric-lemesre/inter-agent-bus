@@ -289,7 +289,9 @@ la file appartient à la première machine qui agit en son nom (sa
 première réclamation, son premier refus ou battement de cœur). C'est un
 agent d'`odin` qui agit le premier sur `odin@general` qui la rattache à
 `odin` ; dès lors, une réclamation, un refus ou un verrou de réveil sur
-`odin@general` depuis une autre machine est refusé. Surveiller une file
+`odin@general` depuis une autre machine est refusé, de même que nommer
+l'instance d'une autre machine comme `by` d'une réclamation ou d'un
+refus. Surveiller une file
 est une lecture et ne rattache rien : ne surveillez que la file de
 votre machine. Une entrée `odin@general` avec un bloc `launch`,
 `host: "odin"` et `after_seconds` laisse l'`iab supervise` de cette
