@@ -84,6 +84,10 @@ enum Command {
         /// claim this specific queued task of one's own queue
         #[arg(long)]
         task_id: Option<String>,
+        /// the instance claiming from a machine's general queue: the tasks it
+        /// declined are not offered to it again
+        #[arg(long, default_value = "", value_name = "AGENT")]
+        by: String,
     },
     /// publish a task's result (settles the task)
     Publish {
@@ -97,6 +101,21 @@ enum Command {
         /// orchestrator override of ownership and fencing checks
         #[arg(long)]
         force: bool,
+    },
+    /// refuse a claimed task, with a reason: back to a machine's general
+    /// queue for another agent, settled as declined elsewhere
+    Decline {
+        /// the queue the task was claimed from
+        agent: String,
+        task_id: String,
+        #[arg(long)]
+        reason: String,
+        /// attempt number received at claim (lease fencing)
+        #[arg(long, allow_negative_numbers = true)]
+        attempt: Option<i64>,
+        /// the refusing instance (default: the queue's agent)
+        #[arg(long, default_value = "", value_name = "AGENT")]
+        by: String,
     },
     /// cancel a task that is not settled yet
     Cancel { task_id: String },
@@ -198,10 +217,20 @@ enum Command {
     /// queued task_ids one per line; --on notification|any prints the signal
     /// snapshot as JSON; exits 0 either way
     Watch {
-        agent: String,
+        /// one or several instances, e.g. yours and <machine>@general
+        #[arg(required = true)]
+        agent: Vec<String>,
         /// which signal ends the wait (default: task)
         #[arg(long, value_enum, default_value = "task")]
         on: On,
+        /// ignore what already waits when the wait starts (needs --on
+        /// notification|any)
+        #[arg(long)]
+        new: bool,
+        /// the `since` mark of the previous answer: wake only on what came
+        /// after it (implies --new)
+        #[arg(long, default_value = "", value_name = "MARK")]
+        since: String,
         #[arg(
             long,
             default_value_t = 300.0,
@@ -395,7 +424,15 @@ fn run(command: Command) -> Result<String, Refusal> {
             agent,
             lease,
             task_id,
-        } => bus.claim_task(&agent, lease, task_id.as_deref())?,
+            by,
+        } => bus.claim_task(&agent, lease, task_id.as_deref(), &by)?,
+        Command::Decline {
+            agent,
+            task_id,
+            reason,
+            attempt,
+            by,
+        } => bus.decline_task(&agent, &task_id, &reason, attempt, &by)?,
         Command::Publish {
             agent,
             task_id,
@@ -456,11 +493,16 @@ fn run(command: Command) -> Result<String, Refusal> {
         Command::Watch {
             agent,
             on,
+            new,
+            since,
             timeout,
             interval,
         } => match on {
+            On::Task if agent.len() > 1 || new || !since.is_empty() => {
+                "ERROR: several agents, --new or --since need --on notification or --on any.".to_owned()
+            }
             On::Task => {
-                let out = bus.wait_for_task(&agent, timeout, interval)?;
+                let out = bus.wait_for_task(&agent[0], timeout, interval)?;
                 if out.starts_with("ERROR") {
                     out
                 } else {
@@ -468,8 +510,10 @@ fn run(command: Command) -> Result<String, Refusal> {
                     ids.join("\n")
                 }
             }
-            On::Notification => bus.wait_signal(&agent, "notification", timeout, interval)?,
-            On::Any => bus.wait_signal(&agent, "any", timeout, interval)?,
+            On::Notification => {
+                bus.wait_signal(&agent.join(","), "notification", timeout, interval, new, &since)?
+            }
+            On::Any => bus.wait_signal(&agent.join(","), "any", timeout, interval, new, &since)?,
         },
         Command::Signals { agent } => bus.pending_signals(&agent)?,
         Command::Presence => bus.list_presence()?,

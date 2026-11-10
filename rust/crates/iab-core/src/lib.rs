@@ -9,6 +9,7 @@
 
 pub mod clock;
 pub mod identity;
+pub mod instructions;
 pub mod pytext;
 mod store;
 

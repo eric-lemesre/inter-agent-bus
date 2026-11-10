@@ -41,6 +41,22 @@ pub fn split_name(name: &str) -> (String, String) {
     }
 }
 
+/// The workspace of a machine's general queue, `<machine>@general`: tasks
+/// asking for an action specific to that machine, taken by one of the
+/// agents watching it.
+pub const MACHINE_QUEUE_WORKSPACE: &str = "general";
+
+/// `odin` → `odin@general`, the general queue of that machine.
+pub fn machine_queue(machine: &str) -> String {
+    format!("{}@{MACHINE_QUEUE_WORKSPACE}", slugify_component(machine))
+}
+
+/// Whether a name designates a machine's general queue.
+pub fn is_machine_queue(name: &str) -> bool {
+    let (harness, workspace) = split_name(name);
+    !harness.is_empty() && workspace == MACHINE_QUEUE_WORKSPACE
+}
+
 /// Fold a folder or client name into one identity component: lower case,
 /// every run of characters outside `[a-z0-9._-]` replaced by `-`, leading
 /// punctuation dropped, 40 characters at most, `root` when nothing remains.

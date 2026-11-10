@@ -38,22 +38,22 @@ fn claim_should_serve_the_highest_priority_first() {
     let (_dir, bus) = bus();
     bus.push_task("alpha@conf", "low", "x", 1, 3, true).unwrap();
     bus.push_task("alpha@conf", "high", "x", 9, 3, true).unwrap();
-    let claimed = json(&bus.claim_task("alpha@conf", 60, None).unwrap());
+    let claimed = json(&bus.claim_task("alpha@conf", 60, None, "").unwrap());
     assert_eq!(claimed["task_id"], "high");
 }
 
 #[test]
 fn claim_should_answer_no_task_on_an_empty_queue() {
     let (_dir, bus) = bus();
-    assert_eq!(bus.claim_task("alpha@conf", 60, None).unwrap(), "NO_TASK");
+    assert_eq!(bus.claim_task("alpha@conf", 60, None, "").unwrap(), "NO_TASK");
 }
 
 #[test]
 fn claim_should_reoffer_an_expired_lease_with_the_next_attempt() {
     let (_dir, bus) = bus();
     bus.push_task("alpha@conf", "t", "x", 1, 3, true).unwrap();
-    bus.claim_task("alpha@conf", -1, None).unwrap();
-    let again = json(&bus.claim_task("alpha@conf", 60, None).unwrap());
+    bus.claim_task("alpha@conf", -1, None, "").unwrap();
+    let again = json(&bus.claim_task("alpha@conf", 60, None, "").unwrap());
     assert_eq!(again["attempts"], 2);
 }
 
@@ -61,8 +61,8 @@ fn claim_should_reoffer_an_expired_lease_with_the_next_attempt() {
 fn publish_should_refuse_a_stale_attempt() {
     let (_dir, bus) = bus();
     bus.push_task("alpha@conf", "t", "x", 1, 3, true).unwrap();
-    bus.claim_task("alpha@conf", -1, None).unwrap();
-    bus.claim_task("alpha@conf", 60, None).unwrap();
+    bus.claim_task("alpha@conf", -1, None, "").unwrap();
+    bus.claim_task("alpha@conf", 60, None, "").unwrap();
     let out = bus
         .publish_result("alpha@conf", "t", "late", Some(1), false)
         .unwrap();
@@ -73,8 +73,8 @@ fn publish_should_refuse_a_stale_attempt() {
 fn claim_should_dead_letter_an_exhausted_task() {
     let (_dir, bus) = bus();
     bus.push_task("alpha@conf", "t", "x", 1, 1, true).unwrap();
-    bus.claim_task("alpha@conf", -1, None).unwrap();
-    assert_eq!(bus.claim_task("alpha@conf", 60, None).unwrap(), "NO_TASK");
+    bus.claim_task("alpha@conf", -1, None, "").unwrap();
+    assert_eq!(bus.claim_task("alpha@conf", 60, None, "").unwrap(), "NO_TASK");
 }
 
 #[test]
@@ -82,7 +82,7 @@ fn payload_should_come_back_byte_for_byte() {
     let (_dir, bus) = bus();
     let payload = "é — ✓ 🚀\r\nB\rC\n";
     bus.push_task("alpha@conf", "t", payload, 1, 3, true).unwrap();
-    let claimed = json(&bus.claim_task("alpha@conf", 60, None).unwrap());
+    let claimed = json(&bus.claim_task("alpha@conf", 60, None, "").unwrap());
     assert_eq!(claimed["payload"], payload);
 }
 
@@ -107,6 +107,76 @@ fn a_bare_harness_should_be_refused_when_ambiguous() {
 #[test]
 fn wait_signal_should_time_out_unsignalled() {
     let (_dir, bus) = bus();
-    let snapshot = json(&bus.wait_signal("alpha@conf", "notification", 0.0, 0.2).unwrap());
+    let snapshot = json(
+        &bus.wait_signal("alpha@conf", "notification", 0.0, 0.2, false, "")
+            .unwrap(),
+    );
     assert_eq!(snapshot["signalled"], false);
+}
+
+#[test]
+fn a_watched_machine_queue_should_be_registered_and_reported_under_by() {
+    let (_dir, bus) = bus();
+    let answer = json(
+        &bus.wait_signal("alpha@conf,odin@general", "any", 0.0, 0.2, false, "")
+            .unwrap(),
+    );
+    assert!(answer["by"]["odin@general"].is_object(), "{answer}");
+}
+
+#[test]
+fn a_new_wait_should_ignore_what_already_waits() {
+    let (_dir, bus) = bus();
+    bus.push_task("alpha@conf", "old", "x", 1, 3, true).unwrap();
+    let answer = json(&bus.wait_signal("alpha@conf", "any", 0.0, 0.2, true, "").unwrap());
+    assert_eq!(answer["signalled"], false, "{answer}");
+}
+
+#[test]
+fn a_wait_from_a_mark_should_catch_what_came_after_it() {
+    let (_dir, bus) = bus();
+    let first = json(&bus.wait_signal("alpha@conf", "task", 0.0, 0.2, true, "").unwrap());
+    bus.push_task("alpha@conf", "late", "x", 1, 3, true).unwrap();
+    let since = first["since"].as_str().unwrap();
+    let answer = json(
+        &bus.wait_signal("alpha@conf", "task", 0.0, 0.2, false, since)
+            .unwrap(),
+    );
+    assert_eq!(answer["tasks"], serde_json::json!(["late"]), "{answer}");
+}
+
+#[test]
+fn a_declined_machine_task_should_go_back_to_the_others_only() {
+    let (_dir, bus) = bus();
+    bus.wait_signal("odin@general", "any", 0.0, 0.2, false, "")
+        .unwrap();
+    bus.push_task("odin@general", "g", "x", 1, 3, true).unwrap();
+    let claimed = json(&bus.claim_task("odin@general", 60, None, "alpha@conf").unwrap());
+    let attempt = claimed["attempts"].as_i64();
+    bus.decline_task("odin@general", "g", "not mine", attempt, "alpha@conf")
+        .unwrap();
+    assert_eq!(
+        bus.claim_task("odin@general", 60, None, "alpha@conf").unwrap(),
+        "NO_TASK"
+    );
+    let other = json(&bus.claim_task("odin@general", 60, None, "beta@conf").unwrap());
+    assert_eq!(other["task_id"], "g");
+}
+
+#[test]
+fn a_declined_personal_task_should_be_settled_with_its_reason() {
+    let (_dir, bus) = bus();
+    bus.push_task("alpha@conf", "p", "x", 1, 3, true).unwrap();
+    bus.claim_task("alpha@conf", 60, None, "").unwrap();
+    bus.decline_task("alpha@conf", "p", "out of scope", None, "")
+        .unwrap();
+    let result = json(&bus.read_result("p").unwrap());
+    assert_eq!(result["content"], "DECLINED: out of scope");
+}
+
+#[test]
+fn a_refusal_should_need_a_reason() {
+    let (_dir, bus) = bus();
+    let out = bus.decline_task("alpha@conf", "p", " ", None, "").unwrap();
+    assert_eq!(out, "ERROR: a refusal needs a reason.");
 }

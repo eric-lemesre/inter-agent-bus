@@ -1405,6 +1405,151 @@ with tempfile.TemporaryDirectory() as tmp:
     check("the composed identity of an older row is filled in",
           legacy.get("harness") == "kimi" and legacy.get("workspace") == "legacy", legacy)
 
+    # ---- Machine general queue, explicit refusal, waits over several queues.
+    store.register_agent("aa@ws1", "watcher a")
+    store.register_agent("bb@ws2", "watcher b")
+    store.poll("aa@ws1")
+    store.poll("bb@ws2")
+    w = json.loads(store.wait_signal("aa@ws1,odin@general", "any", timeout_s=0.3, interval_s=0.1))
+    check("a watched machine queue is registered on first watch",
+          "odin@general" in json.loads(store.get_system_state())["agents"]
+          and w["signalled"] is False and set(w["by"]) == {"aa@ws1", "odin@general"}, json.dumps(w))
+    check("a non-machine unknown name is still refused",
+          store.wait_signal("aa@ws1,ghost@ws9", "any", timeout_s=0.1).startswith("ERROR"))
+    store.push_task("odin@general", "g-1", "probe the service")
+    w = json.loads(store.wait_signal("aa@ws1 odin@general", "any", timeout_s=2, interval_s=0.1))
+    check("a wait over several queues says which one signalled",
+          w["signalled"] and w["by"]["odin@general"]["tasks"] == ["g-1"]
+          and w["by"]["aa@ws1"]["tasks"] == [], json.dumps(w))
+    check("the snapshot dates the oldest queued task",
+          w["by"]["odin@general"]["oldest_task_at"] is not None
+          and w["by"]["aa@ws1"]["oldest_task_at"] is None, json.dumps(w))
+    w = json.loads(store.wait_signal("aa@ws1,odin@general", "any", timeout_s=0.3,
+                                     interval_s=0.1, new=True))
+    check("a new wait ignores what already waits and answers its mark",
+          w["signalled"] is False and ":" in w.get("since", ""), json.dumps(w))
+    mark = w["since"]
+    store.push_task("aa@ws1", "p-1", "x")
+    store.notify("bb@ws2", "aa@ws1", "hello")
+    w = json.loads(store.wait_signal("aa@ws1,odin@general", "any", timeout_s=2,
+                                     interval_s=0.1, new=True, since=mark))
+    check("a chained new wait catches what arrived after its mark, and only that",
+          w["signalled"] and w["by"]["aa@ws1"]["tasks"] == ["p-1"]
+          and w["by"]["aa@ws1"]["notifications"] == 2  # the task-queued notice + hello
+          and w["by"]["odin@general"]["tasks"] == [], json.dumps(w))
+    check("a malformed mark is refused",
+          store.wait_signal("aa@ws1", "any", timeout_s=0.1, since="yesterday").startswith("ERROR"))
+    store.push_task("aa@ws1", "p-1b", "arrived while the agent worked")
+    w = json.loads(store.wait_signal("aa@ws1,odin@general", "task", timeout_s=2,
+                                     interval_s=0.1, since=w["since"]))
+    check("the answer's mark misses nothing that came after it, and repeats nothing before",
+          w["signalled"] and w["by"]["aa@ws1"]["tasks"] == ["p-1b"], json.dumps(w))
+    store.cancel_task("p-1")
+    store.cancel_task("p-1b")
+    store.poll("aa@ws1")
+
+    other = json.loads(store.wait_signal("bb@ws2,odin@general", "task", timeout_s=0.1,
+                                         interval_s=0.1, new=True))["since"]
+    t = json.loads(store.claim_task("odin@general", 60, by="aa@ws1"))
+    check("an agent claims from its machine's queue", t["task_id"] == "g-1", json.dumps(t))
+    check("a refusal without a reason is refused",
+          store.decline_task("odin@general", "g-1", "  ").startswith("ERROR"))
+    check("only the queue's agent may decline",
+          store.decline_task("aa@ws1", "g-1", "no").startswith("ERROR"))
+    check("a stale attempt cannot decline",
+          store.decline_task("odin@general", "g-1", "no", attempt=0).startswith("ERROR"))
+    r = store.decline_task("odin@general", "g-1", "not on my side", attempt=t["attempts"],
+                           by="aa@ws1")
+    check("a refusal on a machine queue puts the task back", r.startswith("OK") and "back" in r, r)
+    check("the refusal is journaled with its author and reason",
+          any(e["event"] == "decline" and "by aa@ws1: not on my side" in e["detail"]
+              for e in json.loads(store.get_events(task_id="g-1"))))
+    check("the refusing agent is not offered the task again",
+          store.claim_task("odin@general", 60, by="aa@ws1") == "NO_TASK")
+    w = json.loads(store.wait_signal("aa@ws1,odin@general", "task", timeout_s=0.2, interval_s=0.1))
+    check("…nor woken by it",
+          w["signalled"] is False and w["by"]["odin@general"]["tasks"] == [], json.dumps(w))
+    w = json.loads(store.wait_signal("bb@ws2,odin@general", "task", timeout_s=2,
+                                     interval_s=0.1, new=True, since=other))
+    check("the other agents of the machine are woken by the refused task",
+          w["signalled"] and w["by"]["odin@general"]["tasks"] == ["g-1"], json.dumps(w))
+    t2 = json.loads(store.claim_task("odin@general", 60, by="bb@ws2"))
+    check("another agent takes it", t2["task_id"] == "g-1" and t2["attempts"] == 2, json.dumps(t2))
+    store.decline_task("odin@general", "g-1", "me neither", attempt=2, by="bb@ws2")
+    t3 = json.loads(store.claim_task("odin@general", 60))
+    r = store.decline_task("odin@general", "g-1", "third refusal", attempt=t3["attempts"])
+    t4 = json.loads(store.claim_task("odin@general", 60))
+    check("a refusal costs no attempt: the task outlives max_attempts refusals",
+          r.startswith("OK") and t4.get("task_id") == "g-1" and t4["attempts"] == 4, json.dumps(t4))
+    store.publish_result("odin@general", "g-1", "service up", attempt=t4["attempts"])
+
+    store.push_task("bb@ws2", "p-2", "x")
+    t = json.loads(store.claim_task("bb@ws2", 60))
+    r = store.decline_task("bb@ws2", "p-2", "outside my frame", attempt=t["attempts"])
+    check("a refusal on a personal queue settles the task as declined",
+          r.startswith("OK") and store.claim_task("bb@ws2", 60) == "NO_TASK", r)
+    check("…with the reason readable as its result",
+          json.loads(store.read_result("p-2"))["content"] == "DECLINED: outside my frame")
+    check("an unclaimed task cannot be declined",
+          store.decline_task("bb@ws2", "p-2", "again").startswith("ERROR"))
+    check("a declined task can be requeued by an orchestrator",
+          store.requeue_task("p-2").startswith("OK"))
+    store.cancel_task("p-2")
+
+    out = subprocess.run(cli + ["watch", "aa@ws1", "odin@general", "--on", "any", "--new",
+                                "--timeout", "0.3", "--interval", "0.1"],
+                         env=os.environ.copy(), capture_output=True, text=True, encoding="utf-8")
+    check("cli watch takes several agents and --new",
+          set(json.loads(out.stdout)["by"]) == {"aa@ws1", "odin@general"}
+          and "since" in json.loads(out.stdout), out.stdout + out.stderr)
+    out = subprocess.run(cli + ["watch", "aa@ws1", "odin@general", "--timeout", "0.1"],
+                         env=os.environ.copy(), capture_output=True, text=True, encoding="utf-8")
+    check("cli watch --on task refuses several agents", "ERROR" in out.stdout + out.stderr,
+          out.stdout + out.stderr)
+    store.push_task("odin@general", "g-2", "x")
+    out = subprocess.run(cli + ["claim", "odin@general", "--by", "aa@ws1"],
+                         env=os.environ.copy(), capture_output=True, text=True, encoding="utf-8")
+    attempt = str(json.loads(out.stdout)["attempts"])
+    out = subprocess.run(cli + ["decline", "odin@general", "g-2", "--attempt", attempt,
+                                "--by", "aa@ws1", "--reason", "via cli"],
+                         env=os.environ.copy(), capture_output=True, text=True, encoding="utf-8")
+    check("cli decline round-trips", out.stdout.startswith("OK"), out.stdout + out.stderr)
+    store.cancel_task("g-2")
+
+    ins = store.session_instructions({"agent_name": "claude@infra"}, {}, "/opt/iab")
+    check("the instructions arm one wait with the defaults",
+          "/opt/iab watch claude@infra --on any --new --interval 60 --timeout 86400" in ins
+          and "general" not in ins, ins)
+    ins = store.session_instructions({"agent_name": "claude@infra"},
+                                     {"IAB_MACHINE": "Odin", "IAB_WATCH_INTERVAL": "10"}, "iab")
+    check("IAB_MACHINE adds the machine queue and its rules, IAB_WATCH_INTERVAL the interval",
+          "iab watch claude@infra odin@general --on any --new --interval 10" in ins
+          and "iab claim odin@general --by claude@infra" in ins
+          and "iab decline odin@general" in ins, ins)
+    check("IAB_WATCH_AUTO=0 removes the instructions",
+          store.session_instructions({"agent_name": "x@y"}, {"IAB_WATCH_AUTO": "0"}, "iab") is None)
+    ins = store.session_instructions({"agent_name": None}, {"IAB_WATCH_INTERVAL": "soon"}, "iab")
+    check("without a harness the instructions point to whoami; a bad interval falls back",
+          "<agent>" in ins and "whoami" in ins and "--interval 60" in ins, ins)
+
+    from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+    now = _dt.now(_tz.utc)
+    spec = {"command": ["x"], "after_seconds": 600}
+    young = {"tasks": ["g"], "oldest_task_at": (now - _td(seconds=60)).isoformat()}
+    old = {"tasks": ["g"], "oldest_task_at": (now - _td(seconds=700)).isoformat()}
+    check("after_seconds holds a fresh task back", wake.decide(spec, young, now) is None)
+    check("…and wakes once the task waited long enough", wake.decide(spec, old, now) is not None)
+    check("…and never holds back a task of unknown age",
+          wake.decide(spec, {"tasks": ["g"]}, now) is not None)
+    store.push_task("odin@general", "g-3", "x")
+    r = wake.wake_agent("odin@general", [{"name": "odin@general", "launch": {
+        "command": [sys.executable, "-c", "pass"], "after_seconds": "ten"}}], dry_run=True)
+    check("a malformed after_seconds is refused", r.startswith("ERROR"), r)
+    r = wake.wake_agent("odin@general", [{"name": "odin@general", "launch": {
+        "command": [sys.executable, "-c", "pass"], "after_seconds": 3600}}], dry_run=True)
+    check("the launcher of a machine queue waits for after_seconds", r == "NO_SIGNAL", r)
+    store.cancel_task("g-3")
+
     del os.environ["IAB_DB"]
 
 if fail:

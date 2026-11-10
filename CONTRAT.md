@@ -78,6 +78,23 @@ suite (§ 11) on every pair of implementations.
 - PostgreSQL: `LISTEN iab_bus`, then wait for a notification or the end
   of the interval, whichever comes first. A connection that ran `LISTEN`
   is never returned to a connection pool.
+- `wait_signal` takes one instance or several (`a,b`, also `a b`;
+  distinct names in order). A name `<machine>@general` that is not
+  registered yet is registered first (description `general queue of
+  machine <machine>`, journaled `register`); any other unknown name is
+  refused. One instance answers its snapshot; several answer
+  `{"signalled": …, "by": {<name>: <snapshot>, …}}` in the given order.
+- A snapshot (`pending_signals`, `wait_signal`) also carries
+  `oldest_task_at`, the `created_at` of the oldest task it lists
+  (`null` when none). Tasks declined (§ 6) by one of the watched
+  instances are left out.
+- `new` and `since` (`<last event id>:<last notification seq>`): a wait
+  with a mark only counts the tasks with a `push`, `expire`, `requeue`
+  or `decline` event after the mark's event id, and the notifications
+  after its seq; `new` without `since` takes the current mark. The
+  answer then carries `since`, the mark read **before** its final
+  snapshot. A malformed `since` is refused before any database access:
+  `ERROR: since must be '<event id>:<notification seq>' (got '…').`
 
 ## 5. Dates
 
@@ -93,8 +110,18 @@ suite (§ 11) on every pair of implementations.
 ## 6. Task lifecycle
 
 - States: `queued` → `claimed` → settled (result published); exits
-  `dead` (lease expired `max_attempts` times, default 3) and
-  `cancelled`.
+  `dead` (lease expired `max_attempts` times, default 3), `cancelled`
+  and `declined`.
+- Refusal (`decline_task`): only a `claimed` task, by its queue's agent,
+  with a non-empty reason, fenced by the attempt as publishing is; the
+  refusing instance `by` defaults to the queue's agent. On a queue whose
+  workspace is `general`, the task goes back to `queued`, `max_attempts`
+  grows by one (a refusal costs no attempt) and a `declines` row
+  `(task_id, agent=by)` is written; a claim with `by` skips the tasks
+  that instance declined. On any other queue, the task becomes
+  `declined` and its result is `DECLINED: <reason>`, authored by `by`.
+  Journal: `decline`, detail `by <by>: <reason>` (followed by ` —
+  re-offered to the other agents` on a general queue).
 - Claim: the highest-priority `queued` task, then the oldest
   (`ORDER BY priority DESC, created_at ASC`); expired leases are
   requeued first. `attempts` grows at each claim; the default lease is
@@ -188,6 +215,11 @@ suite (§ 11) on every pair of implementations.
 - A malformed roster value (`timeout` that is not a number, `wake_on`
   that is not a list) is an `ERROR:` line in the native client; Python
   stops on an exception.
+- `launch.after_seconds` (default 0): a queued task wakes only once the
+  snapshot's `oldest_task_at` is that old; an unknown age never holds a
+  task back. Anything but a number >= 0 is refused by both:
+  `ERROR: launch.after_seconds of '<agent>' must be a number of seconds
+  >= 0.`
 
 ## 11. Conformance suite
 
@@ -248,7 +280,7 @@ wakes it. Continuous integration runs it on SQLite and on the TLS bench.
 
 ## 12. MCP server
 
-- Same 23 tools as `servers/shared_memory/server.py`: same names,
+- Same 24 tools as `servers/shared_memory/server.py`: same names,
   descriptions, parameters, types and defaults, hence the same
   `inputSchema`; every tool declares the output schema
   `{"result": string}`.
@@ -276,5 +308,11 @@ wakes it. Continuous integration runs it on SQLite and on the TLS bench.
   `version`).
 - A blocking tool (`wait_signal`, `wait_task`) does not hold back the
   other calls of the session.
+- `by` of `claim_task` and `decline_task`, left empty, is the identity
+  of the server when it names one.
+- Initialization carries the wake-up `instructions` of
+  `session_instructions` in `store.py`, word for word, the path of the
+  `iab` command next to the server aside (`iab` when there is none);
+  `IAB_WATCH_AUTO=0` sends none.
 - The native server refuses `IAB_HUB` at every call, as the native
   command line does (§ 1).

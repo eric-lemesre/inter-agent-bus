@@ -1,4 +1,4 @@
-//! The 23 tools as `servers/shared_memory/server.py` declares them: names,
+//! The 24 tools as `servers/shared_memory/server.py` declares them: names,
 //! descriptions, parameters, types and defaults, so that both servers
 //! announce the same interface (`CONTRAT.md`, § 12).
 
@@ -137,7 +137,7 @@ pub const TOOLS: &[Spec] = &[
     },
     Spec {
         name: "claim_task",
-        description: "Claim the next task of one's queue under lease (re-offered if not settled before the deadline) — or one specific queued task of one's own queue when task_id is given.",
+        description: "Claim the next task of one's queue under lease (re-offered if not settled before the deadline) — or one specific queued task of one's own queue when task_id is given; from a machine's general queue, by (default: you) skips the tasks you declined.",
         params: &[
             Param {
                 name: "agent_name",
@@ -151,6 +151,11 @@ pub const TOOLS: &[Spec] = &[
             },
             Param {
                 name: "task_id",
+                kind: Kind::Str,
+                default: Some(Fallback::Str("")),
+            },
+            Param {
+                name: "by",
                 kind: Kind::Str,
                 default: Some(Fallback::Str("")),
             },
@@ -184,6 +189,37 @@ pub const TOOLS: &[Spec] = &[
                 name: "force",
                 kind: Kind::Bool,
                 default: Some(Fallback::Bool(false)),
+            },
+        ],
+    },
+    Spec {
+        name: "decline_task",
+        description: "Refuse a claimed task explicitly, with a reason: on a machine's general queue it goes back to the queue for another agent (by, default you, is not offered it again); elsewhere it is settled as declined, the reason readable with read_result.",
+        params: &[
+            Param {
+                name: "agent_name",
+                kind: Kind::Str,
+                default: None,
+            },
+            Param {
+                name: "task_id",
+                kind: Kind::Str,
+                default: None,
+            },
+            Param {
+                name: "reason",
+                kind: Kind::Str,
+                default: None,
+            },
+            Param {
+                name: "attempt",
+                kind: Kind::Int,
+                default: Some(Fallback::Int(0)),
+            },
+            Param {
+                name: "by",
+                kind: Kind::Str,
+                default: Some(Fallback::Str("")),
             },
         ],
     },
@@ -423,7 +459,7 @@ pub const TOOLS: &[Spec] = &[
     },
     Spec {
         name: "wait_signal",
-        description: "Block until a task is queued for the instance and/or an unread notification (broadcasts included) waits in its mailbox — kinds: task, notification or any — and return the snapshot with signalled true/false; no cursor moves. BLOCKING call for a background-capable runtime: the wake-up of an open session.",
+        description: "Block until a task is queued for the instance(s) — one name, or several separated by commas, e.g. you and your machine's general queue — and/or an unread notification (broadcasts included) waits — kinds: task, notification or any — and return the snapshot with signalled true/false (one per instance under by when several); new ignores what already waits and answers a since mark to pass back; no cursor moves. BLOCKING call for a background-capable runtime: the wake-up of an open session.",
         params: &[
             Param {
                 name: "agent",
@@ -444,6 +480,16 @@ pub const TOOLS: &[Spec] = &[
                 name: "interval_seconds",
                 kind: Kind::Float,
                 default: Some(Fallback::Float(2.0)),
+            },
+            Param {
+                name: "new",
+                kind: Kind::Bool,
+                default: Some(Fallback::Bool(false)),
+            },
+            Param {
+                name: "since",
+                kind: Kind::Str,
+                default: Some(Fallback::Str("")),
             },
         ],
     },

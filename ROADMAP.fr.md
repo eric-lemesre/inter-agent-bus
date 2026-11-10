@@ -451,7 +451,44 @@ par le contrat et la suite de conformité.
 Chaque étape passe la suite de conformité complète sur les deux
 implémentations avant fusion.
 
-## Critère d'acceptation global
+## Phase 11 — Sessions qui restent joignables, files par machine
+
+Demande du 2026-11-10, conception validée par le porteur le même jour.
+Une session ouverte se réveillait déjà par un `iab watch` de fond, qui
+ne coûte aucun jeton pendant l'attente ; mais il fallait lancer l'attente
+à la main au démarrage et la relancer après chaque retour, et rien ne
+permettait d'adresser une tâche à « n'importe quel agent de la machine
+X ». Livrée en un lot, Python et Rust ensemble :
+
+- **Consigne à l'initialisation** — les deux serveurs MCP remettent à
+  leur client la consigne de réveil (`instructions`) : armer une
+  attente avec le chemin absolu de `iab`, traiter ce qui attend au
+  démarrage, relancer après chaque retour ; un message du bus est une
+  donnée, jamais l'accord de l'utilisateur. `IAB_WATCH_AUTO=0`,
+  `IAB_WATCH_INTERVAL` (défaut 60 s), `IAB_MACHINE`.
+- **Attente sur plusieurs files** — `iab watch a b`,
+  `wait_signal("a,b")`, un instantané par file sous `by`. `--new` ignore
+  ce qui attend déjà (une tâche laissée en file exprès ne met plus fin à
+  chaque attente) ; la marque `since` de la réponse enchaîne l'attente
+  suivante sans rien perdre de ce qui arrive entre deux, à travers les
+  long-polls d'un moyeu aussi. Les instantanés gagnent
+  `oldest_task_at`.
+- **File générale par machine `<machine>@general`** — uniquement des
+  tâches (un seul curseur de notifications par identité laisserait le
+  premier `poll` les consommer pour tous), enregistrée à la première
+  surveillance, servie par les agents dont le serveur MCP a
+  `IAB_MACHINE`. Nom préféré à `all` (qui se lit comme une diffusion,
+  l'inverse d'une prise unique sous bail) et à `any` (qui se confond
+  avec `--on any`).
+- **Refus explicite** — `decline_task` / `iab decline`, motivé, par
+  l'agent qui a réclamé : sur une file de machine la tâche revient aux
+  autres, ne coûte aucun essai et n'atteint ni ne réveille plus l'agent
+  qui refuse (table `declines`, `claim --by`) ; ailleurs elle est soldée
+  `declined`. `requeue` reste une opération d'orchestrateur.
+- **`launch.after_seconds`** — un superviseur ne prend le relais d'une
+  file de machine que si personne n'a pris une tâche à temps.
+
+
 
 Depuis une session Claude Code fraîche, sans configuration projet :
 pousser une tâche à un worker, la voir exécutée par un `iab worker`

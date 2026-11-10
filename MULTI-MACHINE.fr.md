@@ -272,7 +272,28 @@ nom d'appairage. Donnez un `host` à chaque entrée : le moyeu ne laisse
 prendre le verrou de réveil d'une instance qu'à la machine à laquelle
 elle est rattachée, si bien qu'une entrée sans `host` est réveillée par
 sa machine et refusée (une ligne `ERROR` à chaque tour) sur les autres. Une session interactive ouverte se réveille par
-`iab watch --on any` en tâche de fond, en long-poll vers le moyeu.
+`iab watch --on any` en tâche de fond, en long-poll vers le moyeu ;
+une attente `new` garde sa marque d'un long-poll au suivant, si bien que
+rien de ce qui arrive entre deux n'est perdu.
+
+### File générale d'une machine
+
+`<machine>@general` (par exemple `odin@general`) est la file générale
+d'une machine, surveillée par les agents de cette machine dont le
+serveur MCP a `IAB_MACHINE=<machine>` (voir le README, *File générale
+d'une machine*). Prenez le nom d'appairage de la machine, pour que la
+file, `launch.host` et `iab machines` disent la même chose.
+
+À travers le moyeu, le rattachement s'applique comme à toute instance :
+la file appartient à la première machine qui agit en son nom (sa
+première réclamation, son premier refus ou battement de cœur). C'est un
+agent d'`odin` qui agit le premier sur `odin@general` qui la rattache à
+`odin` ; dès lors, une réclamation, un refus ou un verrou de réveil sur
+`odin@general` depuis une autre machine est refusé. Surveiller une file
+est une lecture et ne rattache rien : ne surveillez que la file de
+votre machine. Une entrée `odin@general` avec un bloc `launch`,
+`host: "odin"` et `after_seconds` laisse l'`iab supervise` de cette
+machine prendre le relais quand aucun agent ne prend une tâche à temps.
 
 ## Administrer
 

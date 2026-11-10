@@ -5,17 +5,25 @@ instance of this server; sharing happens through the common SQLite database
 (see store.py, IAB_DB env var). This file holds NO state logic.
 """
 import json
+import os
 
 from mcp.server.mcpserver import Context, MCPServer
 
 try:  # installed package: `iab` maps to this directory (pyproject.toml)
-    from . import store
+    from . import store, wake
     from .access import bus
 except ImportError:  # bare script: python servers/shared_memory/server.py
     import store
+    import wake
     from access import bus
 
-mcp = MCPServer("InterAgentBus")
+mcp = MCPServer(
+    "InterAgentBus",
+    # The wake-up instructions, built once from the environment of the
+    # server (IAB_WATCH_AUTO, IAB_WATCH_INTERVAL, IAB_MACHINE).
+    instructions=store.session_instructions(
+        store.resolve_identity(), dict(os.environ), wake.iab_executable()),
+)
 
 # Resolved once: the launch directory of a stdio server never changes, and
 # the identity (harness@workspace, model echo) derives from it and the env.
@@ -27,6 +35,11 @@ def _identity() -> dict:
     if _IDENTITY is None:
         _IDENTITY = store.resolve_identity()
     return _IDENTITY
+
+
+def _by(by: str) -> str:
+    """The acting instance on a shared queue: as given, else this client."""
+    return by or _identity().get("agent_name") or ""
 
 
 def _touch() -> None:
@@ -90,10 +103,10 @@ def push_task(
 
 
 @mcp.tool()
-def claim_task(agent_name: str, lease_seconds: int = 900, task_id: str = "") -> str:
-    """Claim the next task of one's queue under lease (re-offered if not settled before the deadline) — or one specific queued task of one's own queue when task_id is given."""
+def claim_task(agent_name: str, lease_seconds: int = 900, task_id: str = "", by: str = "") -> str:
+    """Claim the next task of one's queue under lease (re-offered if not settled before the deadline) — or one specific queued task of one's own queue when task_id is given; from a machine's general queue, by (default: you) skips the tasks you declined."""
     _touch()
-    return bus.claim_task(agent_name, lease_seconds, task_id or None)
+    return bus.claim_task(agent_name, lease_seconds, task_id or None, _by(by))
 
 
 @mcp.tool()
@@ -103,6 +116,13 @@ def publish_result(
     """Publish a task's result (settles the task); pass the attempt number received at claim so a stale worker cannot overwrite a re-offered task's result (force overrides every check)."""
     _touch()
     return bus.publish_result(agent_name, task_id, result_content, attempt or None, force)
+
+
+@mcp.tool()
+def decline_task(agent_name: str, task_id: str, reason: str, attempt: int = 0, by: str = "") -> str:
+    """Refuse a claimed task explicitly, with a reason: on a machine's general queue it goes back to the queue for another agent (by, default you, is not offered it again); elsewhere it is settled as declined, the reason readable with read_result."""
+    _touch()
+    return bus.decline_task(agent_name, task_id, reason, attempt or None, _by(by))
 
 
 @mcp.tool()
@@ -213,11 +233,12 @@ def poll(agent: str, limit: int = 100) -> str:
 
 @mcp.tool()
 def wait_signal(
-    agent: str, kinds: str = "any", timeout_seconds: float = 300.0, interval_seconds: float = 2.0
+    agent: str, kinds: str = "any", timeout_seconds: float = 300.0, interval_seconds: float = 2.0,
+    new: bool = False, since: str = "",
 ) -> str:
-    """Block until a task is queued for the instance and/or an unread notification (broadcasts included) waits in its mailbox — kinds: task, notification or any — and return the snapshot with signalled true/false; no cursor moves. BLOCKING call for a background-capable runtime: the wake-up of an open session."""
+    """Block until a task is queued for the instance(s) — one name, or several separated by commas, e.g. you and your machine's general queue — and/or an unread notification (broadcasts included) waits — kinds: task, notification or any — and return the snapshot with signalled true/false (one per instance under by when several); new ignores what already waits and answers a since mark to pass back; no cursor moves. BLOCKING call for a background-capable runtime: the wake-up of an open session."""
     _touch()
-    return bus.wait_signal(agent, kinds, timeout_seconds, interval_seconds)
+    return bus.wait_signal(agent, kinds, timeout_seconds, interval_seconds, new, since)
 
 
 @mcp.tool()

@@ -252,6 +252,31 @@ fn identity() -> &'static Identity {
     IDENTITY.get_or_init(identity::resolve_identity)
 }
 
+/// The acting instance on a shared queue: as given, else this client.
+fn acting(by: &str) -> &str {
+    if by.is_empty() {
+        identity().agent_name.as_deref().unwrap_or("")
+    } else {
+        by
+    }
+}
+
+/// The wake-up instructions of this server (`session_instructions`),
+/// from its environment and the `iab` command next to it.
+pub fn instructions() -> Option<String> {
+    let name = if cfg!(windows) { "iab.exe" } else { "iab" };
+    let iab = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.join(name)))
+        .filter(|path| path.exists())
+        .map_or_else(|| "iab".to_owned(), |path| path.display().to_string());
+    iab_core::instructions::session_instructions(
+        identity().agent_name.as_deref(),
+        |var| std::env::var(var).ok(),
+        &iab,
+    )
+}
+
 /// Register on first sight and refresh the caller's presence when the
 /// environment names the harness. Transport-only: a failure never stops
 /// the tool call.
@@ -314,6 +339,14 @@ fn operation(name: &str, args: &Args, client: Option<&Client>) -> Result<String,
             a.text("agent_name"),
             a.int("lease_seconds"),
             a.opt_text("task_id"),
+            acting(a.text("by")),
+        ),
+        "decline_task" => bus.decline_task(
+            a.text("agent_name"),
+            a.text("task_id"),
+            a.text("reason"),
+            Some(a.int("attempt")).filter(|n| *n != 0),
+            acting(a.text("by")),
         ),
         "publish_result" => bus.publish_result(
             a.text("agent_name"),
@@ -365,6 +398,8 @@ fn operation(name: &str, args: &Args, client: Option<&Client>) -> Result<String,
             a.text("kinds"),
             a.float("timeout_seconds"),
             a.float("interval_seconds"),
+            a.flag("new"),
+            a.text("since"),
         ),
         "pending_signals" => bus.pending_signals(a.text("agent")),
         "wait_task" => bus.wait_for_task(
@@ -417,7 +452,7 @@ mod tests {
         let mut names: Vec<_> = TOOLS.iter().map(|s| s.name).collect();
         names.sort_unstable();
         names.dedup();
-        assert_eq!(names.len(), 23);
+        assert_eq!(names.len(), 24);
     }
 
     #[test]

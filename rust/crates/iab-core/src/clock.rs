@@ -49,6 +49,13 @@ pub fn parse(text: &str) -> Result<DateTime<Utc>, Error> {
         .map_err(|_| Error::BadDate(text.to_owned()))
 }
 
+/// Seconds elapsed since a stored date; `None` when it does not parse.
+pub fn seconds_since(text: &str) -> Option<f64> {
+    let since = parse(text).ok()?;
+    let elapsed = now().signed_duration_since(since);
+    Some(elapsed.num_microseconds()? as f64 / 1e6)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

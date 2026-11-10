@@ -29,7 +29,7 @@ except ImportError:  # bare script usage
 OPERATIONS = frozenset({
     "register_agent", "rename_agent",
     "push_task", "wait_for_task", "claim_task", "publish_result",
-    "cancel_task", "requeue_task", "extend_lease", "read_result",
+    "cancel_task", "requeue_task", "decline_task", "extend_lease", "read_result",
     "heartbeat", "touch_presence", "touch_identity", "list_presence",
     "announce", "read_channel", "notify", "broadcast", "replies", "poll",
     "pending_signals", "wait_signal",

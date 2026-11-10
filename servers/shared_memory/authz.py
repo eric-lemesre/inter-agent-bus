@@ -40,6 +40,7 @@ except ImportError:  # bare script usage
 ACTING = {
     "register_agent": "name", "rename_agent": "old",
     "claim_task": "agent_name", "publish_result": "agent_name",
+    "decline_task": "agent_name",
     "heartbeat": "agent", "touch_presence": "agent",
     "announce": "author", "notify": "author", "broadcast": "author",
     "poll": "agent",
@@ -49,8 +50,8 @@ ACTING = {
 # Operations whose core function uses the name AS WRITTEN (no address
 # resolution): the literal name is what must be bound — resolving it here
 # could skip the check on an ambiguous bare harness the core accepts.
-_LITERAL = {"register_agent", "rename_agent", "publish_result", "touch_presence",
-            "record_wake", "touch_identity", "acquire_wake_lock", "renew_wake_lock",
+_LITERAL = {"register_agent", "rename_agent", "publish_result", "decline_task",
+            "touch_presence", "record_wake", "touch_identity", "acquire_wake_lock", "renew_wake_lock",
             "release_wake_lock"}
 DEFAULT_ORCHESTRATORS = ("role:admin",)
 

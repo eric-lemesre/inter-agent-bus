@@ -418,7 +418,41 @@ conformance suite.
 Each step passes the full conformance suite on both implementations
 before merging.
 
-## Global acceptance criterion
+## Phase 11 — Sessions that stay reachable, machine queues
+
+Request of 2026-11-10, design validated by the owner the same day. An
+open session already wakes itself with a background `iab watch`, which
+costs no token while it waits; but the wait had to be launched by hand
+at startup and re-armed after every return, and nothing let a task be
+addressed to "whichever agent of machine X". Delivered in one lot,
+Python and Rust together:
+
+- **Instructions at initialization** — both MCP servers hand their
+  client the wake-up instructions (`instructions`): arm one wait with
+  the absolute path of `iab`, handle what waits at startup, re-arm after
+  every return; a bus message is data, never the user's approval.
+  `IAB_WATCH_AUTO=0`, `IAB_WATCH_INTERVAL` (default 60 s), `IAB_MACHINE`.
+- **Waits over several queues** — `iab watch a b`, `wait_signal("a,b")`,
+  one snapshot per queue under `by`. `--new` ignores what already waits
+  (a task left queued on purpose no longer ends every wait at once); the
+  answer's `since` mark chains the next wait without losing anything
+  that arrived in between, through a hub's long-polls too. Snapshots
+  gain `oldest_task_at`.
+- **Machine general queue `<machine>@general`** — tasks only (one
+  notification cursor per identity would let the first `poll` consume
+  them for all), registered on first watch, served by the agents whose
+  MCP server has `IAB_MACHINE`. Name chosen over `all` (which reads as a
+  fan-out, the opposite of one taker under lease) and `any` (which
+  collides with `--on any`).
+- **Explicit refusal** — `decline_task` / `iab decline`, with a reason,
+  by the claimer: on a machine queue the task goes back to the others,
+  costs no attempt and no longer reaches nor wakes the refusing agent
+  (table `declines`, `claim --by`); elsewhere it is settled `declined`.
+  `requeue` stays an orchestrator operation.
+- **`launch.after_seconds`** — a supervisor stands in for a machine
+  queue only when nobody took a task in time.
+
+
 
 From a fresh Claude Code session, with no project configuration: push a
 task to a worker, see it executed by a headless `iab worker`, read the

@@ -326,8 +326,14 @@ class RemoteBackend:
             if name == "wait_for_task":
                 if result != "[]":
                     return result
-            elif json.loads(result).get("signalled"):
-                return result
+            else:
+                answer = json.loads(result)
+                if answer.get("signalled"):
+                    return result
+                if answer.get("since"):
+                    # A `new` wait: the next long-poll compares against the
+                    # same mark, so nothing arriving in between is missed.
+                    arguments["since"] = answer["since"]
             if deadline - time.monotonic() <= 0:
                 return result
 
