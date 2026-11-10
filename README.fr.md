@@ -40,7 +40,7 @@ Exploiter le bus depuis un venv dédié installé depuis une **version publiée*
 ```bash
 python3 -m venv ~/.local/venvs/inter-agent-bus
 ~/.local/venvs/inter-agent-bus/bin/pip install \
-  'inter-agent-bus[server]==0.15.0'
+  'inter-agent-bus[server]==0.16.0'
 ~/.local/venvs/inter-agent-bus/bin/iab install --scope user
 ```
 
