@@ -110,8 +110,11 @@ and `supervise` included; the hub, pairing, `review` and `install` stay
 Python-only), and `iab-server`, the MCP server
 with the same 24 tools. Both speak to the same SQLite file or PostgreSQL
 server (over TLS) as the Python implementation, at the same time;
-`IAB_HUB` is refused. No archive is published yet: build with
-`cargo build --release --manifest-path rust/Cargo.toml`, then register
+`IAB_HUB` is refused. Linux (x86_64): every release carries
+`iab-<version>-x86_64-unknown-linux-musl.tar.gz`, static executables
+that run on any distribution, with its `SHA256SUMS` (check with
+`sha256sum -c SHA256SUMS`). Elsewhere, build with
+`cargo build --release --manifest-path rust/Cargo.toml`. Then register
 the server by its absolute path, for instance:
 
 ```bash

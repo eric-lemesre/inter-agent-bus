@@ -445,8 +445,9 @@ par le contrat et la suite de conformité.
   scénarios de `conformance/run.py` (échecs du worker, wake, supervise,
   et le scénario worker existant désormais sur toutes les paires) sur
   SQLite et en TLS, Linux et Windows.
-- **R5** — signature, archives publiées ; `.deb`/`.rpm` quand le besoin
-  viendra.
+- **R5** — archives publiées : Linux x86_64 statique (musl) depuis la
+  v0.16.0, jointe à chaque release GitHub avec son `SHA256SUMS` ;
+  Windows, signature, `.deb`/`.rpm` quand le besoin viendra.
 
 Chaque étape passe la suite de conformité complète sur les deux
 implémentations avant fusion.

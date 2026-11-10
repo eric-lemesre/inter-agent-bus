@@ -413,7 +413,9 @@ conformance suite.
   `conformance/run.py` (worker failures, wake, supervise, the existing
   worker one now on every pair) on SQLite and over TLS, Linux and
   Windows.
-- **R5** — signing, published archives; `.deb`/`.rpm` when needed.
+- **R5** — published archives: Linux x86_64 static (musl) since
+  v0.16.0, attached to every GitHub release with its `SHA256SUMS`;
+  Windows, signing, `.deb`/`.rpm` when needed.
 
 Each step passes the full conformance suite on both implementations
 before merging.

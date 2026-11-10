@@ -118,9 +118,12 @@ machine : `iab`, la ligne de commande (toutes les sous-commandes du bus,
 et `install` restent en Python), et
 `iab-server`, le serveur MCP avec les mêmes 24 outils. Tous deux parlent
 au même fichier SQLite ou au même serveur PostgreSQL (en TLS) que
-l'implémentation Python, en même temps ; `IAB_HUB` est refusé. Aucune
-archive n'est encore publiée : construire avec
-`cargo build --release --manifest-path rust/Cargo.toml`, puis
+l'implémentation Python, en même temps ; `IAB_HUB` est refusé. Linux
+(x86_64) : chaque version publiée porte
+`iab-<version>-x86_64-unknown-linux-musl.tar.gz`, des exécutables
+statiques qui tournent sur toute distribution, avec son `SHA256SUMS`
+(vérifier par `sha256sum -c SHA256SUMS`). Ailleurs, construire avec
+`cargo build --release --manifest-path rust/Cargo.toml`. Puis
 enregistrer le serveur par son chemin absolu, par exemple :
 
 ```bash
