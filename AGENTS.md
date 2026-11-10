@@ -141,7 +141,16 @@ python3 servers/shared_memory/tpm_test.py
 # Both suites again on PostgreSQL (extra [postgres]; an EMPTY test database):
 IAB_TEST_POSTGRES=postgresql://… .venv/bin/python servers/shared_memory/store_test.py
 python3 scripts/smoke.py       # end-to-end acceptance, CLI only
+python3 scripts/balai.py --dry-run   # Rust artifacts unused for 7 days
 ```
+
+Rust artifacts: the target directory may be shared by every project of
+the machine (`target-dir` in `~/.cargo/config.toml`). Sweep it **by age
+only** (`scripts/balai.py`, tested by `scripts/balai_test.py` with a
+fake `cargo`). Never `cargo sweep --stamp` then `--file` (it deletes
+whatever one build did not touch, other projects included), never
+`cargo clean` nor a removal of the shared directory. `[profile.dev]`
+keeps line tables only and no debug info for dependencies — keep it.
 
 The test suite must pass standalone (no MCP SDK needed) before and
 after any change to `store.py`. Tests that touch the database must use

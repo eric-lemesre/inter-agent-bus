@@ -36,6 +36,8 @@ jobs:
         run: python servers/shared_memory/attest_test.py
       - name: End to end (smoke)
         run: python scripts/smoke.py
+      - name: Artifact sweep by age only (balai_test)
+        run: python scripts/balai_test.py
       - name: Conformance (SQLite)
         run: python conformance/run.py
 
