@@ -33,6 +33,15 @@ expect_used = "deny"
 panic = "deny"
 dbg_macro = "deny"
 
+# Development builds keep line tables for our crates and no debug info for
+# the dependencies: backtraces stay usable, the shared target directory
+# (target-dir of ~/.cargo/config.toml) much smaller.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+
 [profile.release]
 lto = true
 codegen-units = 1

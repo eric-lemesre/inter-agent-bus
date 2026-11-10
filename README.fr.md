@@ -437,7 +437,17 @@ python3 scripts/smoke.py                       # bout en bout, CLI seule
 python3 conformance/run.py                     # suite de conformité (CONTRAT.fr.md)
 cargo build --release --manifest-path rust/Cargo.toml   # `iab` et `iab-server` natifs (Rust)
 python3 conformance/mcp_server.py --impl rust='["/chemin/vers/iab-server"]'   # serveur MCP face à server.py
+python3 scripts/balai.py [--dry-run] [--days N]   # balaie les artefacts Rust inutilisés depuis N jours (7)
 ```
+
+Le dossier cible de Rust peut être partagé par tous les projets du poste
+(`target-dir` dans `~/.cargo/config.toml`). Le balayer **par ancienneté
+seulement**, avec `scripts/balai.py` (`cargo sweep --time`, demande
+`cargo install cargo-sweep`) ; jamais `cargo sweep --stamp`/`--file`,
+`cargo clean` ni une suppression du dossier : ils effacent aussi les
+artefacts des autres projets. Les compilations de développement ne
+gardent que les tables de lignes, et aucune information de débogage
+pour les dépendances.
 
 Toute implémentation qui partage une base — Python, et le client et le
 serveur natifs en Rust ([étude](docs/AMELIORATIONS-2026-11-04-client-rust.fr.md))

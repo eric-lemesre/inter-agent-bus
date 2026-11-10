@@ -412,7 +412,16 @@ python3 scripts/smoke.py                       # end-to-end, CLI only
 python3 conformance/run.py                     # conformance suite (CONTRAT.md)
 cargo build --release --manifest-path rust/Cargo.toml   # native `iab` and `iab-server` (Rust)
 python3 conformance/mcp_server.py --impl rust='["/path/to/iab-server"]'   # MCP server vs server.py
+python3 scripts/balai.py [--dry-run] [--days N]   # sweep Rust artifacts unused for N days (7)
 ```
+
+The Rust target directory may be shared by every project of the machine
+(`target-dir` in `~/.cargo/config.toml`). Sweep it **by age only**, with
+`scripts/balai.py` (`cargo sweep --time`, needs `cargo install
+cargo-sweep`); never `cargo sweep --stamp`/`--file`, `cargo clean` or a
+removal of the directory: they delete the other projects' artifacts too.
+Development builds keep line tables only, and no debug info for the
+dependencies.
 
 Every implementation sharing a database — Python, and the native Rust
 client and server ([study](docs/AMELIORATIONS-2026-11-04-client-rust.md)) — obeys
