@@ -295,16 +295,43 @@ fn wake_on(spec: &Map<String, Json>, agent: &str) -> Result<Vec<String>, String>
     }
 }
 
-/// Reason to wake, or `None`: tasks always; notifications and broadcasts
-/// only when flagged by the sender and allowed by the roster.
-fn decide(wake_on: &[String], pending: &Map<String, Json>) -> Option<String> {
+/// `launch.after_seconds`: a number of seconds >= 0 (default 0).
+fn after_seconds(spec: &Map<String, Json>, agent: &str) -> Result<f64, String> {
+    match spec.get("after_seconds") {
+        None | Some(Json::Null) => Ok(0.0),
+        Some(Json::Number(number)) => number
+            .as_f64()
+            .filter(|n| n.is_finite() && *n >= 0.0)
+            .ok_or_else(|| after_refused(agent)),
+        Some(_) => Err(after_refused(agent)),
+    }
+}
+
+fn after_refused(agent: &str) -> String {
+    format!("ERROR: launch.after_seconds of '{agent}' must be a number of seconds >= 0.")
+}
+
+/// Seconds the oldest queued task has waited, `None` when unknown.
+fn waited(pending: &Map<String, Json>) -> Option<f64> {
+    pending
+        .get("oldest_task_at")
+        .and_then(Json::as_str)
+        .and_then(iab_core::clock::seconds_since)
+}
+
+/// Reason to wake, or `None`: tasks always — once the oldest has waited
+/// `after` seconds when the roster asks for a delay (an unknown age never
+/// holds one back); notifications and broadcasts only when flagged by the
+/// sender and allowed by the roster.
+fn decide(wake_on: &[String], pending: &Map<String, Json>, after: f64) -> Option<String> {
     let allowed = |kind: &str| wake_on.iter().any(|k| k == kind);
     let tasks: Vec<String> = pending
         .get("tasks")
         .and_then(Json::as_array)
         .map(|items| items.iter().map(py_str).collect())
         .unwrap_or_default();
-    if !tasks.is_empty() && allowed("task") {
+    let old_enough = after <= 0.0 || waited(pending).is_none_or(|w| w >= after);
+    if !tasks.is_empty() && allowed("task") && old_enough {
         return Some(format!("{} queued task(s): {}", tasks.len(), tasks.join(" ")));
     }
     if truthy(pending.get("wake_notifications")) && allowed("notification") {
@@ -375,13 +402,14 @@ fn decide_and_launch(
             "ERROR: launch.command of '{agent}' must be a non-empty list of strings."
         ));
     }
+    let after = after_seconds(&spec, &agent)?;
     let snapshot = bus.pending_signals(&agent).map_err(fail)?;
     if snapshot.starts_with("ERROR") {
         return Ok(snapshot);
     }
     let pending: Map<String, Json> =
         serde_json::from_str(&snapshot).map_err(|error| format!("ERROR: JSON: {error}"))?;
-    let Some(reason) = decide(&wake_on(&spec, &agent)?, &pending) else {
+    let Some(reason) = decide(&wake_on(&spec, &agent)?, &pending, after) else {
         return Ok("NO_SIGNAL".to_owned());
     };
     let budget = int_of(&spec, "max_wakes_per_hour", DEFAULT_MAX_WAKES_PER_HOUR, &agent)?;
@@ -634,10 +662,35 @@ mod tests {
     }
 
     #[test]
+    fn decide_should_hold_a_fresh_task_back_for_after_seconds() {
+        let fresh = iab_core::clock::now_iso();
+        let pending = map(json!({"tasks": ["g"], "oldest_task_at": fresh}));
+        assert_eq!(decide(&["task".to_owned()], &pending, 600.0), None);
+    }
+
+    #[test]
+    fn decide_should_wake_once_the_task_waited_long_enough() {
+        let pending = map(json!({"tasks": ["g"], "oldest_task_at": "2020-01-01T00:00:00+00:00"}));
+        assert!(decide(&["task".to_owned()], &pending, 600.0).is_some());
+    }
+
+    #[test]
+    fn decide_should_not_hold_back_a_task_of_unknown_age() {
+        let pending = map(json!({"tasks": ["g"]}));
+        assert!(decide(&["task".to_owned()], &pending, 600.0).is_some());
+    }
+
+    #[test]
+    fn after_seconds_should_refuse_a_text() {
+        let spec = map(json!({"after_seconds": "ten"}));
+        assert!(after_seconds(&spec, "odin@general").is_err());
+    }
+
+    #[test]
     fn decide_should_wake_on_a_task_by_default() {
         let pending = map(json!({"tasks": ["t1", "t2"], "wake_notifications": 0, "wake_broadcasts": []}));
         assert_eq!(
-            decide(&["task".to_owned()], &pending).as_deref(),
+            decide(&["task".to_owned()], &pending, 0.0).as_deref(),
             Some("2 queued task(s): t1 t2")
         );
     }
@@ -645,14 +698,14 @@ mod tests {
     #[test]
     fn decide_should_ignore_a_flagged_notification_unless_allowed() {
         let pending = map(json!({"tasks": [], "wake_notifications": 1, "wake_broadcasts": []}));
-        assert_eq!(decide(&["task".to_owned()], &pending), None);
+        assert_eq!(decide(&["task".to_owned()], &pending, 0.0), None);
     }
 
     #[test]
     fn decide_should_list_flagged_broadcasts_as_python_does() {
         let pending = map(json!({"tasks": [], "wake_notifications": 0, "wake_broadcasts": [3, 5]}));
         assert_eq!(
-            decide(&["broadcast".to_owned()], &pending).as_deref(),
+            decide(&["broadcast".to_owned()], &pending, 0.0).as_deref(),
             Some("broadcast(s) asking for a wake: [3, 5]")
         );
     }

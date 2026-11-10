@@ -57,13 +57,16 @@ def check(label: str, ok: bool, detail: str = "") -> None:
 class Server:
     """One MCP server process, bound to one database."""
 
-    def __init__(self, name: str, argv: list[str], db: str, cwd: Path) -> None:
+    def __init__(self, name: str, argv: list[str], db: str, cwd: Path,
+                 extra: dict[str, str] | None = None) -> None:
         self.name, self.argv, self.db, self.cwd = name, argv, db, cwd
+        self.extra = extra or {}
 
     async def __aenter__(self) -> "Server":
         env = {k: v for k, v in os.environ.items()
                if not k.startswith(("IAB_", "ORCHESTRATOR_", "PG"))}
         env.update(IAB_DB=self.db, IAB_AGENT_NAME=AGENT, IAB_MODEL="model-x")
+        env.update(self.extra)
         self._stack = AsyncExitStack()
         params = StdioServerParameters(command=self.argv[0], args=self.argv[1:], env=env,
                                        cwd=str(self.cwd))
@@ -172,6 +175,30 @@ async def interface(reference: Server, server: Server, tag: str) -> None:
     check(f"{tag} server named InterAgentBus", server.init.server_info.name == "InterAgentBus")
 
 
+def _masked(text: str | None) -> str | None:
+    """The instructions with the path of the `iab` command masked: each
+    server names the command installed next to it."""
+    return None if text is None else re.sub(r"\S*iab(\.exe)?(?= )", "IAB", text)
+
+
+async def instructions(reference: list[str], argv: list[str], db: str, ref_db: str, cwd: Path,
+                       tag: str) -> None:
+    """The wake-up instructions of the initialization, word for word, for
+    the default settings, a machine queue with an interval, and none."""
+    for label, extra in (("default", {}),
+                         ("machine queue", {"IAB_MACHINE": "Odin", "IAB_WATCH_INTERVAL": "90"}),
+                         ("disabled", {"IAB_WATCH_AUTO": "0"})):
+        async with Server("reference", reference, ref_db, cwd, extra) as ref, \
+                Server("judged", argv, db, cwd, extra) as server:
+            a, b = _masked(ref.init.instructions), _masked(server.init.instructions)
+            check(f"{tag} same instructions ({label})", a == b, f"{b!r}"[:300])
+            if label == "machine queue":
+                check(f"{tag} the instructions watch the machine queue",
+                      a is not None and "odin@general --on any --new --interval 90" in a, str(a))
+            if label == "disabled":
+                check(f"{tag} IAB_WATCH_AUTO=0 sends none", a is None and b is None)
+
+
 async def transcript(ref_db: str, db: str, reference: list[str], argv: list[str], name: str,
                      cwd: Path, tag: str) -> None:
     answers: dict[str, list] = {}
@@ -231,6 +258,8 @@ async def main() -> int:
             async with Server("reference", REFERENCE, fresh_db(tmp, f"ri{n}"), cwd) as ref, \
                     Server(name, argv, fresh_db(tmp, f"i{n}"), cwd) as server:
                 await interface(ref, server, f"[{name}] interface:")
+            await instructions(REFERENCE, argv, fresh_db(tmp, f"ii{n}"), fresh_db(tmp, f"rii{n}"),
+                               cwd, f"[{name}] instructions:")
             await transcript(fresh_db(tmp, f"rt{n}"), fresh_db(tmp, f"t{n}"), REFERENCE, argv, name,
                              cwd, f"[{name}] transcript:")
             for m, (first, second) in enumerate(((("reference", REFERENCE), (name, argv)),

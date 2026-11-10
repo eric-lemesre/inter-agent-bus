@@ -259,6 +259,56 @@ def wake_up(a: Impl, b: Impl, tag: str) -> None:
           f"rc={watcher.returncode}, {delay:.1f}s, {snapshot[:200]}")
 
 
+def machine_queue(a: Impl, b: Impl, tag: str) -> None:
+    """A machine's general queue: registered on first watch, a wait over
+    several queues, `new`/`since` marks, claim `--by`, explicit refusal."""
+    a("register", "alpha@conf")
+    b("register", "beta@conf")
+    first = a("watch", "alpha@conf", "odin@general", "--on", "any", "--new",
+              "--timeout", "0", "--interval", "0.2").json()
+    check(f"{tag} a watch over two queues answers one snapshot per queue, and a mark",
+          set(first.get("by", {})) == {"alpha@conf", "odin@general"}
+          and first.get("signalled") is False and ":" in first.get("since", ""), str(first))
+    b("push", "odin@general", "g1", "probe")
+    seen = b("watch", "alpha@conf", "odin@general", "--on", "task", "--since", first["since"])
+    check(f"{tag} --on task refuses a mark", refused(seen), seen.out)
+    seen = b("watch", "alpha@conf", "odin@general", "--on", "any",
+             "--since", first["since"], "--timeout", "5", "--interval", "0.2").json()
+    check(f"{tag} the other implementation's push wakes a wait from the mark",
+          seen.get("signalled") is True and seen["by"]["odin@general"]["tasks"] == ["g1"]
+          and seen["by"]["alpha@conf"]["tasks"] == [], str(seen))
+    again = a("watch", "alpha@conf", "odin@general", "--on", "any",
+              "--since", seen["since"], "--timeout", "0", "--interval", "0.2").json()
+    check(f"{tag} a wait from the answer's mark does not report it again",
+          again.get("signalled") is False, str(again))
+    claimed = a("claim", "odin@general", "--by", "alpha@conf").json()
+    check(f"{tag} claim --by from the machine queue", claimed.get("task_id") == "g1", str(claimed))
+    check(f"{tag} a refusal needs a reason",
+          refused(b("decline", "odin@general", "g1", "--reason", " ")))
+    out = b("decline", "odin@general", "g1", "--attempt", str(claimed.get("attempts")),
+            "--by", "alpha@conf", "--reason", "pas pour moi — ✓")
+    check(f"{tag} decline puts it back", ok_line(out) and "back" in out.out, out.out)
+    check(f"{tag} the refusing agent is not offered it again",
+          strip_newline(b("claim", "odin@general", "--by", "alpha@conf").out) == "NO_TASK")
+    mine = a("signals", "odin@general").json()
+    check(f"{tag} signals of the queue still show it", mine.get("tasks") == ["g1"], str(mine))
+    other = a("claim", "odin@general", "--by", "beta@conf").json()
+    check(f"{tag} another agent takes it, no attempt spent by the refusal",
+          other.get("task_id") == "g1" and other.get("attempts") == 2, str(other))
+    events = b("log", "g1").json()
+    check(f"{tag} the refusal is journaled identically",
+          any(e["event"] == "decline" and e["detail"]
+              == "by alpha@conf: pas pour moi — ✓ — re-offered to the other agents"
+              for e in events), str(events))
+    a("push", "beta@conf", "p1", "x")
+    taken = b("claim", "beta@conf").json()
+    out = a("decline", "beta@conf", "p1", "--attempt", str(taken.get("attempts")),
+            "--reason", "hors cadre")
+    check(f"{tag} a personal refusal settles the task",
+          ok_line(out) and b("result", "p1").json().get("content") == "DECLINED by beta@conf: hors cadre",
+          out.out)
+
+
 def payload(a: Impl, b: Impl, tag: str) -> None:
     a("register", "alpha@conf")
     pushed = a("push", "alpha@conf", "big", "-", stdin=PAYLOAD)
@@ -332,6 +382,8 @@ def wake(a: Impl, b: Impl, tag: str) -> None:
             {"name": "beta@conf", "launch": {"command": ["true"], "host": "elsewhere"}},
             {"name": "gamma@conf", "launch": {
                 "command": [sys.executable, "-c", "import time; time.sleep(12)"], "cwd": str(tmp)}},
+            {"name": "odin@general", "launch": {"command": ["true"], "after_seconds": 3600}},
+            {"name": "late@conf", "launch": {"command": ["true"], "after_seconds": "soon"}},
         ])
         a("register", "alpha@conf")
         quiet = b("wake", "alpha@conf", env=env)
@@ -363,6 +415,16 @@ def wake(a: Impl, b: Impl, tag: str) -> None:
               str(away))
         missing = a("wake", "nobody@conf", env=env)
         check(f"{tag} no launch block: refused", refused(missing), missing.out)
+        a("watch", "odin@general", "--on", "any", "--timeout", "0")
+        a("push", "odin@general", "g9", "x")
+        held = [impl("wake", "odin@general", "--dry-run", env=env).out for impl in (a, b)]
+        check(f"{tag} after_seconds holds a fresh task back, in both",
+              [strip_newline(h) for h in held] == ["NO_SIGNAL", "NO_SIGNAL"], str(held))
+        a("register", "late@conf")
+        a("push", "late@conf", "t9", "x")
+        bad = [impl("wake", "late@conf", "--dry-run", env=env) for impl in (a, b)]
+        check(f"{tag} a malformed after_seconds is refused identically",
+              all(refused(r) for r in bad) and bad[0].out == bad[1].out, str([r.out for r in bad]))
         a("register", "gamma@conf")
         a("push", "gamma@conf", "t3", "x")
         first = a.popen("wake", "gamma@conf", env=env)
@@ -415,7 +477,7 @@ def identity(a: Impl, b: Impl, tag: str) -> None:
 
 
 SCENARIOS = [lifecycle, refusals, priority, fencing, dead_letter, contention,
-             messages, wake_up, payload, worker, worker_failures, wake, supervise, identity]
+             messages, wake_up, machine_queue, payload, worker, worker_failures, wake, supervise, identity]
 
 
 def main() -> int:

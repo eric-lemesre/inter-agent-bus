@@ -82,6 +82,24 @@ passe la suite de conformité (§ 11) sur chaque paire d'implémentations.
 - PostgreSQL : `LISTEN iab_bus`, puis attente d'une notification ou de
   la fin de l'intervalle, au premier des deux. Une connexion qui a fait
   `LISTEN` n'est jamais remise dans une réserve de connexions.
+- `wait_signal` prend une instance ou plusieurs (`a,b`, aussi `a b` ;
+  noms distincts, dans l'ordre). Un nom `<machine>@general` pas encore
+  enregistré l'est d'abord (description `general queue of machine
+  <machine>`, journalisée `register`) ; tout autre nom inconnu est
+  refusé. Une instance répond son instantané ; plusieurs répondent
+  `{"signalled": …, "by": {<nom>: <instantané>, …}}` dans l'ordre donné.
+- Un instantané (`pending_signals`, `wait_signal`) porte aussi
+  `oldest_task_at`, le `created_at` de la plus ancienne tâche listée
+  (`null` s'il n'y en a pas). Les tâches refusées (§ 6) par l'une des
+  instances surveillées en sont écartées.
+- `new` et `since` (`<dernier id d'événement>:<dernier seq de
+  notification>`) : une attente avec marque ne compte que les tâches qui
+  ont un événement `push`, `expire`, `requeue` ou `decline` après l'id
+  de la marque, et les notifications après son seq ; `new` sans `since`
+  prend la marque du moment. La réponse porte alors `since`, la marque
+  lue **avant** son dernier instantané. Un `since` mal formé est refusé
+  avant tout accès à la base : `ERROR: since must be '<event
+  id>:<notification seq>' (got '…').`
 
 ## 5. Dates
 
@@ -97,7 +115,21 @@ passe la suite de conformité (§ 11) sur chaque paire d'implémentations.
 ## 6. Cycle de vie d'une tâche
 
 - États : `queued` → `claimed` → réglée (résultat publié) ; sorties
-  `dead` (bail expiré `max_attempts` fois, défaut 3) et `cancelled`.
+  `dead` (bail expiré `max_attempts` fois, défaut 3), `cancelled` et
+  `declined`.
+- Refus (`decline_task`) : seulement une tâche `claimed`, par l'agent de
+  sa file, avec un motif non vide, gardé par la tentative comme la
+  publication ; l'instance qui refuse, `by`, vaut par défaut l'agent de
+  la file. Sur une file dont l'espace est `general`, la tâche revient en
+  `queued`, `max_attempts` augmente de un (un refus ne coûte aucun
+  essai) et une ligne `declines` `(task_id, agent=by)` est écrite ; une
+  réclamation avec `by` saute les tâches que cette instance a refusées.
+  Sur toute autre file, la tâche passe en `declined` et son résultat est
+  `DECLINED by <by>: <motif>`, d'auteur l'agent de la file. `by` doit
+  être un nom valide autre que `bus` : `ERROR: invalid refusing instance
+  '<by>'.` Journal : `decline`, détail `by
+  <by>: <motif>` (suivi de ` — re-offered to the other agents` sur une
+  file générale).
 - Réclamation : la tâche `queued` de plus haute priorité, puis la plus
   ancienne (`ORDER BY priority DESC, created_at ASC`) ; les baux expirés
   sont remis en file d'abord. `attempts` augmente à chaque réclamation ;
@@ -194,6 +226,11 @@ passe la suite de conformité (§ 11) sur chaque paire d'implémentations.
 - Une valeur de roster mal formée (`timeout` qui n'est pas un nombre,
   `wake_on` qui n'est pas une liste) donne une ligne `ERROR:` dans le
   client natif ; Python s'arrête sur une exception.
+- `launch.after_seconds` (défaut 0) : une tâche en file ne réveille
+  qu'une fois que l'`oldest_task_at` de l'instantané a cet âge ; un âge
+  inconnu ne retient jamais une tâche. Tout ce qui n'est pas un nombre
+  >= 0 est refusé par les deux : `ERROR: launch.after_seconds of
+  '<agent>' must be a number of seconds >= 0.`
 
 ## 11. Suite de conformité
 
@@ -257,7 +294,7 @@ réveille. L'intégration continue le joue sur SQLite et sur le banc TLS.
 
 ## 12. Serveur MCP
 
-- Mêmes 23 outils que `servers/shared_memory/server.py` : mêmes noms,
+- Mêmes 24 outils que `servers/shared_memory/server.py` : mêmes noms,
   descriptions, paramètres, types et valeurs par défaut, donc même
   `inputSchema` ; chaque outil déclare le schéma de sortie
   `{"result": string}`.
@@ -286,5 +323,11 @@ réveille. L'intégration continue le joue sur SQLite et sur le banc TLS.
   `client_info`, `name`, `title`, `version`).
 - Un outil bloquant (`wait_signal`, `wait_task`) ne retient pas les
   autres appels de la session.
+- `by` de `claim_task` et `decline_task`, laissé vide, est l'identité du
+  serveur quand elle en nomme une.
+- L'initialisation porte la consigne de réveil (`instructions`) de
+  `session_instructions` dans `store.py`, mot pour mot, au chemin près
+  de la commande `iab` placée à côté du serveur (`iab` s'il n'y en a
+  pas) ; `IAB_WATCH_AUTO=0` n'en envoie aucune.
 - Le serveur natif refuse `IAB_HUB` à chaque appel, comme la ligne de
   commande native (§ 1).

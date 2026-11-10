@@ -21,8 +21,13 @@ every state (signals, locks, budget, journal) lives in store.py.
       "wake_on": ["task"],           # + "notification", "broadcast"
       "max_wakes_per_hour": 4,       # loop breaker
       "lease_seconds": 10800,        # the claim lease the prompt asks for
-      "timeout": 21600               # hard kill (default: 2 × lease)
+      "timeout": 21600,              # hard kill (default: 2 × lease)
+      "after_seconds": 600           # tasks: only once the oldest waited this long
     }
+
+`after_seconds` suits a machine's general queue (`<machine>@general`): the
+agents already awake on the machine get the first chance to take a task,
+the launcher only stands in when nobody took it in time.
 
 Several machines (hub mode, IAB_HUB set): `iab supervise` runs on EACH
 machine and wakes only the entries whose `host` is that machine — the
@@ -48,6 +53,7 @@ import sys
 import tempfile
 import threading
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 try:  # installed package (`iab` maps to this directory)
@@ -177,12 +183,29 @@ def render_prompt(spec: dict, agent: str, pending: dict, cwd: str) -> str:
     return template.format_map(_Safe(values))
 
 
-def decide(spec: dict, pending: dict) -> str | None:
-    """Reason to wake, or None. Tasks always; notifications and broadcasts
-    only when flagged by the sender AND allowed by the roster."""
+def _waited(pending: dict, now: datetime | None) -> float | None:
+    """Seconds the oldest queued task has waited (None if unknown)."""
+    oldest = pending.get("oldest_task_at")
+    if not oldest:
+        return None
+    try:
+        since = datetime.fromisoformat(str(oldest))
+    except ValueError:
+        return None
+    return ((now or datetime.now(timezone.utc)) - since).total_seconds()
+
+
+def decide(spec: dict, pending: dict, now: datetime | None = None) -> str | None:
+    """Reason to wake, or None. Tasks always — once the oldest has waited
+    `after_seconds` when the roster asks for a delay; notifications and
+    broadcasts only when flagged by the sender AND allowed by the roster."""
     wake_on = {str(k).lower() for k in spec.get("wake_on", DEFAULT_WAKE_ON)}
+    after = float(spec.get("after_seconds") or 0)
     if pending.get("tasks") and "task" in wake_on:
-        return f"{len(pending['tasks'])} queued task(s): {' '.join(pending['tasks'])}"
+        waited = _waited(pending, now) if after > 0 else None
+        # An age unknown (a hub older than the field) never holds a task back.
+        if after <= 0 or waited is None or waited >= after:
+            return f"{len(pending['tasks'])} queued task(s): {' '.join(pending['tasks'])}"
     if pending.get("wake_notifications") and "notification" in wake_on:
         return f"{pending['wake_notifications']} notification(s) asking for a wake"
     if pending.get("wake_broadcasts") and "broadcast" in wake_on:
@@ -220,6 +243,9 @@ def _wake_agent(agent: str, roster: list[dict] | None, dry_run: bool,
     command = spec.get("command")
     if not isinstance(command, list) or not command or not all(isinstance(c, str) for c in command):
         return f"ERROR: launch.command of '{agent}' must be a non-empty list of strings."
+    after = spec.get("after_seconds", 0)
+    if isinstance(after, bool) or not isinstance(after, (int, float)) or after < 0:
+        return f"ERROR: launch.after_seconds of '{agent}' must be a number of seconds >= 0."
     snapshot = bus.pending_signals(agent)
     if snapshot.startswith("ERROR"):
         return snapshot

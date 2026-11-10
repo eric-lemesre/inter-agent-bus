@@ -108,7 +108,7 @@ in interactive sessions only — headless mode goes through
 machine: `iab`, the command line (every bus subcommand, `worker`, `wake`
 and `supervise` included; the hub, pairing, `review` and `install` stay
 Python-only), and `iab-server`, the MCP server
-with the same 23 tools. Both speak to the same SQLite file or PostgreSQL
+with the same 24 tools. Both speak to the same SQLite file or PostgreSQL
 server (over TLS) as the Python implementation, at the same time;
 `IAB_HUB` is refused. No archive is published yet: build with
 `cargo build --release --manifest-path rust/Cargo.toml`, then register
@@ -138,16 +138,18 @@ project key — a mismatch is diagnosable in one call.
 ## MCP tools
 
 `whoami` · `register_agent` · `rename_agent` · `push_task` · `claim_task` (head of
-one's queue, or one specific task via `task_id`) · `publish_result`
+one's queue, or one specific task via `task_id`; `by` on a machine's
+general queue) · `publish_result`
 (settles the task; pass the claim's `attempt` token — lease fencing) ·
-`cancel_task` · `requeue_task` · `extend_lease` · `read_result` ·
+`decline_task` (explicit refusal with a reason, see *Machine general
+queue*) · `cancel_task` · `requeue_task` · `extend_lease` · `read_result` ·
 `get_system_state` · `get_events` (transition journal, filterable by
 task and/or agent) · `heartbeat` · `list_presence` · `announce` ·
 `read_channel` · `notify` / `poll` (directed signals, point-to-point;
 `reply_to` answers a broadcast) · `broadcast` / `replies` (one question
 or signal to many, see below) · `wait_task` (blocking wait until a task
 lands in one's queue) · `wait_signal` / `pending_signals` (tasks and
-notifications, see *Wake-up*).
+notifications, one queue or several, see *Wake-up*).
 
 ### Broadcast: one question, many mailboxes
 
@@ -177,7 +179,28 @@ close the gap, both clients of the bus:
   any cursor. Run it as a **background task** of the session: the
   harness hands control back to the model when it returns (Claude Code
   does; any client with background commands works the same), the
-  session then polls and claims as usual.
+  session then polls and claims as usual. Waiting costs no token: the
+  command reads the database every `--interval` seconds (PostgreSQL:
+  `LISTEN`/`NOTIFY`), the model only runs when it returns.
+
+  Several queues at once: `iab watch <agent> <machine>@general --on any`
+  (MCP: `agent="a,b"`) answers one snapshot per queue under `by`.
+  `--new` ignores what already waits when the wait starts — a task left
+  queued on purpose, awaiting a human decision, would otherwise end
+  every wait at once — and the answer carries a `since` mark: arm the
+  next wait with `--since <mark>`, so that nothing arriving while the
+  session works is missed and nothing already reported wakes it again.
+
+  The MCP server hands these instructions to its client at
+  initialization (`instructions`), with the absolute path of `iab`: the
+  session arms the wait by itself, at startup and after every return.
+  Settings, in the environment of the MCP server:
+
+  | Variable | Effect |
+  |---|---|
+  | `IAB_WATCH_AUTO=0` | no instructions |
+  | `IAB_WATCH_INTERVAL` | polling interval in seconds (default 60) |
+  | `IAB_MACHINE` | also watch `<machine>@general` (see below) |
 - **An asleep agent** is launched by `iab wake <agent>` from the
   `launch` block of its roster entry (or of its harness's entry):
 
@@ -189,11 +212,14 @@ close the gap, both clients of the bus:
     "wake_on": ["task", "broadcast"],
     "max_wakes_per_hour": 4,
     "lease_seconds": 10800,
-    "timeout": 21600
+    "timeout": 21600,
+    "after_seconds": 0
   }
   ```
 
-  The prompt (built-in strict template, a file path, or literal text with
+  `after_seconds` (default 0) launches for a task only once the oldest
+  queued one has waited that long — the agents already awake get the
+  first chance. The prompt (built-in strict template, a file path, or literal text with
   `{agent}`, `{iab}`, `{cwd}`, `{lease}`, `{task_ids}`, `{signals}`
   placeholders) goes to the command **on stdin** — or to a 0600 temp
   file when an argument contains `{prompt_file}` — never in argv. A lock
@@ -216,6 +242,35 @@ close the gap, both clients of the bus:
   bus re-offers the task). `--dry-run` prints the decision and launches
   nothing.
 
+### Machine general queue: `<machine>@general`
+
+Each machine can have a general queue, `odin@general`, served by the
+agents of that machine whose MCP server has `IAB_MACHINE=odin`: they
+watch it next to their own queue. It is registered on first watch.
+
+- It carries **tasks only** (`push_task`), never notifications: one
+  notification cursor per identity means the first `poll` would consume
+  them for everyone. `broadcast '*@general'` is therefore not a way to
+  reach machines.
+- A task there asks only for an action **specific to that machine**
+  (state of a service, a read, a probe). One agent takes it, under
+  lease: `iab claim odin@general --by <agent>`.
+- An agent that finds it outside its scope **refuses it explicitly**:
+  `iab decline odin@general <task_id> --attempt N --by <agent> --reason
+  "…"`. The task goes back to the queue, the refusal costs no attempt,
+  is journaled with its author and reason (`iab log <task_id>`), and the
+  refusing agent is neither offered it again nor woken by it; the other
+  agents of the machine are. On a personal queue, `decline` settles the
+  task as `declined`, the reason readable with `iab result`.
+- Nobody awake: a roster entry `odin@general` with a `launch` block and
+  `after_seconds` lets `iab supervise` stand in. Before pushing, a
+  sender can check with `iab presence` that an agent of the machine is
+  alive.
+- A bus message never stands for the approval of a session's user.
+- Through a hub, the queue belongs to the first machine that acts as
+  it: only the agents of `odin` can then claim from `odin@general`
+  (see [MULTI-MACHINE.md](MULTI-MACHINE.md)).
+
 `push_task` also drops a directed notification in the target's mailbox
 ("task queued") unless called with `notify=False` — so a watcher or a
 `poll()` wakes the worker instead of a human relaunching it. The hint
@@ -231,8 +286,9 @@ without MCP and without `python -c`:
 iab register <agent> [-d DESC] [--cwd DIR] [--model M]
 iab rename <old> <new>                  iab result <task_id>
 iab push <agent> <task_id> [payload|-]  iab state
-iab claim <agent> [--lease S] [--task-id ID]
+iab claim <agent> [--lease S] [--task-id ID] [--by AGENT]
 iab publish <agent> <task_id> [content|-] [--attempt N] [--force]
+iab decline <agent> <task_id> --reason R [--attempt N] [--by AGENT]
 iab cancel|requeue <task_id>            iab log [task_id] [-a AGENT]
 iab extend <task_id> [--lease S]        iab whoami
 iab heartbeat <agent> [--ttl S] [--capabilities JSON] [--model M]
@@ -242,7 +298,8 @@ iab presence
 iab notify <author> <agent> [message|-] [--reply-to ID] [--wake]
 iab broadcast <author> <scope> [message|-] [--alive-only] [--wake]
 iab replies <broadcast_id>              iab poll <agent> [--limit N]
-iab watch <agent> [--on task|notification|any] [--timeout S] [--interval S]
+iab watch <agent>… [--on task|notification|any] [--new] [--since MARK]
+          [--timeout S] [--interval S]
 iab signals <agent>                     iab wake <agent> [--dry-run]
 iab supervise [--interval S] [--once] [--dry-run]
 ```
@@ -324,6 +381,8 @@ cross-reviewing with another agent (router rule).
   (default: `workspaces.json` in the data directory).
 - `IAB_MODEL` — model carrying the session, echoed on the bus until the
   agent declares one itself (`iab worker --model`).
+- `IAB_WATCH_AUTO`, `IAB_WATCH_INTERVAL`, `IAB_MACHINE` — the wake-up
+  instructions of the MCP server (see *Wake-up*).
 
 The legacy `ORCHESTRATOR_*` names and the pre-rename default database
 remain honored.

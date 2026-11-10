@@ -102,6 +102,13 @@ CREATE TABLE IF NOT EXISTS wake_locks (
     until  TEXT NOT NULL,
     holder TEXT NOT NULL DEFAULT ''
 );
+CREATE TABLE IF NOT EXISTS declines (
+    task_id TEXT NOT NULL,
+    agent   TEXT NOT NULL,
+    at      TEXT NOT NULL,
+    reason  TEXT NOT NULL,
+    PRIMARY KEY (task_id, agent)
+);
 """
 
 

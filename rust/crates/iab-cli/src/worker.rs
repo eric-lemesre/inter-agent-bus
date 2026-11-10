@@ -127,7 +127,7 @@ pub fn run(bus: &Bus, options: &Options) -> u8 {
             None,
             model,
         )));
-        let claimed = answer(bus.claim_task(&agent, options.lease_seconds, None));
+        let claimed = answer(bus.claim_task(&agent, options.lease_seconds, None, ""));
         if claimed == "NO_TASK" || claimed.starts_with("ERROR") {
             if claimed != "NO_TASK" {
                 log(&claimed);

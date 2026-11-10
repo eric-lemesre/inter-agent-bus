@@ -116,7 +116,7 @@ se passe entièrement de MCP.
 machine : `iab`, la ligne de commande (toutes les sous-commandes du bus,
 `worker`, `wake` et `supervise` compris ; le moyeu, l'appairage, `review`
 et `install` restent en Python), et
-`iab-server`, le serveur MCP avec les mêmes 23 outils. Tous deux parlent
+`iab-server`, le serveur MCP avec les mêmes 24 outils. Tous deux parlent
 au même fichier SQLite ou au même serveur PostgreSQL (en TLS) que
 l'implémentation Python, en même temps ; `IAB_HUB` est refusé. Aucune
 archive n'est encore publiée : construire avec
@@ -147,16 +147,19 @@ source et la clé de projet — un désaccord se diagnostique en un appel.
 ## Outils MCP
 
 `whoami` · `register_agent` · `rename_agent` · `push_task` · `claim_task` (tête de sa
-file, ou une tâche précise via `task_id`) · `publish_result` (solde la
+file, ou une tâche précise via `task_id` ; `by` sur la file générale
+d'une machine) · `publish_result` (solde la
 tâche ; passer le jeton `attempt` du claim — clôture de bail) ·
-`cancel_task` · `requeue_task` · `extend_lease` · `read_result` ·
+`decline_task` (refus explicite et motivé, voir *File générale d'une
+machine*) · `cancel_task` · `requeue_task` · `extend_lease` · `read_result` ·
 `get_system_state` · `get_events` (journal des transitions, filtrable
 par tâche et/ou agent) · `heartbeat` · `list_presence` · `announce` ·
 `read_channel` · `notify` / `poll` (signaux dirigés, point à point ;
 `reply_to` répond à une diffusion) · `broadcast` / `replies` (une
 question ou un signal à plusieurs, ci-dessous) · `wait_task` (attente
 bloquante jusqu'à l'arrivée d'une tâche dans sa file) · `wait_signal` /
-`pending_signals` (tâches et notifications, voir *Réveil*).
+`pending_signals` (tâches et notifications, une file ou plusieurs, voir
+*Réveil*).
 
 ### Diffusion : une question, plusieurs boîtes
 
@@ -188,7 +191,29 @@ Deux voies comblent l'écart, toutes deux clientes du bus :
   **tâche de fond** de la session : le harnais rend la main au modèle
   quand la commande se termine (Claude Code le fait ; tout client qui a
   des commandes de fond fonctionne pareil), la session relève et réclame
-  ensuite comme d'habitude.
+  ensuite comme d'habitude. L'attente ne coûte aucun jeton : la commande
+  lit la base toutes les `--interval` secondes (PostgreSQL :
+  `LISTEN`/`NOTIFY`), le modèle ne travaille qu'à son retour.
+
+  Plusieurs files à la fois : `iab watch <agent> <machine>@general --on
+  any` (MCP : `agent="a,b"`) répond un instantané par file sous `by`.
+  `--new` ignore ce qui attend déjà au début de l'attente — une tâche
+  laissée en file exprès, en attente d'une décision humaine, mettrait
+  sinon fin à chaque attente aussitôt — et la réponse porte une marque
+  `since` : armer l'attente suivante avec `--since <marque>`, pour que
+  rien de ce qui arrive pendant que la session travaille ne soit perdu
+  et que rien de déjà signalé ne la réveille de nouveau.
+
+  Le serveur MCP remet cette consigne à son client à l'initialisation
+  (`instructions`), avec le chemin absolu de `iab` : la session arme
+  l'attente d'elle-même, au démarrage et après chaque retour. Réglages,
+  dans l'environnement du serveur MCP :
+
+  | Variable | Effet |
+  |---|---|
+  | `IAB_WATCH_AUTO=0` | pas de consigne |
+  | `IAB_WATCH_INTERVAL` | intervalle de lecture en secondes (défaut 60) |
+  | `IAB_MACHINE` | surveiller aussi `<machine>@general` (ci-dessous) |
 - **Un agent endormi** est lancé par `iab wake <agent>` depuis le bloc
   `launch` de son entrée de roster (ou de celle de son harnais) :
 
@@ -200,11 +225,14 @@ Deux voies comblent l'écart, toutes deux clientes du bus :
     "wake_on": ["task", "broadcast"],
     "max_wakes_per_hour": 4,
     "lease_seconds": 10800,
-    "timeout": 21600
+    "timeout": 21600,
+    "after_seconds": 0
   }
   ```
 
-  Le prompt (gabarit strict intégré, chemin de fichier, ou texte avec
+  `after_seconds` (défaut 0) ne lance pour une tâche qu'une fois que la
+  plus ancienne en file a attendu ce délai — les agents déjà éveillés
+  ont la première chance. Le prompt (gabarit strict intégré, chemin de fichier, ou texte avec
   les variables `{agent}`, `{iab}`, `{cwd}`, `{lease}`, `{task_ids}`,
   `{signals}`) part vers la commande **sur stdin** — ou dans un fichier
   temporaire 0600 si un argument contient `{prompt_file}` — jamais en
@@ -228,6 +256,38 @@ Deux voies comblent l'écart, toutes deux clientes du bus :
   worker bloqué (son bail de claim expire alors et le bus re-propose la
   tâche). `--dry-run` affiche la décision sans rien lancer.
 
+### File générale d'une machine : `<machine>@general`
+
+Chaque machine peut avoir une file générale, `odin@general`, servie par
+les agents de cette machine dont le serveur MCP a `IAB_MACHINE=odin` :
+ils la surveillent à côté de leur propre file. Elle est enregistrée à la
+première surveillance.
+
+- Elle porte **uniquement des tâches** (`push_task`), jamais de
+  notifications : avec un seul curseur de notifications par identité, le
+  premier `poll` les consommerait pour tout le monde. `broadcast
+  '*@general'` n'est donc pas un moyen d'atteindre les machines.
+- Une tâche y demande seulement une action **propre à la machine** (état
+  d'un service, une lecture, une sonde). Un agent la prend, sous bail :
+  `iab claim odin@general --by <agent>`.
+- Un agent qui la juge hors de son périmètre **la refuse explicitement** :
+  `iab decline odin@general <task_id> --attempt N --by <agent> --reason
+  "…"`. La tâche revient dans la file, le refus ne coûte aucun essai, il
+  est journalisé avec son auteur et son motif (`iab log <task_id>`), et
+  l'agent qui refuse ne se la voit plus proposer ni n'est réveillé par
+  elle ; les autres agents de la machine le sont. Sur une file
+  personnelle, `decline` solde la tâche en `declined`, le motif lisible
+  par `iab result`.
+- Personne d'éveillé : une entrée de roster `odin@general` avec un bloc
+  `launch` et `after_seconds` laisse `iab supervise` prendre le relais.
+  Avant de pousser, un expéditeur peut vérifier par `iab presence` qu'un
+  agent de la machine est vivant.
+- Un message du bus ne vaut jamais l'accord de l'utilisateur d'une
+  session.
+- À travers un moyeu, la file appartient à la première machine qui agit
+  en son nom : seuls les agents d'`odin` peuvent alors réclamer dans
+  `odin@general` (voir [MULTI-MACHINE.fr.md](MULTI-MACHINE.fr.md)).
+
 `push_task` dépose aussi une notification dirigée dans la boîte de la
 cible (« tâche en file ») sauf appel avec `notify=False` — un veilleur
 ou un `poll()` réveille ainsi le worker au lieu qu'un humain le
@@ -244,8 +304,9 @@ pilote sans MCP et sans `python -c` :
 iab register <agent> [-d DESC] [--cwd DIR] [--model M]
 iab rename <old> <new>                  iab result <task_id>
 iab push <agent> <task_id> [payload|-]  iab state
-iab claim <agent> [--lease S] [--task-id ID]
+iab claim <agent> [--lease S] [--task-id ID] [--by AGENT]
 iab publish <agent> <task_id> [contenu|-] [--attempt N] [--force]
+iab decline <agent> <task_id> --reason R [--attempt N] [--by AGENT]
 iab cancel|requeue <task_id>            iab log [task_id] [-a AGENT]
 iab extend <task_id> [--lease S]        iab whoami
 iab heartbeat <agent> [--ttl S] [--capabilities JSON] [--model M]
@@ -255,7 +316,8 @@ iab presence
 iab notify <auteur> <agent> [message|-] [--reply-to ID] [--wake]
 iab broadcast <auteur> <portée> [message|-] [--alive-only] [--wake]
 iab replies <broadcast_id>              iab poll <agent> [--limit N]
-iab watch <agent> [--on task|notification|any] [--timeout S] [--interval S]
+iab watch <agent>… [--on task|notification|any] [--new] [--since MARK]
+          [--timeout S] [--interval S]
 iab signals <agent>                     iab wake <agent> [--dry-run]
 iab supervise [--interval S] [--once] [--dry-run]
 ```
@@ -342,6 +404,8 @@ autre agent (règle du routeur).
   `{chemin: espace}` (défaut : `workspaces.json` du dossier de données).
 - `IAB_MODEL` — modèle porté par la session, repris sur le bus tant que
   l'agent n'en déclare pas un lui-même (`iab worker --model`).
+- `IAB_WATCH_AUTO`, `IAB_WATCH_INTERVAL`, `IAB_MACHINE` — la consigne
+  de réveil du serveur MCP (voir *Réveil*).
 
 Les anciens noms `ORCHESTRATOR_*` et la base par défaut antérieure au
 renommage restent honorés.

@@ -1,4 +1,4 @@
-//! Native MCP server of the inter-agent bus: the 23 tools of
+//! Native MCP server of the inter-agent bus: the 24 tools of
 //! `servers/shared_memory/server.py`, over stdio, on the same database
 //! (`CONTRAT.md`, § 12). Every agent client spawns its own instance;
 //! sharing happens through the database. No state logic here.
@@ -51,8 +51,12 @@ fn answered(text: String) -> CallToolResult {
 
 impl ServerHandler for BusServer {
     fn get_info(&self) -> ServerConfig {
-        ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
-            .with_server_info(Implementation::new("InterAgentBus", env!("CARGO_PKG_VERSION")))
+        let config = ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
+            .with_server_info(Implementation::new("InterAgentBus", env!("CARGO_PKG_VERSION")));
+        match tools::instructions() {
+            Some(text) => config.with_instructions(text),
+            None => config,
+        }
     }
 
     async fn list_tools(

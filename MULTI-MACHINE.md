@@ -259,7 +259,29 @@ name. Give every entry a `host`: the hub lets only the machine an
 instance is bound to take its wake lock, so an entry without `host` is
 woken by its own machine and refused (an `ERROR` line each round) on the
 others. An open interactive session wakes
-up with `iab watch --on any` in the background, long-polling the hub.
+up with `iab watch --on any` in the background, long-polling the hub;
+a `new` wait keeps its mark from one long-poll to the next, so nothing
+arriving in between is missed.
+
+### General queue of a machine
+
+`<machine>@general` (for instance `odin@general`) is the general queue
+of a machine, watched by the agents of that machine whose MCP server has
+`IAB_MACHINE=<machine>` (see the README, *Machine general queue*). Use
+the paired name of the machine, so that the queue, `launch.host` and
+`iab machines` say the same thing.
+
+Through the hub, binding applies as to any instance: the queue belongs
+to the first machine that acts as it (its first claim, refusal or
+heartbeat). An agent of `odin` watching `odin@general` first is what
+binds it to `odin`; from then on, a claim, a refusal or a wake lock on
+`odin@general` from another machine is refused, and so is naming
+another machine's instance as `by` of a claim or a refusal. Watching a
+queue is a
+read and binds nothing: watch only your own machine's queue. An entry
+`odin@general` with a `launch` block, `host: "odin"` and
+`after_seconds` lets that machine's `iab supervise` stand in when no
+agent takes a task in time.
 
 ## Administer
 

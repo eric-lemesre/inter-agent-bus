@@ -10,7 +10,7 @@ use sha2::{Digest, Sha256};
 
 use crate::Error;
 use crate::clock;
-use crate::identity::{self, Identity, Target, is_valid_name, split_name};
+use crate::identity::{self, Identity, Target, is_machine_queue, is_valid_name, split_name};
 use crate::pytext::{self, fold, repr_list, strip};
 
 /// The mechanism's own voice (task-queued notices): no client may register,
@@ -18,6 +18,11 @@ use crate::pytext::{self, fold, repr_list, strip};
 const SYSTEM_AUTHOR: &str = "bus";
 const DEFAULT_PRESENCE_TTL: i64 = 120;
 const MESSAGE_LIMIT: usize = 16 * 1024;
+/// The transitions that (re)put a task in a queue — what `new` waits watch.
+const QUEUEING_EVENTS: [&str; 4] = ["push", "expire", "requeue", "decline"];
+
+/// A point of the journal: (last event id, last notification seq).
+type Mark = (i64, i64);
 
 /// An answer, or the `ERROR: …` refusal that replaces it.
 type Answer<T> = Result<T, String>;
@@ -527,22 +532,50 @@ fn expand_scope<C: Connection>(conn: &mut C, scope: &str) -> Result<Answer<Vec<S
     Ok(found(names, "ERROR: empty scope.".to_owned()))
 }
 
-/// Signals waiting for an instance, without moving any cursor.
-fn pending<C: Connection>(conn: &mut C, target: &str) -> Result<Map<String, Json>, Error> {
+/// Signals waiting for an instance, without moving any cursor. Tasks
+/// declined by one of `watchers` are left out; with a `mark`, only what was
+/// (re)queued or sent after it counts.
+fn pending<C: Connection>(
+    conn: &mut C,
+    target: &str,
+    watchers: &[String],
+    mark: Option<Mark>,
+) -> Result<Map<String, Json>, Error> {
     requeue_expired(conn)?;
-    let tasks = conn.query(
-        "SELECT task_id FROM tasks WHERE agent=? AND status='queued' \
-         ORDER BY priority DESC, created_at ASC",
-        &[target.into()],
-    )?;
+    let mut sql = "SELECT task_id, created_at FROM tasks WHERE agent=? AND status='queued'".to_owned();
+    let mut params: Vec<Value> = vec![target.into()];
+    if !watchers.is_empty() {
+        sql.push_str(" AND task_id NOT IN (SELECT task_id FROM declines WHERE agent IN (");
+        sql.push_str(&vec!["?"; watchers.len()].join(","));
+        sql.push_str("))");
+        params.extend(watchers.iter().map(Value::from));
+    }
+    if let Some((event, _)) = mark {
+        sql.push_str(" AND task_id IN (SELECT task_id FROM events WHERE id > ? AND event IN (");
+        sql.push_str(&vec!["?"; QUEUEING_EVENTS.len()].join(","));
+        sql.push_str("))");
+        params.push(event.into());
+        params.extend(QUEUEING_EVENTS.iter().map(|e| Value::from(*e)));
+    }
+    sql.push_str(" ORDER BY priority DESC, created_at ASC");
+    let tasks = conn.query(&sql, &params)?;
+    let oldest = tasks
+        .iter()
+        .map(|r| r.text("created_at").map(str::to_owned))
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .min();
     let cursor = conn.query(
         "SELECT last_seq FROM notification_cursor WHERE target=?",
         &[target.into()],
     )?;
-    let last_seq = match cursor.first() {
+    let mut last_seq = match cursor.first() {
         Some(row) => row.int("last_seq")?,
         None => 0,
     };
+    if let Some((_, seq)) = mark {
+        last_seq = last_seq.max(seq);
+    }
     let rows = conn.query(
         "SELECT seq, broadcast_id, wake FROM notifications WHERE target=? AND seq > ?",
         &[target.into(), last_seq.into()],
@@ -566,6 +599,7 @@ fn pending<C: Connection>(conn: &mut C, target: &str) -> Result<Map<String, Json
     let mut map = Map::new();
     map.insert("agent".into(), json!(target));
     map.insert("tasks".into(), json!(names_of(&tasks, "task_id")?));
+    map.insert("oldest_task_at".into(), json!(oldest));
     map.insert("notifications".into(), json!(rows.len()));
     map.insert("wake_notifications".into(), json!(wake_direct));
     map.insert("wake_broadcasts".into(), json!(wake_broadcasts));
@@ -600,6 +634,97 @@ fn signalled(pending: &Map<String, Json>, (task, notification): (bool, bool)) ->
         .and_then(Json::as_u64)
         .is_some_and(|n| n > 0);
     (task && tasks) || (notification && notes)
+}
+
+/// `a`, `a,b`, `a b` → the distinct folded names, in order.
+fn agent_list(text: &str) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    for part in text.split(|c: char| c == ',' || c.is_whitespace()) {
+        let name = fold(part);
+        if !name.is_empty() && !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    names
+}
+
+/// The current journal point a `new` wait compares against.
+fn current_mark<C: Connection>(conn: &mut C) -> Result<Mark, Error> {
+    let event = conn.query("SELECT COALESCE(MAX(id), 0) AS m FROM events", &[])?;
+    let seq = conn.query("SELECT COALESCE(MAX(seq), 0) AS m FROM notifications", &[])?;
+    let read = |rows: &[Row]| -> Result<i64, Error> {
+        Ok(match rows.first() {
+            Some(row) => row.int("m")?,
+            None => 0,
+        })
+    };
+    Ok((read(&event)?, read(&seq)?))
+}
+
+/// `<event id>:<notification seq>`, both plain digits.
+fn parse_mark(since: &str) -> Option<Mark> {
+    let (event, seq) = strip(since).split_once(':')?;
+    let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    if !digits(event) || !digits(seq) {
+        return None;
+    }
+    Some((event.parse().ok()?, seq.parse().ok()?))
+}
+
+/// A machine's general queue exists as soon as an agent watches it.
+fn ensure_machine_queue<C: Connection>(conn: &mut C, name: &str) -> Result<(), Error> {
+    if !is_machine_queue(name) || !is_valid_name(name) {
+        return Ok(());
+    }
+    let known = |c: &mut C| exists(c, "SELECT 1 FROM agents WHERE name=?", &[name.into()]);
+    if known(conn)? {
+        return Ok(());
+    }
+    let (harness, workspace) = split_name(name);
+    write(conn, |c| -> Result<(), Error> {
+        if known(c)? {
+            return Ok(());
+        }
+        let description = format!("general queue of machine {harness}");
+        c.execute(
+            "INSERT INTO agents(name, description, registered_at, harness, workspace, cwd) \
+             VALUES(?,?,?,?,?,'')",
+            &[
+                name.into(),
+                description.as_str().into(),
+                clock::now_iso().into(),
+                harness.as_str().into(),
+                workspace.as_str().into(),
+            ],
+        )?;
+        log_event(c, "register", None, Some(name), &description)
+    })
+}
+
+/// One instance: its snapshot; several: one per instance under `by`. A
+/// `new` wait adds `since`, the mark of this answer.
+fn signal_answer(
+    done: bool,
+    mut snapshots: Vec<(String, Map<String, Json>)>,
+    mark: Option<Mark>,
+) -> Result<String, Error> {
+    let mut answer = Map::new();
+    answer.insert("signalled".into(), json!(done));
+    if snapshots.len() == 1 {
+        if let Some((_, snapshot)) = snapshots.pop() {
+            answer.extend(snapshot);
+        }
+    } else {
+        let by: Map<String, Json> = snapshots
+            .into_iter()
+            .map(|(name, snapshot)| (name, Json::Object(snapshot)))
+            .collect();
+        answer.insert("by".into(), Json::Object(by));
+    }
+    if let Some((event, seq)) = mark {
+        answer.insert("since".into(), json!(format!("{event}:{seq}")));
+    }
+    Ok(pytext::dumps(&answer)?)
 }
 
 fn presence_status(
@@ -818,13 +943,16 @@ impl Bus {
     }
 
     /// Claim the highest-priority queued task of one's queue under lease —
-    /// or one given queued task of one's own queue.
+    /// or one given queued task of one's own queue. `by` names the instance
+    /// claiming from a shared queue: the tasks it declined are skipped.
     pub fn claim_task(
         &self,
         agent: &str,
         lease_seconds: i64,
         task_id: Option<&str>,
+        by: &str,
     ) -> Result<String, Error> {
+        let by = fold(by);
         let deadline = clock::after(lease_seconds)?;
         let mut conn = self.connect()?;
         write(&mut conn, |c| -> Result<String, Error> {
@@ -837,9 +965,10 @@ impl Bus {
                 None => {
                     let rows = c.query(
                         "SELECT task_id, payload, priority, attempts, created_at FROM tasks \
-                         WHERE agent=? AND status='queued' \
+                         WHERE agent=? AND status='queued' AND task_id NOT IN \
+                         (SELECT task_id FROM declines WHERE agent=?) \
                          ORDER BY priority DESC, created_at ASC LIMIT 1",
-                        &[target.as_str().into()],
+                        &[target.as_str().into(), by.as_str().into()],
                     )?;
                     match rows.into_iter().next() {
                         Some(row) => row,
@@ -882,12 +1011,17 @@ impl Bus {
                 ],
             )?;
             let targeted = if task_id.is_some() { " (targeted)" } else { "" };
+            let acting = if !by.is_empty() && by != target {
+                format!(" by {by}")
+            } else {
+                String::new()
+            };
             log_event(
                 c,
                 "claim",
                 Some(&id),
                 Some(&target),
-                &format!("attempt {attempts}, lease until {deadline}{targeted}"),
+                &format!("attempt {attempts}, lease until {deadline}{targeted}{acting}"),
             )?;
             let mut answer = Map::new();
             answer.insert("task_id".into(), json!(id));
@@ -1034,6 +1168,110 @@ impl Bus {
                 &format!("was {status}; max_attempts re-armed to {rearmed}"),
             )?;
             Ok(format!("OK: task '{task_id}' requeued."))
+        })
+    }
+
+    /// Refuse a claimed task explicitly, with a reason: back to a machine's
+    /// general queue for the other agents (no attempt spent, `by` not
+    /// offered it again), settled as `declined` on any other queue.
+    pub fn decline_task(
+        &self,
+        agent: &str,
+        task_id: &str,
+        reason: &str,
+        attempt: Option<i64>,
+        by: &str,
+    ) -> Result<String, Error> {
+        let owner = fold(agent);
+        let by = if by.is_empty() { owner.clone() } else { fold(by) };
+        let reason = strip(reason);
+        if reason.is_empty() {
+            return Ok("ERROR: a refusal needs a reason.".to_owned());
+        }
+        if !is_valid_name(&by) || by == SYSTEM_AUTHOR {
+            return Ok(format!("ERROR: invalid refusing instance '{by}'."));
+        }
+        let mut conn = self.connect()?;
+        write(&mut conn, |c| -> Result<String, Error> {
+            let rows = c.query(
+                "SELECT agent, status, attempts FROM tasks WHERE task_id=?",
+                &[task_id.into()],
+            )?;
+            let Some(row) = rows.first() else {
+                return Ok(format!("ERROR: unknown task '{task_id}'."));
+            };
+            let queue = row.text("agent")?;
+            if queue != owner {
+                return Ok(format!(
+                    "ERROR: task '{task_id}' belongs to {queue}'s queue; '{owner}' cannot decline it."
+                ));
+            }
+            let status = row.text("status")?;
+            if status != "claimed" {
+                return Ok(format!(
+                    "ERROR: task '{task_id}' is not claimed (status: {status}) — claim it before \
+                     declining it."
+                ));
+            }
+            let current = row.int("attempts")?;
+            if let Some(attempt) = attempt.filter(|a| *a < current) {
+                return Ok(format!(
+                    "ERROR: stale attempt token {attempt} < {current} — the lease expired and task \
+                     '{task_id}' was re-offered."
+                ));
+            }
+            if is_machine_queue(&owner) {
+                c.execute(
+                    "UPDATE tasks SET status='queued', claimed_at=NULL, lease_deadline=NULL, \
+                     max_attempts=max_attempts+1 WHERE task_id=?",
+                    &[task_id.into()],
+                )?;
+                c.execute(
+                    "INSERT INTO declines(task_id, agent, at, reason) VALUES(?,?,?,?) \
+                     ON CONFLICT(task_id, agent) DO UPDATE SET at=excluded.at, \
+                     reason=excluded.reason",
+                    &[
+                        task_id.into(),
+                        by.as_str().into(),
+                        clock::now_iso().into(),
+                        reason.into(),
+                    ],
+                )?;
+                log_event(
+                    c,
+                    "decline",
+                    Some(task_id),
+                    Some(&owner),
+                    &format!("by {by}: {reason} — re-offered to the other agents"),
+                )?;
+                return Ok(format!(
+                    "OK: task '{task_id}' declined by {by} — back in {owner}'s queue."
+                ));
+            }
+            c.execute(
+                "INSERT INTO results(task_id, author, content, updated_at) VALUES(?,?,?,?) \
+                 ON CONFLICT(task_id) DO UPDATE SET author=excluded.author, \
+                 content=excluded.content, updated_at=excluded.updated_at",
+                &[
+                    task_id.into(),
+                    owner.as_str().into(),
+                    format!("DECLINED by {by}: {reason}").into(),
+                    clock::now_iso().into(),
+                ],
+            )?;
+            c.execute(
+                "UPDATE tasks SET status='declined', claimed_at=NULL, lease_deadline=NULL \
+                 WHERE task_id=?",
+                &[task_id.into()],
+            )?;
+            log_event(
+                c,
+                "decline",
+                Some(task_id),
+                Some(&owner),
+                &format!("by {by}: {reason}"),
+            )?;
+            Ok(format!("OK: task '{task_id}' declined by {by}."))
         })
     }
 
@@ -1541,40 +1779,74 @@ impl Bus {
             Ok(target) => target,
             Err(error) => return Ok(error),
         };
-        Ok(pytext::dumps(&pending(&mut conn, &target)?)?)
+        let watchers = [target.clone()];
+        Ok(pytext::dumps(&pending(&mut conn, &target, &watchers, None)?)?)
     }
 
-    /// Block until a task and/or an unread notification waits for the
-    /// instance; the snapshot with `signalled`.
+    /// Block until a task and/or an unread notification waits for one of
+    /// the instances (`a,b`; a machine's general queue is registered on
+    /// first watch); the snapshot with `signalled`. `new` ignores what
+    /// already waits and answers a `since` mark the next wait passes back.
     pub fn wait_signal(
         &self,
         agent: &str,
         kinds_text: &str,
         timeout: f64,
         interval: f64,
+        new: bool,
+        since: &str,
     ) -> Result<String, Error> {
         let wanted = match kinds(kinds_text) {
             Ok(wanted) => wanted,
             Err(error) => return Ok(error),
         };
-        if strip(agent).is_empty() {
+        let names = agent_list(agent);
+        if names.is_empty() {
             return Ok("ERROR: empty agent.".to_owned());
+        }
+        let mut mark = None;
+        if !since.is_empty() {
+            match parse_mark(since) {
+                Some(parsed) => mark = Some(parsed),
+                None => {
+                    return Ok(format!(
+                        "ERROR: since must be '<event id>:<notification seq>' (got '{since}')."
+                    ));
+                }
+            }
         }
         let interval = if interval.is_nan() { 0.2 } else { interval.max(0.2) };
         let deadline = wait_deadline(timeout);
         let mut conn = self.connect()?;
-        let target = match resolve_target(&mut conn, agent)? {
-            Ok(target) => target,
-            Err(error) => return Ok(error),
-        };
+        let mut targets: Vec<String> = Vec::new();
+        for name in &names {
+            ensure_machine_queue(&mut conn, name)?;
+            match resolve_target(&mut conn, name)? {
+                Ok(target) => {
+                    if !targets.contains(&target) {
+                        targets.push(target);
+                    }
+                }
+                Err(error) => return Ok(error),
+            }
+        }
+        if new && mark.is_none() {
+            mark = Some(current_mark(&mut conn)?);
+        }
         loop {
-            let snapshot = pending(&mut conn, &target)?;
-            let done = signalled(&snapshot, wanted);
+            // Read before the snapshot: what lands in between is reported
+            // now AND by the next wait, never by neither.
+            let upto = match mark {
+                Some(_) => Some(current_mark(&mut conn)?),
+                None => None,
+            };
+            let mut snapshots = Vec::with_capacity(targets.len());
+            for target in &targets {
+                snapshots.push((target.clone(), pending(&mut conn, target, &targets, mark)?));
+            }
+            let done = snapshots.iter().any(|(_, s)| signalled(s, wanted));
             if done || expired(deadline) {
-                let mut answer = Map::new();
-                answer.insert("signalled".into(), json!(done));
-                answer.extend(snapshot);
-                return Ok(pytext::dumps(&answer)?);
+                return signal_answer(done, snapshots, upto);
             }
             conn.pause(interval.min(remaining(deadline)))?;
         }

@@ -626,6 +626,12 @@ with tempfile.TemporaryDirectory() as tmp:
         check(f"another machine cannot {label} in an instance's name",
               out.startswith("ERROR") and "belongs to machine" in out, out)
     check("reads are not restricted", bus.read_result("h1").startswith("{"))
+    bus.register_agent("gamma@general", "gamma's general queue")
+    r = bus.claim_task("gamma@general", 60, None, "kimi@lab")
+    check("another machine's instance cannot be named as `by` of a claim",
+          r.startswith("ERROR") and "refused as `by`" in r, r)
+    r = bus.decline_task("gamma@general", "nothing", "no", None, "kimi@lab")
+    check("…nor of a refusal", r.startswith("ERROR") and "refused as `by`" in r, r)
     r = bus.register_agent("worker@gamma", "gamma's own")
     check("a machine registers its own instance", r.startswith("OK"), r)
     bus.push_task("worker@gamma", "g1", "x")

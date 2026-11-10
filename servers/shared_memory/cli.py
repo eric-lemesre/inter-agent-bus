@@ -227,18 +227,23 @@ def _pairing(args) -> int:
     return join.ping()
 
 
-def _watch(agent: str, timeout: float, interval: float, on: str) -> str:
+def _watch(agents: list[str], timeout: float, interval: float, on: str,
+           new: bool = False, since: str = "") -> str:
     """Supervisor primitive. `--on task` (default): task_ids one per line so
     a shell/timer unit can consume them without a JSON parser; silent empty
     output on timeout, exit 0 either way. `--on notification|any`: the
     signal snapshot as JSON (`signalled` tells timeout from arrival) — the
-    wake-up of an open interactive session run as a background task."""
+    wake-up of an open interactive session run as a background task, over
+    several queues and with `--new` if asked."""
     if on == "task":
-        out = bus.wait_for_task(agent, timeout, interval)
+        if len(agents) > 1 or new or since:
+            return ("ERROR: several agents, --new or --since need --on notification "
+                    "or --on any.")
+        out = bus.wait_for_task(agents[0], timeout, interval)
         if out.startswith("ERROR"):
             return out
         return "\n".join(json.loads(out))
-    return bus.wait_signal(agent, on, timeout, interval)
+    return bus.wait_signal(",".join(agents), on, timeout, interval, new, since)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -279,6 +284,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("agent")
     p.add_argument("--lease", type=int, default=900, metavar="SECONDS")
     p.add_argument("--task-id", help="claim this specific queued task of one's own queue")
+    p.add_argument("--by", default="", metavar="AGENT",
+                   help="the instance claiming from a machine's general queue: the "
+                        "tasks it declined are not offered to it again")
 
     p = sub.add_parser("publish", help="publish a task's result (settles the task)")
     p.add_argument("agent")
@@ -288,6 +296,17 @@ def main(argv: list[str] | None = None) -> int:
                    help="attempt number received at claim (lease fencing)")
     p.add_argument("--force", action="store_true",
                    help="orchestrator override of ownership and fencing checks")
+
+    p = sub.add_parser("decline", help="refuse a claimed task, with a reason: back to a "
+                                       "machine's general queue for another agent, "
+                                       "settled as declined elsewhere")
+    p.add_argument("agent", help="the queue the task was claimed from")
+    p.add_argument("task_id")
+    p.add_argument("--reason", required=True)
+    p.add_argument("--attempt", type=int,
+                   help="attempt number received at claim (lease fencing)")
+    p.add_argument("--by", default="", metavar="AGENT",
+                   help="the refusing instance (default: the queue's agent)")
 
     p = sub.add_parser("cancel", help="cancel a task that is not settled yet")
     p.add_argument("task_id")
@@ -349,10 +368,17 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--limit", type=int, default=100)
 
     p = sub.add_parser("watch",
-                       help="block until a signal lands for the agent: --on task (default) "
+                       help="block until a signal lands for the agent(s): --on task (default) "
                             "prints queued task_ids one per line; --on notification|any "
                             "prints the signal snapshot as JSON; exits 0 either way")
-    p.add_argument("agent")
+    p.add_argument("agent", nargs="+",
+                   help="one or several instances, e.g. yours and <machine>@general")
+    p.add_argument("--new", action="store_true",
+                   help="ignore what already waits when the wait starts (needs --on "
+                        "notification|any)")
+    p.add_argument("--since", default="", metavar="MARK",
+                   help="the `since` mark of the previous answer: wake only on what "
+                        "came after it (implies --new)")
     p.add_argument("--on", choices=["task", "notification", "any"], default="task",
                    help="which signal ends the wait (default: task)")
     p.add_argument("--timeout", type=float, default=300.0, metavar="SECONDS")
@@ -558,10 +584,13 @@ def main(argv: list[str] | None = None) -> int:
             args.agent, args.task_id, _content(args.payload), args.priority,
             args.max_attempts, not args.no_notify,
         ),
-        "watch": lambda: _watch(args.agent, args.timeout, args.interval, args.on),
+        "watch": lambda: _watch(args.agent, args.timeout, args.interval, args.on,
+                                args.new, args.since),
         "signals": lambda: bus.pending_signals(args.agent),
         "wake": lambda: wake.wake_agent(args.agent, dry_run=args.dry_run, host=args.host),
-        "claim": lambda: bus.claim_task(args.agent, args.lease, args.task_id),
+        "claim": lambda: bus.claim_task(args.agent, args.lease, args.task_id, args.by),
+        "decline": lambda: bus.decline_task(
+            args.agent, args.task_id, args.reason, args.attempt, args.by),
         "publish": lambda: bus.publish_result(
             args.agent, args.task_id, _content(args.content), args.attempt, args.force
         ),
